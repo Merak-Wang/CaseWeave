@@ -1,0 +1,39 @@
+{
+  "name": "@retrieval-agent/root",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "clean:build": "node scripts/clean-build.mjs",
+    "build": "pnpm clean:build && pnpm -r --if-present run build",
+    "typecheck": "pnpm build && pnpm -r --if-present run typecheck && tsc -p tsconfig.tests.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "graph:workspace": "node scripts/workspace-contracts.mjs --write",
+    "verify:workspace": "node scripts/workspace-contracts.mjs --check",
+    "verify:release": "node scripts/verify-release-closure.mjs",
+    "verify:install": "pnpm build && node scripts/verify-clean-install.mjs",
+    "verify": "pnpm verify:workspace && pnpm typecheck && pnpm test && pnpm verify:release",
+    "verify:all": "pnpm verify && pnpm eval:self-test && pnpm verify:install",
+    "eval:self-test": "uv run --project python/evals pytest python/evals/tests"
+  },
+  "devDependencies": {
+    "@retrieval-agent/bundle": "workspace:*",
+    "@retrieval-agent/contracts": "workspace:*",
+    "@retrieval-agent/domain": "workspace:*",
+    "@retrieval-agent/provider-local": "workspace:*",
+    "@retrieval-agent/product-api": "workspace:*",
+    "@retrieval-agent/product-host": "workspace:*",
+    "@retrieval-agent/ui-ticket-results": "workspace:*",
+    "@types/node": "22.20.0",
+    "@vitest/coverage-v8": "4.1.8",
+    "typescript": "6.0.3",
+    "tsdown": "0.22.2",
+    "vitest": "4.1.8"
+  }
+}

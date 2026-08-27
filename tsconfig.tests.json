@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": [
+    "packages/*/src/**/*.spec.ts",
+    "packages/*/src/**/*.spec.tsx",
+    "tests/**/*.spec.ts",
+    "tests/**/*.spec.tsx"
+  ]
+}

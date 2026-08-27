@@ -1,0 +1,11 @@
+# `retrieval-agent-install` places the preset in DSH's standard writable
+# `.agent-presets` root and fixture data under `retrieval-agent/data`.
+- insert:
+    - id: retrieval-product-host
+      name: '@retrieval-agent/product-host'
+    - id: retrieval-ticket-results-ui
+      name: '@retrieval-agent/ui-ticket-results'
+
+- id: agent-presets
+  config:
+    default: retrieval-agent

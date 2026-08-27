@@ -1,0 +1,5 @@
+[tool.uv.workspace]
+members = ["python/evals"]
+
+[tool.uv]
+package = false

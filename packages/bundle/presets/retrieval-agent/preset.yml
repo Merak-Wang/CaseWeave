@@ -1,0 +1,3 @@
+name: 只读工单检索
+description: 基于授权快照、渐进证据读取和确定性停止条件的单 Agent 工单检索。
+order: 20

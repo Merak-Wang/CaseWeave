@@ -1,0 +1,71 @@
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: |-
+      你是只读工单检索 Agent。只使用当前授权快照中的候选与证据回答；
+      遵循 allowedActions，证据不足、权限不足、快照失效或来源错误时明确停止，不得补造事实。
+    complete: false
+    includeRuntimeContext: false
+
+- id: retrieval-product
+  name: cordis:group
+  group: true
+  isolate:
+    ticketRetrievalProvider: true
+    ticketPrincipalProvider: true
+    retrievalAgent: true
+  config:
+    - id: fixture-principal
+      name: '@retrieval-agent/bundle/principal'
+      config:
+        tenantId: !!js process.env.RETRIEVAL_AGENT_TENANT_ID ?? 'demo'
+        subjectId: !!js process.env.RETRIEVAL_AGENT_SUBJECT_ID ?? 'demo-user'
+        entitlementVersion: !!js process.env.RETRIEVAL_AGENT_ENTITLEMENT_VERSION ?? 'fixture-entitlements-v1'
+        groups: [support]
+        regions: [cn]
+
+    - id: local-provider
+      name: '@retrieval-agent/bundle/provider'
+      config:
+        dataPath: !!js process.env.RETRIEVAL_AGENT_DATA_PATH ?? dshHomePath('retrieval-agent', 'data', 'tickets.jsonl')
+        providerId: local-fixture-v1
+        defaultRequestedCount: 5
+        maxRequestedCount: 20
+        snapshotTtlMs: 900000
+
+    - id: retrieval-agent
+      name: '@retrieval-agent/agent-plugin'
+      config:
+        maxRounds: 8
+        maxSearches: 4
+        maxPromotions: 3
+        maxEvidenceTokens: 1500
+        maxLatencyMs: 120000
+        noProgressLimit: 2
+        searchTopK: 8
+        searchMaxScan: 50000
+        contextTokenBudget: 1500
+        maxFinishReminders: 3
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+      config:
+        thresholdRatio: 0.7
+        retainTokens: 384
+        maxTokens: 256
+        compactionRetries: 1
+        maxOverflowRetries: 1
+        auto: true
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 6000
+        headChars: 3200
+        tailChars: 600

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://retrieval-agent.invalid/schema/workspace.schema.json",
+  "title": "Retrieval Agent workspace capability contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "packageScope",
+    "forbiddenGenericPackageNames",
+    "maxModuleLines",
+    "testConvention",
+    "protocolConvention",
+    "packages"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "packageScope": { "type": "string", "minLength": 1 },
+    "forbiddenGenericPackageNames": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "maxModuleLines": { "type": "integer", "minimum": 1 },
+    "testConvention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["packagePattern", "repositoryIntegrationRoot"],
+      "properties": {
+        "packagePattern": { "type": "string" },
+        "repositoryIntegrationRoot": { "type": "string" }
+      }
+    },
+    "protocolConvention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileName", "allowedExportedTypeSuffixes"],
+      "properties": {
+        "fileName": { "type": "string" },
+        "allowedExportedTypeSuffixes": { "type": "array", "items": { "type": "string" }, "minItems": 1, "uniqueItems": true }
+      }
+    },
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["directory", "name", "kind", "capability", "allowedInternalDependencies", "maxSourceLines"],
+        "properties": {
+          "directory": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "minLength": 1 },
+          "capability": { "type": "string", "minLength": 1 },
+          "allowedInternalDependencies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "maxSourceLines": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  }
+}
