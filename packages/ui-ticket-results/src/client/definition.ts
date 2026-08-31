@@ -1,9 +1,16 @@
 import type {
   ChatConversationViewNode,
+  ConversationMatch,
   ConversationNodeDefinition,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { RetrievalDomainEvent, RetrievalId } from '@retrieval-agent/contracts'
+import {
+  RETRIEVAL_PRESENTATION_EVENT_TYPE,
+  type RetrievalDomainEvent,
+  type RetrievalId,
+  type RetrievalPresentationAnchor,
+  type RetrievalPresentationPhase,
+} from '@retrieval-agent/contracts'
 import { projectTicketCandidateNode } from '../projection.js'
 
 interface CandidateConversationState {
@@ -24,11 +31,36 @@ function domainEvent(event: { readonly type: string; readonly data: unknown }): 
   return candidate as RetrievalDomainEvent
 }
 
+function presentationAnchor(
+  event: { readonly type: string; readonly data: unknown },
+): RetrievalPresentationAnchor | undefined {
+  if (event.type !== RETRIEVAL_PRESENTATION_EVENT_TYPE
+    || event.data === null
+    || typeof event.data !== 'object') return undefined
+  const candidate = event.data as Partial<RetrievalPresentationAnchor>
+  if (typeof candidate.retrievalId !== 'string'
+    || (candidate.phase !== 'candidates' && candidate.phase !== 'result')
+    || !Number.isSafeInteger(candidate.turn)) return undefined
+  return candidate as RetrievalPresentationAnchor
+}
+
+function presentationMatch(
+  matches: readonly ConversationMatch[],
+  phase: RetrievalPresentationPhase,
+): ConversationMatch | undefined {
+  return matches.findLast(match => {
+    const anchor = presentationAnchor(match.event)
+    return anchor?.phase === phase
+  })
+}
+
 /** Fold every required retrieval event family into one durable candidate node. */
 export const ticketCandidateDefinition: ConversationNodeDefinition<CandidateConversationState> = {
   kind: 'ticket-candidates',
   target: 'chat',
   match: (event) => {
+    const anchor = presentationAnchor(event)
+    if (anchor !== undefined) return { id: anchor.retrievalId, role: 'update' }
     const retrievalEvent = domainEvent(event)
     if (retrievalEvent === undefined) return null
     return {
@@ -50,15 +82,22 @@ export const ticketCandidateDefinition: ConversationNodeDefinition<CandidateConv
   },
   buildViewNode: (context): ChatConversationViewNode | null => {
     if (context.start === undefined || context.state === undefined) return null
+    const data = projectTicketCandidateNode(context.state.events, context.state.retrievalId)
+    const phase: RetrievalPresentationPhase = data.result === undefined ? 'candidates' : 'result'
+    const anchor = presentationMatch(context.matches, phase)
+    // Pre-step domain events intentionally arrive before the visible query.
+    // Publish nothing until Harness records the post-query candidate boundary;
+    // likewise hide terminal data until every parallel tool row has drained.
+    if (anchor === undefined) return null
     return {
       key: context.key,
       kind: 'ticket-candidates',
       id: context.id,
       target: 'chat',
-      anchorSeq: context.start.event.seq,
-      location: context.start.location,
+      anchorSeq: anchor.event.seq,
+      location: anchor.location,
       visibility: 'visible',
-      data: projectTicketCandidateNode(context.state.events, context.state.retrievalId),
+      data,
     }
   },
 }

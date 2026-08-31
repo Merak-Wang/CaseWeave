@@ -1,0 +1,29 @@
+{
+  "name": "@retrieval-agent/provider-streamcluster",
+  "version": "0.1.0",
+  "description": "Versioned read-only StreamCluster HTTP provider for Retrieval Agent",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./protocol": {
+      "types": "./lib/protocol.d.ts",
+      "default": "./lib/protocol.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@retrieval-agent/contracts": "workspace:*"
+  },
+  "publishConfig": { "access": "public" },
+  "license": "MIT"
+}

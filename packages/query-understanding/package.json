@@ -1,0 +1,20 @@
+{
+  "name": "@retrieval-agent/query-understanding",
+  "version": "0.1.0",
+  "description": "Deterministic direct-user query compilation into ticket retrieval contracts",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": { "@retrieval-agent/contracts": "workspace:*" },
+  "publishConfig": { "access": "public" },
+  "license": "MIT"
+}

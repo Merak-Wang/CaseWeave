@@ -1,0 +1,27 @@
+{
+  "datasetId": "legacy-bronze-v1",
+  "status": "development-baseline",
+  "labelMaturity": "bronze",
+  "caseCount": 162,
+  "splitCounts": { "train": 113, "dev": 28, "test": 21 },
+  "qrelCount": 160,
+  "sourceRecordCount": 40,
+  "sourceKind": "synthetic",
+  "seed": 20260825,
+  "sourceRepositoryPath": "deepseek-harness/examples/ticket-retrieval-agent",
+  "originalSourceSha256": "85197d1e33aa128ed06f645db9d41311cdeb5f4d92cb8083f9c55d77718bacdd",
+  "originalFullCasesSha256": "287fba5c18de72d75247593d59ad3921eed3bf076f61ece502e7c3e22d1e3fa6",
+  "migratedCasesSha256": "287fba5c18de72d75247593d59ad3921eed3bf076f61ece502e7c3e22d1e3fa6",
+  "migratedQrelsSha256": "a974b372ce421f996a89293a1557d852b566151c83f3283a316054154e454b7f",
+  "developmentFixtureSha256": "f6950eb58e398ecabf4fecf77d529a674afa6877d0229d943a2887017dce8bc8",
+  "developmentAuthorizationOverlay": {
+    "tenantId": "demo",
+    "requiredGroup": "admin",
+    "piiReviewState": "redacted-synthetic-fixture"
+  },
+  "limitations": [
+    "These cases are automatically generated Bronze labels, not user-confirmed Silver or Gold labels.",
+    "The source records are synthetic and do not establish production field semantics or security policy.",
+    "The development authorization overlay must not be reused as a production entitlement policy."
+  ]
+}

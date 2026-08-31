@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Retrieval Agent browser acceptance fixture</title>
+    <style>
+      body {
+        color-scheme: light;
+        --dsw-font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --dsw-font-l-20: 500 20px/28px var(--dsw-font-family);
+        --dsw-font-base-strong-16: 500 16px/24px var(--dsw-font-family);
+        --dsw-font-s-14: 14px/22px var(--dsw-font-family);
+        --dsw-font-xs-13: 13px/20px var(--dsw-font-family);
+        --dsw-alias-bg-base: #fff;
+        --dsw-alias-bg-layer-1: #fff;
+        --dsw-alias-bg-layer-2: #f5f6f7;
+        --dsw-alias-label-primary: #202127;
+        --dsw-alias-label-secondary: #4d5059;
+        --dsw-alias-label-tertiary: #777b86;
+        --dsw-alias-label-caption: #9b9da5;
+        --dsw-alias-border-l1: rgba(0, 0, 0, 0.04);
+        --dsw-alias-border-l2: rgba(0, 0, 0, 0.08);
+        --dsw-alias-state-business-primary: #4d6bfe;
+        --dsw-alias-state-error-primary: #e54949;
+        --dsw-alias-button-ghost-active-fill: rgba(0, 0, 0, 0.06);
+        --dsw-alias-button-ghost-active-border: rgba(0, 0, 0, 0.08);
+        --dsw-alias-interactive-bg-hover: rgba(0, 0, 0, 0.04);
+        --dsw-alias-interactive-bg-active: rgba(0, 0, 0, 0.08);
+      }
+      body[data-ds-dark-theme] {
+        color-scheme: dark;
+        --dsw-alias-bg-base: #151517;
+        --dsw-alias-bg-layer-1: #1d1d20;
+        --dsw-alias-bg-layer-2: #252529;
+        --dsw-alias-label-primary: #f3f3f4;
+        --dsw-alias-label-secondary: #c8c9ce;
+        --dsw-alias-label-tertiary: #999ca6;
+        --dsw-alias-label-caption: #777a84;
+        --dsw-alias-border-l1: rgba(255, 255, 255, 0.06);
+        --dsw-alias-border-l2: rgba(255, 255, 255, 0.1);
+        --dsw-alias-state-business-primary: #7f95ff;
+        --dsw-alias-state-error-primary: #ff7575;
+        --dsw-alias-button-ghost-active-fill: rgba(255, 255, 255, 0.08);
+        --dsw-alias-button-ghost-active-border: rgba(255, 255, 255, 0.1);
+        --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, 0.06);
+        --dsw-alias-interactive-bg-active: rgba(255, 255, 255, 0.1);
+      }
+      * { box-sizing: border-box; }
+      html, body, #root { min-height: 100%; margin: 0; }
+      body {
+        background: var(--dsw-alias-bg-base);
+        color: var(--dsw-alias-label-primary);
+        font-family: var(--dsw-font-family);
+      }
+      button { color: inherit; font: inherit; }
+      button:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
+      .fixture-page { width: 100%; min-width: 0; padding: 16px; }
+      .fixture-notice {
+        display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px;
+        max-width: 748px; margin: 0 auto 20px; color: var(--dsw-alias-label-caption); font: var(--dsw-font-xs-13);
+      }
+      .fixture-notice button {
+        border: 0; border-radius: 12px; padding: 2px 8px; cursor: pointer;
+        background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary);
+      }
+      .fixture-column { width: 100%; max-width: 748px; min-width: 0; margin: 0 auto; }
+      @media (max-width: 360px) { .fixture-page { padding: 12px; } }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>

@@ -22,20 +22,68 @@
       "maxSourceLines": 900
     },
     {
+      "directory": "query-understanding",
+      "name": "@retrieval-agent/query-understanding",
+      "kind": "query-compiler",
+      "capability": "把 direct-user 文本确定性编译为目标、检索文本、数量策略、类型化过滤和显式歧义；不调用模型或 Provider。",
+      "allowedInternalDependencies": ["@retrieval-agent/contracts"],
+      "maxSourceLines": 250
+    },
+    {
+      "directory": "retrieval-policy",
+      "name": "@retrieval-agent/retrieval-policy",
+      "kind": "domain-policy",
+      "capability": "验证结构化知识评估并导出唯一下一动作；从不可变观测重建可修订 active ranking。",
+      "allowedInternalDependencies": ["@retrieval-agent/contracts"],
+      "maxSourceLines": 400
+    },
+    {
+      "directory": "ticket-collection",
+      "name": "@retrieval-agent/ticket-collection",
+      "kind": "terminal-projection",
+      "capability": "从已停止领域状态确定性投影唯一 TicketResultCollection；不选择候选或生成自然语言。",
+      "allowedInternalDependencies": ["@retrieval-agent/contracts"],
+      "maxSourceLines": 100
+    },
+    {
       "directory": "domain",
       "name": "@retrieval-agent/domain",
       "kind": "domain",
       "capability": "确定性检索控制器、状态重放、查询收敛与证据上下文策略。",
-      "allowedInternalDependencies": ["@retrieval-agent/contracts"],
+      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/retrieval-policy"],
       "maxSourceLines": 1000
+    },
+    {
+      "directory": "model-service-client",
+      "name": "@retrieval-agent/model-service-client",
+      "kind": "model-client",
+      "capability": "本地模型数据面的版本化 HTTP 协议、握手、超时、取消、背压错误与响应校验。",
+      "allowedInternalDependencies": [],
+      "maxSourceLines": 650
+    },
+    {
+      "directory": "retrieval-ranking",
+      "name": "@retrieval-agent/retrieval-ranking",
+      "kind": "retrieval-algorithm",
+      "capability": "BM25F、稠密向量、加权 RRF、向量缓存和可选重排；不读取来源或执行授权。",
+      "allowedInternalDependencies": ["@retrieval-agent/model-service-client"],
+      "maxSourceLines": 1500
     },
     {
       "directory": "provider-local",
       "name": "@retrieval-agent/provider-local",
       "kind": "provider",
-      "capability": "默认拒绝授权的本地只读 Provider 与确定性 fixture 检索。",
+      "capability": "开发期只读 Provider、来源适配、动态字段目录、受控 raw 读取与确定性检索。",
+      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/retrieval-ranking"],
+      "maxSourceLines": 950
+    },
+    {
+      "directory": "provider-streamcluster",
+      "name": "@retrieval-agent/provider-streamcluster",
+      "kind": "provider",
+      "capability": "版本化 StreamCluster 只读 HTTP 契约、远端授权传递、超时取消与结构化错误映射。",
       "allowedInternalDependencies": ["@retrieval-agent/contracts"],
-      "maxSourceLines": 850
+      "maxSourceLines": 1050
     },
     {
       "directory": "product-api",
@@ -50,8 +98,16 @@
       "name": "@retrieval-agent/ui-ticket-results",
       "kind": "ui",
       "capability": "从持久化事件投影候选节点，并注册 DSH 客户端 renderer。",
-      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/product-api"],
+      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/ticket-collection"],
       "maxSourceLines": 1050
+    },
+    {
+      "directory": "ui-product-shell",
+      "name": "@retrieval-agent/ui-product-shell",
+      "kind": "ui-shell",
+      "capability": "保留原生 DSH 外壳，仅通过公共 slot 提供会话头工单导出入口。",
+      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/product-api"],
+      "maxSourceLines": 750
     },
     {
       "directory": "product-host",
@@ -81,7 +137,9 @@
       "allowedInternalDependencies": [
         "@retrieval-agent/contracts",
         "@retrieval-agent/domain",
-        "@retrieval-agent/dsh-compat"
+        "@retrieval-agent/dsh-compat",
+        "@retrieval-agent/query-understanding",
+        "@retrieval-agent/ticket-collection"
       ],
       "maxSourceLines": 1200
     },
@@ -93,10 +151,17 @@
       "allowedInternalDependencies": [
         "@retrieval-agent/contracts",
         "@retrieval-agent/domain",
+        "@retrieval-agent/model-service-client",
+        "@retrieval-agent/query-understanding",
+        "@retrieval-agent/retrieval-ranking",
+        "@retrieval-agent/retrieval-policy",
+        "@retrieval-agent/ticket-collection",
         "@retrieval-agent/provider-local",
+        "@retrieval-agent/provider-streamcluster",
         "@retrieval-agent/product-api",
         "@retrieval-agent/product-host",
         "@retrieval-agent/ui-ticket-results",
+        "@retrieval-agent/ui-product-shell",
         "@retrieval-agent/dsh-compat",
         "@retrieval-agent/agent-plugin"
       ],

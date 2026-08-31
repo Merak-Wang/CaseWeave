@@ -1,4 +1,5 @@
 import type { TicketCandidateRef, TicketSnapshotId } from './brand.js'
+import type { TicketSearchStage } from './ranking.js'
 import type {
   TicketDetailResult,
   TicketEvidenceField,
@@ -31,6 +32,7 @@ export interface TicketSearchOptions extends ProviderCallOptions {
   readonly topK: number
   readonly maxScan: number
   readonly cursor?: string
+  readonly stage: TicketSearchStage
 }
 
 export interface EvidenceReadRequest {

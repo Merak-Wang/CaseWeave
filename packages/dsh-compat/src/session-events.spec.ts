@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { KNOWN_SESSION_EVENT_TYPES, Session, SessionId } from '@deepseek-ai/dsh-session'
-import { REQUIRED_RETRIEVAL_EVENT_TYPES, RetrievalId, makeRetrievalEvent } from '@retrieval-agent/contracts'
+import {
+  REQUIRED_RETRIEVAL_EVENT_TYPES,
+  RETRIEVAL_PRESENTATION_EVENT_TYPE,
+  RetrievalId,
+  makeRetrievalEvent,
+} from '@retrieval-agent/contracts'
 import {
   PINNED_DSH_SESSION_VERSION,
+  appendRetrievalPresentationAnchor,
   appendRetrievalSessionEvent,
   assertCompatibleDshVersion,
   installDshSessionCompatibility,
@@ -21,6 +27,7 @@ describe('DSH Session compatibility boundary', () => {
     expect(first.packageVersion).toBe(PINNED_DSH_SESSION_VERSION)
     expect(second.newlyRegisteredEventTypes).toEqual([])
     expect(REQUIRED_RETRIEVAL_EVENT_TYPES.every(type => KNOWN_SESSION_EVENT_TYPES.has(type))).toBe(true)
+    expect(KNOWN_SESSION_EVENT_TYPES.has(RETRIEVAL_PRESENTATION_EVENT_TYPE)).toBe(true)
   })
 
   it('round-trips the complete typed domain envelope through a detached Session', () => {
@@ -40,5 +47,24 @@ describe('DSH Session compatibility boundary', () => {
     expect(readRetrievalSessionEvents(session)).toEqual([event])
     expect(session.events[0]).toMatchObject({ type: 'retrieval/stopped', data: { event } })
     expect(Object.isFrozen(session.events[0]?.data)).toBe(true)
+  })
+
+  it('records each presentation phase once without polluting domain replay', () => {
+    installDshSessionCompatibility()
+    const session = Session.create(SessionId('retrieval-presentation-session'))
+    const retrievalId = RetrievalId('retrieval-presentation')
+    appendRetrievalPresentationAnchor(session, { retrievalId, phase: 'candidates', turn: 1, step: 1 })
+    appendRetrievalPresentationAnchor(session, { retrievalId, phase: 'candidates', turn: 1, step: 2 })
+    appendRetrievalPresentationAnchor(session, { retrievalId, phase: 'result', turn: 1 })
+
+    expect(session.events.map(event => event.type)).toEqual([
+      RETRIEVAL_PRESENTATION_EVENT_TYPE,
+      RETRIEVAL_PRESENTATION_EVENT_TYPE,
+    ])
+    expect(session.events.map(event => event.data)).toEqual([
+      { retrievalId, phase: 'candidates', turn: 1, step: 1 },
+      { retrievalId, phase: 'result', turn: 1 },
+    ])
+    expect(readRetrievalSessionEvents(session)).toEqual([])
   })
 })

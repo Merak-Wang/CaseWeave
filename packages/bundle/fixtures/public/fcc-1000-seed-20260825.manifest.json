@@ -1,0 +1,53 @@
+{
+  "capture": {
+    "excluded_direct_identifier_fields": [
+      "caller_id_number",
+      "city",
+      "consumer_city",
+      "consumer_phone_number",
+      "location_1",
+      "zip"
+    ],
+    "ordered_by": ":id",
+    "sampled_offsets": [
+      199231,
+      310369,
+      575852,
+      691772,
+      1052563,
+      1265430,
+      1368985,
+      1686317,
+      1910500,
+      2102119,
+      2364587,
+      2677849,
+      2779721,
+      2970425,
+      3193079,
+      3546685
+    ],
+    "total_row_count_at_capture": 3629766
+  },
+  "integrity": {
+    "normalized_sha256": "523d962be0bff67ed7916da0310f06cb122db4b2c26d1df9affc63ece74bf53d",
+    "raw_sha256": "d11c0b08145540ad841f6f9230790e76f9d8d04f0f5531ae28ca7b6108f211d0"
+  },
+  "normalization_schema_version": 1,
+  "normalized_snapshot_path": ".cache/ticket-retrieval/datasets/fcc-1000-seed-20260825.jsonl",
+  "raw_snapshot_path": ".cache/ticket-retrieval/raw/fcc-1000-seed-20260825.jsonl",
+  "sampling": {
+    "algorithm": "seeded-stratified-windows-over-ordered-api",
+    "requested_limit": 1000,
+    "returned_count": 1000,
+    "seed": 20260825
+  },
+  "source": {
+    "dataset_id": "fcc/consumer-complaints-data",
+    "dataset_version": "socrata-live-capture",
+    "license": "US Government Work / Public Domain",
+    "license_url": "https://www.usa.gov/government-copyright",
+    "source_kind": "real",
+    "url": "https://opendata.fcc.gov/resource/3xyp-aqkj.json"
+  }
+}

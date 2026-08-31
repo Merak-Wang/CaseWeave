@@ -1,0 +1,248 @@
+import type {
+  RetrievalId,
+  RetrievalStateId,
+  TicketCandidateRef,
+  TicketEvidenceId,
+} from './brand.js'
+import type { TicketSearchStage } from './ranking.js'
+import type {
+  TicketCandidate,
+  TicketCountPolicy,
+  TicketEvidenceField,
+  TicketEvidenceSegment,
+  TicketFilter,
+  TicketRetrievalSpec,
+  TicketSearchPage,
+  TicketSnapshot,
+  TicketTaskTarget,
+} from './types.js'
+
+export interface RetrievalTaskContract {
+  readonly target: TicketTaskTarget
+  /** Explicit result count or adaptive upper bound, according to countPolicy. */
+  readonly requestedCount: number
+  readonly countPolicy: TicketCountPolicy
+  readonly answerabilityPolicy: 'current_snapshot_evidence_only'
+  readonly completenessRequirement: 'top_k' | 'exhaustive'
+}
+
+export type RetrievalPhase = 'created' | 'snapshot_opened' | 'assessed' | 'awaiting_clarification' | 'frozen' | 'stopped'
+
+export type RetrievalGapKind = 'coverage' | 'constraint' | 'depth' | 'boundary' | 'ambiguity' | 'conflict' | 'version_or_prior'
+
+export interface RetrievalGap {
+  readonly kind: RetrievalGapKind
+  readonly status: 'open' | 'resolved' | 'not_applicable' | 'unknown'
+  readonly evidenceRefs: readonly string[]
+  readonly evaluator: 'system' | 'model'
+  readonly description?: string
+}
+
+export type RetrievalKnowledgeDecision = 'sufficient' | 'no_result' | 'needs_clarification' | 'partial' | 'continue'
+export type RetrievalNextAction = 'finish' | 'continue_ranking' | 'keyword_search' | 'vector_search' | 'promote' | 'clarify'
+
+/** Strict semantic judgment proposed by the model and admitted by Harness. */
+export interface RetrievalKnowledgeAssessment {
+  readonly decision: RetrievalKnowledgeDecision
+  readonly coverage: number
+  readonly candidateQuality: number
+  readonly selectedCandidateRefs: readonly TicketCandidateRef[]
+  readonly excludedCandidateRefs: readonly TicketCandidateRef[]
+  readonly gaps: readonly RetrievalGap[]
+  readonly nextAction: RetrievalNextAction
+  readonly stop: boolean
+  readonly model?: string
+}
+
+/** One immutable ranking observation; active ranking is derived across observations. */
+export interface RetrievalRankingObservation {
+  readonly searchEventId: string
+  readonly stage: TicketSearchStage
+  readonly queryFingerprint: string
+  readonly ranking: readonly { readonly ref: TicketCandidateRef; readonly rank: number }[]
+}
+
+export type RetrievalActionKind =
+  | 'search'
+  | 'search_next'
+  | 'repair_search'
+  | 'assess'
+  | 'promote'
+  | 'request_clarification'
+  | 'answer_clarification'
+  | 'freeze'
+  | 'stop'
+  | 'read_state'
+
+export interface RetrievalAllowedAction {
+  readonly kind: RetrievalActionKind
+  readonly candidateAllowlist: readonly TicketCandidateRef[]
+  readonly fieldAllowlist: readonly TicketEvidenceField[]
+  readonly maxTokens: number
+}
+
+export interface RetrievalBudgetState {
+  readonly maxRounds: number
+  readonly maxSearches: number
+  readonly maxPromotions: number
+  readonly maxEvidenceTokens: number
+  readonly maxLatencyMs: number
+  readonly roundsUsed: number
+  readonly searchesUsed: number
+  readonly promotionsUsed: number
+  readonly evidenceTokensUsed: number
+  readonly latencyMs: number
+}
+
+export interface RetrievalProgressState {
+  readonly newCandidateRefs: readonly TicketCandidateRef[]
+  readonly rankOverlap: number
+  readonly newDecisiveEvidence: boolean
+  readonly resolvedGaps: readonly RetrievalGapKind[]
+  readonly noProgressStreak: number
+}
+
+export type RetrievalTermination =
+  | 'active'
+  | 'sufficient'
+  | 'no_result'
+  | 'needs_clarification'
+  | 'partial'
+  | 'budget_exhausted'
+  | 'permission_blocked'
+  | 'backend_error'
+  | 'snapshot_invalid'
+  | 'cancelled'
+
+export interface RetrievalStateProvenance {
+  readonly rulesVersion: string
+  readonly promptVersion: string
+  readonly contextPolicyVersion: string
+  readonly model?: string
+  readonly sourceEventIds: readonly string[]
+}
+
+export interface FrozenEvidencePack {
+  readonly packId: string
+  readonly retrievalId: RetrievalId
+  readonly query: { readonly original: string; readonly normalized: string }
+  readonly target: TicketTaskTarget
+  readonly confirmedConstraints: readonly TicketFilter[]
+  readonly snapshot: TicketSnapshot
+  readonly candidates: readonly {
+    readonly ref: TicketCandidateRef
+    readonly displayId: string
+    readonly sourceVersion: string
+    readonly contentHash: string
+    readonly evidenceLevel: 'L1' | 'L2'
+    readonly evidenceIds: readonly TicketEvidenceId[]
+  }[]
+  readonly stoppingReason: Exclude<RetrievalTermination, 'active' | 'needs_clarification'>
+  readonly remainingGaps: readonly RetrievalGap[]
+  readonly budget: RetrievalBudgetState
+  readonly complete: boolean
+  readonly providerId: string
+  readonly promptVersion: string
+}
+
+/**
+ * The only terminal product value. It is a deterministic collection, never a
+ * model-authored natural-language answer. `tickets` is the exact frozen
+ * allowlist (or empty when the retrieval stopped before a set could be frozen).
+ */
+export interface TicketResultCollection {
+  readonly type: 'ticket_collection'
+  readonly schemaVersion: 1
+  readonly retrievalId: RetrievalId
+  readonly packId?: string
+  readonly query: string
+  readonly target: TicketTaskTarget
+  readonly snapshotShortId?: string
+  readonly stoppingReason: Exclude<RetrievalTermination, 'active' | 'needs_clarification'>
+  readonly complete: boolean
+  readonly tickets: readonly TicketCandidate[]
+  readonly evidence: readonly TicketEvidenceSegment[]
+  readonly remainingGapKinds: readonly RetrievalGapKind[]
+}
+
+/** Complete domain state, reconstructable from versioned events. */
+export interface RetrievalState {
+  readonly retrievalId: RetrievalId
+  readonly stateId: RetrievalStateId
+  readonly previousStateId?: RetrievalStateId
+  readonly revision: number
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly phase: RetrievalPhase
+  readonly task: RetrievalTaskContract
+  readonly principalBindingHash: string
+  readonly snapshot?: TicketSnapshot
+  readonly query: {
+    readonly original: string
+    readonly spec: TicketRetrievalSpec
+    readonly confirmedConstraints: readonly TicketFilter[]
+    readonly unresolvedConstraints: readonly string[]
+  }
+  readonly candidates: readonly TicketCandidate[]
+  /** Append-only acquisition history, distinct from the revisable active ranking. */
+  readonly candidateHistory: readonly TicketCandidate[]
+  readonly rankingHistory: readonly RetrievalRankingObservation[]
+  readonly excludedCandidateRefs: readonly TicketCandidateRef[]
+  readonly selectedCandidateRefs: readonly TicketCandidateRef[]
+  readonly lastAssessment?: RetrievalKnowledgeAssessment | undefined
+  readonly lastPage?: TicketSearchPage
+  readonly promotedEvidence: readonly TicketEvidenceSegment[]
+  readonly gaps: readonly RetrievalGap[]
+  readonly allowedActions: readonly RetrievalAllowedAction[]
+  readonly budget: RetrievalBudgetState
+  readonly progress: RetrievalProgressState
+  readonly termination: RetrievalTermination
+  readonly clarification?: {
+    readonly facet: string
+    readonly question: string
+    readonly candidateRefs: readonly TicketCandidateRef[]
+    readonly answer?: string
+  }
+  readonly frozenEvidence?: FrozenEvidencePack
+  readonly provenance: RetrievalStateProvenance
+}
+
+export interface EvidenceContextSelection {
+  readonly retrievalId: RetrievalId
+  readonly stateId: RetrievalStateId
+  readonly policyVersion: string
+  readonly includedCandidateRefs: readonly TicketCandidateRef[]
+  readonly includedEvidenceIds: readonly TicketEvidenceId[]
+  readonly excluded: readonly { readonly ref: string; readonly reason: 'unauthorized' | 'not_selected' | 'superseded' | 'token_budget' | 'unread' }[]
+  readonly tokenBudget: number
+  readonly estimatedTokens: number
+  readonly rendered: string
+}
+
+/** Public export metadata. CSV bytes remain a Host response, not a Session fact. */
+export interface CandidateExportReceipt {
+  readonly exportId: string
+  readonly retrievalId: RetrievalId
+  readonly snapshotShortId: string
+  readonly generatedAt: string
+  readonly rowCount: number
+  readonly fields: readonly string[]
+  readonly contentSha256: string
+  readonly auditId: string
+}
+
+/** Candidate node is a deterministic UI projection, never model-authored Markdown. */
+export interface TicketCandidateNode {
+  readonly retrievalId: RetrievalId
+  readonly version: number
+  readonly querySummary: string
+  readonly snapshotShortId?: string
+  readonly completeness: 'pending' | TicketSearchPage['completeness']
+  readonly status: 'searching' | 'results' | 'empty' | 'partial' | 'snapshot_invalid' | 'permission_blocked' | 'error' | 'stopped'
+  readonly candidates: readonly TicketCandidate[]
+  readonly alreadyReadEvidence: readonly TicketEvidenceSegment[]
+  readonly message?: string
+  readonly exportEnabled: boolean
+  /** Present only after the retrieval has reached a terminal product value. */
+  readonly result?: TicketResultCollection
+}

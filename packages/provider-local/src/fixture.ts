@@ -25,6 +25,18 @@ export function normalizeFixtureTicket(input: FixtureTicketInput): NormalizedTic
     conversationOrUpdates: [...input.conversationOrUpdates],
     resolutionSteps: [...input.resolutionSteps],
     errorCodes: [...input.errorCodes],
+    ...(input.searchText === undefined ? {} : { searchText: [...input.searchText] }),
+    ...(input.additionalFields === undefined ? {} : { additionalFields: input.additionalFields.map(field => ({ ...field })) }),
+    ...(input.filterValues === undefined ? {} : {
+      filterValues: Object.fromEntries(Object.entries(input.filterValues).map(([key, value]) => [key, typeof value === 'string' ? value : [...value]])),
+    }),
+    ...(input.additionalEvidence === undefined ? {} : {
+      additionalEvidence: Object.fromEntries(Object.entries(input.additionalEvidence).map(([key, values]) => [key, [...values]])),
+    }),
+    ...(input.fieldCatalog === undefined ? {} : { fieldCatalog: input.fieldCatalog.map(field => ({ ...field, filterOperators: [...field.filterOperators] })) }),
+    ...(input.rawSource === undefined ? {} : {
+      rawSource: { ...input.rawSource, payload: { ...input.rawSource.payload } },
+    }),
   }
   const contentHash = input.contentHash ?? sha256(stableJson(base))
   return { ...base, contentHash }

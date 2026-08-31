@@ -1,8 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-workspace'
 import {
   RetrievalError,
   RetrievalId,
@@ -99,17 +101,27 @@ function writeJson(response: ServerResponse, status: number, body: ExportCandida
 
 /** Resolve an untrusted wire request through the live Agent's trusted services. */
 export async function exportCandidatesForAgent(
+  ctx: Context,
   agent: Agent,
   params: ExportCandidatesParams,
   audit: ExportAuditSink,
   signal?: AbortSignal,
 ): Promise<ExportCandidatesResponse> {
-  const state = agent.ctx.retrievalAgent.currentOrUndefined(agent)
+  const retrievalAgent = ctx.agentPresets.serviceFor(agent, 'retrievalAgent')
+  const provider = ctx.agentPresets.serviceFor(agent, 'ticketRetrievalProvider')
+  if (retrievalAgent === undefined || provider === undefined) {
+    throw new RetrievalError(
+      'PROVIDER_UNAVAILABLE',
+      '当前会话未加载工单检索能力，请重新打开会话后重试。',
+      { retryable: true },
+    )
+  }
+  const state = retrievalAgent.currentOrUndefined(agent)
   if (state === undefined || state.retrievalId !== params.retrievalId) {
     throw new RetrievalError('INVALID_REQUEST', '当前会话没有对应的检索结果。')
   }
-  const principal = await agent.ctx.retrievalAgent.principal(agent, 'export', signal)
-  const exported = await new CandidateExportService(agent.ctx.ticketRetrievalProvider, audit)
+  const principal = await retrievalAgent.principal(agent, 'export', signal)
+  const exported = await new CandidateExportService(provider, audit)
     .exportCsv(principal, state, params.candidateRefs, signal)
   return {
     fileName: exported.fileName,
@@ -120,10 +132,20 @@ export async function exportCandidatesForAgent(
 }
 
 export const name = 'retrieval-product-host'
-export const inject = ['webServer', 'agents']
+export const inject = ['webServer', 'agents', 'agentPresets', 'workspaceRegistry']
 
-/** Register the same-origin fixture export route without changing the DSH Agent loop. */
-export function apply(ctx: Context): void {
+export interface Config {
+  /** Existing product-owned directory adopted as the default DSH workspace. */
+  readonly workspacePath?: string
+}
+
+/** Seed the product workspace and register the export route without changing the DSH Agent loop. */
+export async function apply(ctx: Context, config: Config = {}): Promise<void> {
+  if (config.workspacePath !== undefined) {
+    const workspacePath = config.workspacePath.trim()
+    if (workspacePath.length === 0) throw new Error('retrieval-product-host workspacePath must not be empty')
+    await ctx.workspaceRegistry.create(workspacePath, '工单检索')
+  }
   const audit = new InMemoryExportAuditSink()
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -148,7 +170,7 @@ export function apply(ctx: Context): void {
           writeJson(response, 409, { code: 'SESSION_NOT_ACTIVE', message: '会话当前不可用，请重新打开后重试。', retryable: true })
           return
         }
-        writeJson(response, 200, await exportCandidatesForAgent(agent, params, audit, abort.signal))
+        writeJson(response, 200, await exportCandidatesForAgent(ctx, agent, params, audit, abort.signal))
       } catch (error) {
         if (error instanceof RetrievalError) {
           writeJson(response, statusOf(error), { code: error.code, message: error.publicMessage, retryable: error.retryable })

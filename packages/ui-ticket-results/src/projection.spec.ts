@@ -17,17 +17,18 @@ function state(termination: RetrievalState['termination']): RetrievalState {
     createdAt: '2026-08-27T00:00:00.000Z',
     updatedAt: '2026-08-27T00:00:00.000Z',
     phase: termination === 'active' ? 'assessed' : 'stopped',
-    task: { target: 'ranked_cases', requestedCount: 5, answerabilityPolicy: 'current_snapshot_evidence_only', completenessRequirement: 'top_k' },
+    task: { target: 'ranked_cases', requestedCount: 5, countPolicy: 'explicit', answerabilityPolicy: 'current_snapshot_evidence_only', completenessRequirement: 'top_k' },
     principalBindingHash: 'principal-hash',
     query: {
       original: '登录失败',
       spec: {
         target: 'ranked_cases', originalQuery: '登录失败', normalizedQuery: '登录失败', requestedCount: 5,
-        mode: 'keyword', filters: [], excludedTerms: [], semanticHints: [], compilerVersion: 'test',
+        countPolicy: 'explicit', mode: 'keyword', filters: [], ambiguities: [], excludedTerms: [], semanticHints: [], compilerVersion: 'test',
       },
       confirmedConstraints: [], unresolvedConstraints: [],
     },
-    candidates: [], promotedEvidence: [], gaps: [], allowedActions: [],
+    candidates: [], candidateHistory: [], rankingHistory: [], excludedCandidateRefs: [], selectedCandidateRefs: [],
+    lastAssessment: undefined, promotedEvidence: [], gaps: [], allowedActions: [],
     budget: {
       maxRounds: 8, maxSearches: 4, maxPromotions: 3, maxEvidenceTokens: 1000, maxLatencyMs: 10000,
       roundsUsed: 1, searchesUsed: 1, promotionsUsed: 0, evidenceTokensUsed: 0, latencyMs: 1,
@@ -46,6 +47,27 @@ describe('candidate node projection', () => {
     })
     expect(projectTicketCandidateNode([event], retrievalId)).toMatchObject({
       status: 'empty', querySummary: '登录失败', candidates: [], exportEnabled: false,
+    })
+  })
+
+  it('renders an accepted structured clarification instead of model prose', () => {
+    const awaiting = {
+      ...state('needs_clarification'),
+      phase: 'awaiting_clarification' as const,
+      clarification: {
+        facet: 'category',
+        question: '您要查认证类还是计费类工单？',
+        candidateRefs: [],
+      },
+    }
+    const event = makeRetrievalEvent({
+      eventId: 'event-clarification', retrievalId, sequence: 1, occurredAt: '2026-08-27T00:00:01.000Z',
+      type: 'retrieval/state-recorded', data: { state: awaiting },
+    })
+
+    expect(projectTicketCandidateNode([event], retrievalId)).toMatchObject({
+      status: 'searching',
+      message: '您要查认证类还是计费类工单？',
     })
   })
 })

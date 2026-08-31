@@ -6,6 +6,7 @@ describe('ticket filter runtime validation', () => {
     expect(() => assertTicketFilter({ field: 'status', op: 'eq', value: '已解决' })).not.toThrow()
     expect(() => assertTicketFilter({ field: 'createdAt', op: 'gte', value: '2026-08-01T00:00:00.000Z' })).not.toThrow()
     expect(() => assertTicketFilter({ field: 'errorCodes', op: 'contains', value: 'AUTH-1' })).not.toThrow()
+    expect(() => assertTicketFilter({ field: 'source.queue', op: 'eq', value: 'Wireless' })).not.toThrow()
 
     expect(() => assertTicketFilter({ field: 'status', op: 'gte', value: 'P1' } as never)).toThrow(/eq\/neq/u)
     expect(() => assertTicketFilter({ field: 'createdAt', op: 'eq', value: '2026-08-01' } as never)).toThrow(/gte\/lte/u)

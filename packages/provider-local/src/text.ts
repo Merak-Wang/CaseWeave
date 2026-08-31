@@ -1,23 +1,4 @@
-const WORD = /[\p{L}\p{N}]+/gu
-
-/** Deterministic NFKC tokenization with CJK unigrams/bigrams and word tokens. */
-export function tokenize(input: string): string[] {
-  const normalized = input.normalize('NFKC').toLocaleLowerCase('zh-CN')
-  const tokens: string[] = []
-  for (const match of normalized.matchAll(WORD)) {
-    const value = match[0]
-    if (/^[\p{Script=Han}]+$/u.test(value)) {
-      const chars = [...value]
-      tokens.push(...chars)
-      for (let index = 0; index + 1 < chars.length; index += 1) {
-        tokens.push(`${chars[index]}${chars[index + 1]}`)
-      }
-    } else {
-      tokens.push(value)
-    }
-  }
-  return tokens
-}
+export { tokenizeRankingText as tokenize } from '@retrieval-agent/retrieval-ranking'
 export function estimateTokens(input: string): number {
   if (input.length === 0) return 0
   const cjk = [...input].filter(character => /\p{Script=Han}/u.test(character)).length

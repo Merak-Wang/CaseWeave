@@ -1,4 +1,7 @@
 export * from './fixture.js'
+export * from './fields.js'
 export * from './hash.js'
 export * from './provider.js'
+export * from './search-projection.js'
+export * from './source.js'
 export * from './text.js'

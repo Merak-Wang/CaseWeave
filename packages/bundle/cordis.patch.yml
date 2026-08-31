@@ -3,9 +3,33 @@
 - insert:
     - id: retrieval-product-host
       name: '@retrieval-agent/product-host'
+      config:
+        workspacePath: !!js dshHomePath('retrieval-agent', 'workspace')
     - id: retrieval-ticket-results-ui
       name: '@retrieval-agent/ui-ticket-results'
+    - id: retrieval-product-shell-ui
+      name: '@retrieval-agent/ui-product-shell'
 
 - id: agent-presets
   config:
     default: retrieval-agent
+
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+        name: 只读
+        description: 只允许读取工作区；工单数据权限仍由 Retrieval Agent Provider 独立执行。
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+        name: 工作区写入
+        description: 允许通用 DSH 工具写入工作区；不会扩大工单数据权限。
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+        name: 完全文件访问
+        description: 取消文件沙箱；不会扩大工单数据权限。
+    defaultPreset: read-only

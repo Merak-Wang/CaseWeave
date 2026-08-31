@@ -18,7 +18,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@retrieval-agent/contracts": "workspace:*"
+    "@retrieval-agent/contracts": "workspace:*",
+    "@retrieval-agent/retrieval-policy": "workspace:*"
   },
   "publishConfig": { "access": "public" },
   "license": "MIT"

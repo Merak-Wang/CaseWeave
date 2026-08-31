@@ -1,0 +1,27 @@
+{
+  "capture": {
+    "eligible_row_count": 26000,
+    "full_row_count": 26000
+  },
+  "integrity": {
+    "normalized_sha256": "99c1d460c778d402113cddbdc31a615f9b564c66b1e5f0b4e11c34371ecd3301",
+    "raw_sha256": "0905820a880783d1a00f92d4f519488479f9eefe770cbfb5737f9462135d6c12"
+  },
+  "normalization_schema_version": 1,
+  "normalized_snapshot_path": ".cache/ticket-retrieval/datasets/bitext-1000-seed-20260825.jsonl",
+  "raw_snapshot_path": ".cache/ticket-retrieval/raw/bitext-1000-seed-20260825.csv",
+  "sampling": {
+    "algorithm": "seeded-reservoir-over-complete-csv",
+    "requested_limit": 1000,
+    "returned_count": 1000,
+    "seed": 20260825
+  },
+  "source": {
+    "dataset_id": "bitext/Bitext-telco-llm-chatbot-training-dataset",
+    "dataset_version": "eacc593a96d75ec6da0887f081ff0dfc442fccab",
+    "license": "CDLA-Sharing-1.0",
+    "license_url": "https://cdla.dev/sharing-1-0/",
+    "source_kind": "hybrid_synthetic",
+    "url": "https://huggingface.co/datasets/bitext/Bitext-telco-llm-chatbot-training-dataset/resolve/eacc593a96d75ec6da0887f081ff0dfc442fccab/bitext-telco-llm-chatbot-training-dataset.csv?download=true"
+  }
+}

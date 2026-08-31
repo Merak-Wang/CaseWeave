@@ -7,6 +7,8 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export interface InstallReceipt {
   readonly presetRoot: string
   readonly dataPath: string
+  readonly dataRoot: string
+  readonly workspacePath: string
 }
 
 export interface UninstallReceipt {
@@ -40,16 +42,22 @@ export function bundledFixturePath(): string {
   return resolve(packageRoot, 'fixtures', 'tickets.jsonl')
 }
 
+export function bundledFixtureRoot(): string {
+  return resolve(packageRoot, 'fixtures')
+}
+
 /** Explicit installer for the local DSH profile; never runs as an import side effect. */
 export async function installLocalProductAssets(dshHome: string, overwrite = false): Promise<InstallReceipt> {
   const { home, presetPath, productRoot } = localAssetTargets(dshHome)
   const presetRoot = resolve(home, '.agent-presets')
-  const dataPath = resolve(productRoot, 'data', 'tickets.jsonl')
+  const dataRoot = resolve(productRoot, 'data')
+  const dataPath = resolve(dataRoot, 'tickets.jsonl')
+  const workspacePath = resolve(productRoot, 'workspace')
   await mkdir(presetRoot, { recursive: true })
-  await mkdir(dirname(dataPath), { recursive: true })
+  await mkdir(workspacePath, { recursive: true })
   await cp(bundledPresetPath(), presetPath, { recursive: true, force: overwrite, errorOnExist: !overwrite })
-  await cp(bundledFixturePath(), dataPath, { force: overwrite, errorOnExist: !overwrite })
-  return { presetRoot, dataPath }
+  await cp(bundledFixtureRoot(), dataRoot, { recursive: true, force: overwrite, errorOnExist: !overwrite })
+  return { presetRoot, dataPath, dataRoot, workspacePath }
 }
 
 /** Remove only the two exact product-owned asset directories under an explicit DSH home. */

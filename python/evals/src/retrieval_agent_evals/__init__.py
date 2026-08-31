@@ -1,5 +1,6 @@
 """External, deterministic Retrieval Agent evaluation primitives."""
 
+from .dataset import BronzeCase, BronzeQrel, load_legacy_bronze_cases, verify_legacy_bronze_manifest
 from .models import EvalCase, ProductTrace
 from .protocol import (
     CancelCaseParams,
@@ -13,6 +14,8 @@ from .protocol import (
 from .scorers import EvaluationResult, ScoredCheck, evaluate_trace
 
 __all__ = [
+    "BronzeCase",
+    "BronzeQrel",
     "CancelCaseParams",
     "CaseTerminalNotification",
     "ContinueCaseParams",
@@ -25,4 +28,6 @@ __all__ = [
     "StartCaseParams",
     "StartCaseResponse",
     "evaluate_trace",
+    "load_legacy_bronze_cases",
+    "verify_legacy_bronze_manifest",
 ]

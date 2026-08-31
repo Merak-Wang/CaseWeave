@@ -4,6 +4,7 @@ import type {
   RetrievalState,
   TicketCandidateNode,
 } from '@retrieval-agent/contracts'
+import { createTicketResultCollection } from '@retrieval-agent/ticket-collection'
 
 const STATUS_MESSAGES: Partial<Record<RetrievalState['termination'], string>> = {
   no_result: '当前授权快照中没有匹配工单。',
@@ -44,7 +45,11 @@ export function projectTicketCandidateNode(
   const querySummary = state?.query.original
     ?? (contract?.type === 'retrieval/query-contracted' ? contract.data.spec.originalQuery : '')
   const status = statusOf(state)
-  const message = state === undefined ? undefined : STATUS_MESSAGES[state.termination]
+  const message = state?.termination === 'needs_clarification'
+    ? state.clarification?.question
+    : state === undefined ? undefined : STATUS_MESSAGES[state.termination]
+  const result = state?.phase === 'stopped' ? createTicketResultCollection(state) : undefined
+  const candidates = result?.tickets ?? state?.candidates ?? []
   return {
     retrievalId,
     version: state?.revision ?? 0,
@@ -52,11 +57,12 @@ export function projectTicketCandidateNode(
     ...(state?.snapshot === undefined ? {} : { snapshotShortId: state.snapshot.shortId }),
     completeness: state?.lastPage?.completeness ?? 'pending',
     status,
-    candidates: state?.candidates ?? [],
-    alreadyReadEvidence: state?.promotedEvidence ?? [],
+    candidates,
+    alreadyReadEvidence: result?.evidence ?? state?.promotedEvidence ?? [],
     ...(message === undefined ? {} : { message }),
     exportEnabled: state?.snapshot?.capabilities.exportRead === true
-      && state.candidates.length > 0
+      && candidates.length > 0
       && !['snapshot_invalid', 'permission_blocked', 'error'].includes(status),
+    ...(result === undefined ? {} : { result }),
   }
 }

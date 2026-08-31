@@ -1,8 +1,14 @@
 import { createRequire } from 'node:module'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type { RetrievalDomainEvent, RetrievalEventType } from '@retrieval-agent/contracts'
-import { REQUIRED_RETRIEVAL_EVENT_TYPES } from '@retrieval-agent/contracts'
+import type {
+  RetrievalDomainEvent,
+  RetrievalPresentationAnchor,
+} from '@retrieval-agent/contracts'
+import {
+  REQUIRED_RETRIEVAL_EVENT_TYPES,
+  RETRIEVAL_PRESENTATION_EVENT_TYPE,
+} from '@retrieval-agent/contracts'
 
 const require = createRequire(import.meta.url)
 const sessionPackage = require('@deepseek-ai/dsh-session/package.json') as { readonly version?: unknown }
@@ -14,6 +20,7 @@ declare module '@deepseek-ai/dsh-session/types' {
     'retrieval/query-contracted': { readonly event: RetrievalDomainEvent<'retrieval/query-contracted'> }
     'retrieval/snapshot-opened': { readonly event: RetrievalDomainEvent<'retrieval/snapshot-opened'> }
     'retrieval/search-completed': { readonly event: RetrievalDomainEvent<'retrieval/search-completed'> }
+    'retrieval/knowledge-assessed': { readonly event: RetrievalDomainEvent<'retrieval/knowledge-assessed'> }
     'retrieval/state-recorded': { readonly event: RetrievalDomainEvent<'retrieval/state-recorded'> }
     'retrieval/evidence-promoted': { readonly event: RetrievalDomainEvent<'retrieval/evidence-promoted'> }
     'retrieval/clarification-requested': { readonly event: RetrievalDomainEvent<'retrieval/clarification-requested'> }
@@ -22,13 +29,19 @@ declare module '@deepseek-ai/dsh-session/types' {
     'retrieval/evidence-frozen': { readonly event: RetrievalDomainEvent<'retrieval/evidence-frozen'> }
     'retrieval/stopped': { readonly event: RetrievalDomainEvent<'retrieval/stopped'> }
     'retrieval/exported': { readonly event: RetrievalDomainEvent<'retrieval/exported'> }
+    'retrieval/presentation-anchored': RetrievalPresentationAnchor
   }
 }
 
+const REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES = Object.freeze([
+  ...REQUIRED_RETRIEVAL_EVENT_TYPES,
+  RETRIEVAL_PRESENTATION_EVENT_TYPE,
+] as const)
+
 export interface DshSessionCompatibilityReport {
   readonly packageVersion: typeof PINNED_DSH_SESSION_VERSION
-  readonly registeredEventTypes: readonly RetrievalEventType[]
-  readonly newlyRegisteredEventTypes: readonly RetrievalEventType[]
+  readonly registeredEventTypes: readonly (typeof REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES)[number][]
+  readonly newlyRegisteredEventTypes: readonly (typeof REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES)[number][]
 }
 
 export function assertCompatibleDshVersion(actual: unknown): asserts actual is typeof PINNED_DSH_SESSION_VERSION {
@@ -50,16 +63,31 @@ export function installDshSessionCompatibility(): DshSessionCompatibilityReport 
     throw new Error('DSH known Session event registry is not mutable on the pinned runtime')
   }
   const registry = KNOWN_SESSION_EVENT_TYPES as Set<string>
-  const newlyRegisteredEventTypes: RetrievalEventType[] = []
-  for (const eventType of REQUIRED_RETRIEVAL_EVENT_TYPES) {
+  const newlyRegisteredEventTypes: (typeof REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES)[number][] = []
+  for (const eventType of REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES) {
     if (!registry.has(eventType)) newlyRegisteredEventTypes.push(eventType)
     registry.add(eventType)
   }
   return {
     packageVersion: PINNED_DSH_SESSION_VERSION,
-    registeredEventTypes: [...REQUIRED_RETRIEVAL_EVENT_TYPES],
+    registeredEventTypes: [...REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES],
     newlyRegisteredEventTypes,
   }
+}
+
+/**
+ * Append one idempotent presentation boundary for a retrieval. The boundary
+ * is a persisted Session fact, but it is intentionally not a domain event and
+ * therefore cannot alter replayed retrieval state or model-visible evidence.
+ */
+export function appendRetrievalPresentationAnchor(
+  session: Session,
+  anchor: RetrievalPresentationAnchor,
+): void {
+  const exists = session.events.some(event => event.type === RETRIEVAL_PRESENTATION_EVENT_TYPE
+    && event.data.retrievalId === anchor.retrievalId
+    && event.data.phase === anchor.phase)
+  if (!exists) session.append(RETRIEVAL_PRESENTATION_EVENT_TYPE, anchor)
 }
 
 /** Append a typed retrieval event without leaking DSH casts into product packages. */
@@ -68,6 +96,7 @@ export function appendRetrievalSessionEvent(session: Session, event: RetrievalDo
     case 'retrieval/query-contracted': session.append(event.type, { event }); return
     case 'retrieval/snapshot-opened': session.append(event.type, { event }); return
     case 'retrieval/search-completed': session.append(event.type, { event }); return
+    case 'retrieval/knowledge-assessed': session.append(event.type, { event }); return
     case 'retrieval/state-recorded': session.append(event.type, { event }); return
     case 'retrieval/evidence-promoted': session.append(event.type, { event }); return
     case 'retrieval/clarification-requested': session.append(event.type, { event }); return

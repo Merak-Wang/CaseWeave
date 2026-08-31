@@ -1,23 +1,44 @@
 import type { RetrievalId, TicketCandidateRef, TicketEvidenceId } from './brand.js'
 import type {
-  CandidateExportReceipt,
-  EvidenceContextSelection,
-  FrozenEvidencePack,
-  RetrievalState,
-  RetrievalTaskContract,
-  RetrievalTermination,
   TicketEvidenceSegment,
   TicketRetrievalSpec,
   TicketSearchPage,
   TicketSnapshot,
 } from './types.js'
+import type {
+  CandidateExportReceipt,
+  EvidenceContextSelection,
+  FrozenEvidencePack,
+  RetrievalKnowledgeAssessment,
+  RetrievalState,
+  RetrievalTaskContract,
+  RetrievalTermination,
+} from './retrieval-state.js'
+import type { TicketSearchStage } from './ranking.js'
 
-export const RETRIEVAL_EVENT_SCHEMA_VERSION = 1 as const
+export const RETRIEVAL_EVENT_SCHEMA_VERSION = 4 as const
+
+/**
+ * Durable UI placement is deliberately separate from retrieval-domain state.
+ * Pre-step search can execute before DSH persists the visible user message,
+ * while the product result must render at the conversational boundary that
+ * users perceive. This event records that boundary without changing evidence.
+ */
+export const RETRIEVAL_PRESENTATION_EVENT_TYPE = 'retrieval/presentation-anchored' as const
+export type RetrievalPresentationPhase = 'candidates' | 'result'
+
+export interface RetrievalPresentationAnchor {
+  readonly retrievalId: RetrievalId
+  readonly phase: RetrievalPresentationPhase
+  readonly turn: number
+  readonly step?: number
+}
 
 export interface RetrievalEventDataMap {
   'retrieval/query-contracted': { readonly contract: RetrievalTaskContract; readonly spec: TicketRetrievalSpec }
   'retrieval/snapshot-opened': { readonly snapshot: TicketSnapshot }
-  'retrieval/search-completed': { readonly spec: TicketRetrievalSpec; readonly page: TicketSearchPage }
+  'retrieval/search-completed': { readonly stage: TicketSearchStage; readonly spec: TicketRetrievalSpec; readonly page: TicketSearchPage }
+  'retrieval/knowledge-assessed': { readonly assessment: RetrievalKnowledgeAssessment }
   'retrieval/state-recorded': { readonly state: RetrievalState }
   'retrieval/evidence-promoted': { readonly evidence: readonly TicketEvidenceSegment[]; readonly tokensUsed: number }
   'retrieval/clarification-requested': { readonly facet: string; readonly question: string; readonly candidateRefs: readonly TicketCandidateRef[] }
@@ -45,6 +66,7 @@ export const REQUIRED_RETRIEVAL_EVENT_TYPES = Object.freeze([
   'retrieval/query-contracted',
   'retrieval/snapshot-opened',
   'retrieval/search-completed',
+  'retrieval/knowledge-assessed',
   'retrieval/state-recorded',
   'retrieval/evidence-promoted',
   'retrieval/clarification-requested',

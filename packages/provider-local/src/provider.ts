@@ -15,8 +15,8 @@ import {
   type TicketDetailResult,
   type TicketEvidenceField,
   type TicketEvidenceResult,
+  type TicketFieldDescriptor,
   type TicketFilter,
-  type TicketL0,
   type TicketProviderStatus,
   type TicketRetrievalProvider,
   type TicketRetrievalRequest,
@@ -26,8 +26,16 @@ import {
   type TicketSnapshot,
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
+import {
+  HybridRankingEngine,
+  RankingError,
+  type RetrievalRanker,
+} from '@retrieval-agent/retrieval-ranking'
 import { sha256, shortOpaque, stableJson } from './hash.js'
-import { estimateTokens, tokenize, truncateToEstimatedTokens } from './text.js'
+import { canRead, principalBinding } from './authorization.js'
+import { evidenceFieldValues, LEGACY_FIELD_CATALOG } from './fields.js'
+import { candidateL0, matchFragment, matchesFilter, rankingDocuments } from './search-projection.js'
+import { tokenize, truncateToEstimatedTokens } from './text.js'
 
 export interface LocalTicketProviderConfig {
   readonly providerId?: string
@@ -37,6 +45,8 @@ export interface LocalTicketProviderConfig {
   readonly maxRequestedCount?: number
   readonly snapshotTtlMs?: number
   readonly now?: () => Date
+  readonly ranker?: RetrievalRanker
+  readonly defaultMode?: 'keyword' | 'dense' | 'hybrid'
 }
 
 interface SnapshotEntry {
@@ -47,124 +57,8 @@ interface SnapshotEntry {
 }
 
 const COMPILER_VERSION = 'retrieval-query-v1'
-const FIELD_SET = new Set<TicketEvidenceField>([
-  'problemDescription', 'conversationOrUpdates', 'resolutionSteps', 'rootCause', 'answer',
-])
-
 function abortIfNeeded(options?: ProviderCallOptions): void {
   if (options?.signal?.aborted === true) throw new RetrievalError('CANCELLED', '操作已取消。')
-}
-
-function principalBinding(principal: TrustedPrincipalContext): string {
-  const attributes = Object.fromEntries(Object.entries(principal.attributes)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, values]) => [key, [...new Set(values)].sort()]))
-  return sha256(stableJson({
-    tenantId: principal.tenantId,
-    subjectId: principal.subjectId,
-    entitlementVersion: principal.entitlementVersion,
-    attributes,
-  }))
-}
-
-function canRead(record: NormalizedTicketRecord, principal: TrustedPrincipalContext): boolean {
-  if (record.tenantId !== principal.tenantId) return false
-  if (record.piiRedactionStatus === 'unreviewed') return false
-  if (record.allowedSubjectIds.length > 0 && !record.allowedSubjectIds.includes(principal.subjectId)) return false
-  for (const [attribute, required] of Object.entries(record.requiredAttributes)) {
-    const actual = principal.attributes[attribute] ?? []
-    if (required.length > 0 && !required.some(value => actual.includes(value))) return false
-  }
-  return true
-}
-
-function l0(record: NormalizedTicketRecord): TicketL0 {
-  return {
-    ...(record.createdAt === undefined ? {} : { createdAt: record.createdAt }),
-    ...(record.updatedAt === undefined ? {} : { updatedAt: record.updatedAt }),
-    ...(record.resolvedAt === undefined ? {} : { resolvedAt: record.resolvedAt }),
-    ...(record.type === undefined ? {} : { type: record.type }),
-    ...(record.category === undefined ? {} : { category: record.category }),
-    ...(record.product === undefined ? {} : { product: record.product }),
-    ...(record.component === undefined ? {} : { component: record.component }),
-    ...(record.region === undefined ? {} : { region: record.region }),
-    ...(record.status === undefined ? {} : { status: record.status }),
-    ...(record.priority === undefined ? {} : { priority: record.priority }),
-    ...(record.language === undefined ? {} : { language: record.language }),
-  }
-}
-
-function filterValue(record: NormalizedTicketRecord, field: TicketFilter['field']): string | readonly string[] | undefined {
-  switch (field) {
-    case 'type': return record.type
-    case 'category': return record.category
-    case 'priority': return record.priority
-    case 'status': return record.status
-    case 'language': return record.language
-    case 'region': return record.region
-    case 'product': return record.product
-    case 'component': return record.component
-    case 'createdAt': return record.createdAt
-    case 'updatedAt': return record.updatedAt
-    case 'resolvedAt': return record.resolvedAt
-    case 'errorCodes': return record.errorCodes
-    default: return field satisfies never
-  }
-}
-
-function matchesFilter(record: NormalizedTicketRecord, filter: TicketFilter): boolean {
-  const actual = filterValue(record, filter.field)
-  if (filter.op === 'contains') return actual !== undefined && typeof actual !== 'string'
-    && actual.some(value => value.toLocaleLowerCase() === filter.value.toLocaleLowerCase())
-  if (typeof actual !== 'string') return filter.op === 'neq'
-  if (filter.op === 'eq') return actual.toLocaleLowerCase() === filter.value.toLocaleLowerCase()
-  if (filter.op === 'neq') return actual.toLocaleLowerCase() !== filter.value.toLocaleLowerCase()
-  if (filter.op === 'gte') return actual >= filter.value
-  if (filter.op === 'lte') return actual <= filter.value
-  return false
-}
-
-function scoreRecord(record: NormalizedTicketRecord, spec: TicketRetrievalSpec): number {
-  const terms = tokenize(`${spec.normalizedQuery} ${spec.semanticHints.join(' ')}`)
-  if (terms.length === 0) return 0
-  const excluded = new Set(spec.excludedTerms.flatMap(tokenize))
-  const titleTokens = tokenize(record.title)
-  const summaryTokens = tokenize(record.summary)
-  const metadataTokens = tokenize([
-    record.product, record.component, record.category, record.type, record.region, record.status,
-    ...record.errorCodes,
-  ].filter((value): value is string => value !== undefined).join(' '))
-  if ([...excluded].some(term => titleTokens.includes(term) || summaryTokens.includes(term))) return 0
-  const title = new Set(titleTokens)
-  const summary = new Set(summaryTokens)
-  const metadata = new Set(metadataTokens)
-  let score = 0
-  for (const term of terms) {
-    if (title.has(term)) score += 3
-    if (summary.has(term)) score += 1.5
-    if (metadata.has(term)) score += 0.75
-  }
-  return score / Math.sqrt(Math.max(1, terms.length))
-}
-
-function fragment(text: string, terms: readonly string[]): { text: string; truncated: boolean } | undefined {
-  const normalized = text.toLocaleLowerCase()
-  const position = terms.map(term => normalized.indexOf(term.toLocaleLowerCase())).filter(index => index >= 0).sort((a, b) => a - b)[0]
-  if (position === undefined) return undefined
-  const start = Math.max(0, position - 40)
-  const end = Math.min(text.length, position + 100)
-  return { text: text.slice(start, end), truncated: start > 0 || end < text.length }
-}
-
-function fieldValues(record: NormalizedTicketRecord, field: TicketEvidenceField): readonly string[] {
-  switch (field) {
-    case 'problemDescription': return record.problemDescription === undefined ? [] : [record.problemDescription]
-    case 'conversationOrUpdates': return record.conversationOrUpdates
-    case 'resolutionSteps': return record.resolutionSteps
-    case 'rootCause': return record.rootCause === undefined ? [] : [record.rootCause]
-    case 'answer': return record.answer === undefined ? [] : [record.answer]
-    default: return field satisfies never
-  }
 }
 
 /** Fixture-only provider. It intentionally defaults to denying unreviewed PII. */
@@ -177,17 +71,36 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
   readonly #maxRequestedCount: number
   readonly #snapshotTtlMs: number
   readonly #now: () => Date
+  readonly #fieldCatalog: readonly TicketFieldDescriptor[]
+  readonly #filterFields: ReadonlyMap<string, TicketFieldDescriptor>
+  readonly #evidenceFields: ReadonlySet<string>
+  readonly #ranker: RetrievalRanker
+  readonly #defaultMode: 'keyword' | 'dense' | 'hybrid'
   readonly #snapshots = new Map<string, SnapshotEntry>()
 
   constructor(records: readonly NormalizedTicketRecord[], config: LocalTicketProviderConfig = {}) {
     this.providerId = config.providerId ?? 'local-fixture-v1'
     this.#records = [...records]
-    this.#indexVersion = config.indexVersion ?? sha256(records.map(record => `${record.ticketId}:${record.contentHash}`).sort().join('\n'))
+    this.#ranker = config.ranker ?? new HybridRankingEngine()
+    this.#defaultMode = config.defaultMode ?? 'keyword'
+    const sourceIndexVersion = config.indexVersion ?? sha256(records.map(record => `${record.ticketId}:${record.contentHash}`).sort().join('\n'))
+    this.#indexVersion = sha256(`${sourceIndexVersion}:${this.#ranker.profileVersion}`)
     this.#queryPolicyVersion = config.queryPolicyVersion ?? 'query-policy-v1'
     this.#defaultRequestedCount = config.defaultRequestedCount ?? 5
     this.#maxRequestedCount = config.maxRequestedCount ?? 20
     this.#snapshotTtlMs = config.snapshotTtlMs ?? 15 * 60_000
     this.#now = config.now ?? (() => new Date())
+    const catalog = new Map<string, TicketFieldDescriptor>()
+    for (const descriptor of [...LEGACY_FIELD_CATALOG, ...records.flatMap(record => record.fieldCatalog ?? [])]) {
+      const previous = catalog.get(descriptor.key)
+      if (previous !== undefined && stableJson(previous) !== stableJson(descriptor)) {
+        throw new TypeError(`conflicting field descriptor ${descriptor.key}`)
+      }
+      catalog.set(descriptor.key, { ...descriptor, filterOperators: [...descriptor.filterOperators] })
+    }
+    this.#fieldCatalog = [...catalog.values()].sort((left, right) => left.key.localeCompare(right.key))
+    this.#filterFields = new Map(this.#fieldCatalog.filter(field => field.filterOperators.length > 0).map(field => [field.key, field]))
+    this.#evidenceFields = new Set(this.#fieldCatalog.filter(field => field.accessLevel === 'L2').map(field => field.key))
     if (!Number.isSafeInteger(this.#defaultRequestedCount) || this.#defaultRequestedCount < 1) throw new TypeError('defaultRequestedCount must be positive')
     if (!Number.isSafeInteger(this.#maxRequestedCount) || this.#maxRequestedCount < this.#defaultRequestedCount) throw new TypeError('maxRequestedCount must cover the default')
     if (!Number.isSafeInteger(this.#snapshotTtlMs) || this.#snapshotTtlMs < 1) throw new TypeError('snapshotTtlMs must be positive')
@@ -195,15 +108,19 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
 
   resolve(request: TicketRetrievalRequest): TicketRetrievalSpec {
     assertTicketRetrievalRequest(request)
+    this.#assertFiltersSupported(request.filters ?? [])
     const requestedCount = Math.min(request.requestedCount ?? this.#defaultRequestedCount, this.#maxRequestedCount)
+    const countPolicy = request.countPolicy ?? (request.requestedCount === undefined ? 'provider_default' : 'explicit')
     return {
       target: request.target,
       ...(request.retrievalIntent === undefined ? {} : { retrievalIntent: request.retrievalIntent }),
       originalQuery: request.query,
-      normalizedQuery: request.query.normalize('NFKC').trim().replace(/\s+/gu, ' '),
+      normalizedQuery: (request.retrievalQuery ?? request.query).normalize('NFKC').trim().replace(/\s+/gu, ' '),
       requestedCount,
-      mode: request.mode ?? 'keyword',
+      countPolicy,
+      mode: request.mode ?? this.#defaultMode,
       filters: [...request.filters ?? []],
+      ambiguities: [...request.ambiguities ?? []],
       excludedTerms: [],
       semanticHints: [],
       compilerVersion: COMPILER_VERSION,
@@ -226,15 +143,21 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       expiresAt: new Date(now.getTime() + this.#snapshotTtlMs).toISOString(),
       sourceVersion,
       indexVersion: this.#indexVersion,
+      retrievalProfileVersion: this.#ranker.profileVersion,
       authorizationVersion: principal.entitlementVersion,
       principalBindingHash: bindingHash,
       queryPolicyVersion: this.#queryPolicyVersion,
+      fieldCatalog: this.#fieldCatalog,
       capabilities: {
         exhaustive: true,
         pagination: true,
         evidencePromotion: true,
         detailRead: true,
         exportRead: true,
+        keywordSearch: true,
+        denseSearch: this.#ranker.capabilities.dense,
+        hybridFusion: this.#ranker.capabilities.fusion,
+        reranking: this.#ranker.capabilities.reranker,
       },
     }
     this.#snapshots.set(snapshotId, { snapshot, bindingHash, records, candidateRefs: new Map() })
@@ -250,23 +173,43 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     const started = performance.now()
     abortIfNeeded(options)
     const entry = this.#authorizeSnapshot(principal, snapshotId)
+    this.#assertFiltersSupported(query.filters)
     if (!Number.isSafeInteger(options.topK) || options.topK < 1 || options.topK > this.#maxRequestedCount) throw new RetrievalError('INVALID_REQUEST', 'topK 无效。')
     if (!Number.isSafeInteger(options.maxScan) || options.maxScan < 1) throw new RetrievalError('INVALID_REQUEST', 'maxScan 无效。')
     const queryFingerprint = sha256(stableJson(query))
     const offset = this.#decodeCursor(options.cursor, snapshotId, queryFingerprint)
     const terms = tokenize(`${query.normalizedQuery} ${query.semanticHints.join(' ')}`)
     const filtered = entry.records.filter(record => query.filters.every(filter => matchesFilter(record, filter)))
-    const scan = filtered.slice(0, options.maxScan)
-    const scored = scan
-      .map(record => ({ record, score: scoreRecord(record, query) }))
-      .filter(item => item.score > 0)
-      .sort((left, right) => right.score - left.score || left.record.displayId.localeCompare(right.record.displayId))
-    const pageRecords = scored.slice(offset, offset + options.topK)
-    const candidates = pageRecords.map(({ record }, index): TicketCandidate => {
+    const documents = rankingDocuments(filtered)
+    let ranked
+    try {
+      ranked = await this.#ranker.rank(documents, {
+        text: query.normalizedQuery,
+        semanticHints: query.semanticHints,
+        excludedTerms: query.excludedTerms,
+        mode: query.mode,
+      }, { maxScan: options.maxScan, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+    } catch (error) {
+      if (error instanceof RankingError && error.code === 'SCAN_LIMIT') {
+        throw new RetrievalError('BUDGET_EXHAUSTED', '当前授权语料超过本地检索容量。', { cause: error })
+      }
+      if (error instanceof RankingError && error.code === 'HYBRID_UNAVAILABLE') {
+        throw new RetrievalError('PROVIDER_UNAVAILABLE', '本地 Hybrid 检索模型不可用。', { retryable: true, cause: error })
+      }
+      throw error
+    }
+    const byId = new Map(filtered.map(record => [record.ticketId as string, record]))
+    if (new Set(ranked.hits.map(hit => hit.documentId)).size !== ranked.hits.length
+      || ranked.hits.some(hit => !byId.has(hit.documentId))) {
+      throw new RetrievalError('PROTOCOL_MISMATCH', '排名器返回了未授权或重复的文档。')
+    }
+    const pageHits = ranked.hits.slice(offset, offset + options.topK)
+    const candidates = pageHits.map((hit, index): TicketCandidate => {
+      const record = byId.get(hit.documentId)!
       const ref = TicketCandidateRef(shortOpaque('cand', snapshotId, record.ticketId))
       entry.candidateRefs.set(ref, record)
-      const titleFragment = fragment(record.title, terms)
-      const summaryFragment = fragment(record.summary, terms)
+      const titleFragment = matchFragment(record.title, terms)
+      const summaryFragment = matchFragment(record.summary, terms)
       return {
         ref,
         displayId: record.displayId,
@@ -277,7 +220,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
         rank: offset + index + 1,
         title: record.title,
         summary: record.summary,
-        l0: l0(record),
+        l0: candidateL0(record),
         matchFragments: [
           ...(titleFragment === undefined ? [] : [{ field: 'title' as const, ...titleFragment }]),
           ...(summaryFragment === undefined ? [] : [{ field: 'summary' as const, ...summaryFragment }]),
@@ -285,19 +228,29 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       }
     })
     const nextOffset = offset + candidates.length
-    const boundedByScan = filtered.length > scan.length
-    const hasNext = nextOffset < scored.length
+    const hasNext = nextOffset < ranked.hits.length
+    const signalByDocument = new Map(pageHits.map((hit, index) => [hit.documentId, { hit, candidate: candidates[index]! }]))
     return {
       snapshotId,
       queryFingerprint,
       candidates,
-      completeness: boundedByScan || hasNext ? 'bounded' : 'exhaustive',
+      completeness: hasNext ? 'bounded' : 'exhaustive',
       ...(hasNext ? { nextCursor: this.#encodeCursor(nextOffset, snapshotId, queryFingerprint) } : {}),
-      scanned: scan.length,
+      scanned: ranked.scanned,
       returned: candidates.length,
       elapsedMs: Math.max(0, Math.round(performance.now() - started)),
       appliedFilters: [...query.filters],
-      warnings: boundedByScan ? ['scan_limit_reached'] : [],
+      warnings: [...ranked.warnings],
+      trace: {
+        stage: options.stage,
+        ...ranked.execution,
+        signals: [...signalByDocument.values()].map(({ hit, candidate }) => ({
+          candidateRef: candidate.ref,
+          finalRank: candidate.rank,
+          fusedScore: hit.score,
+          channels: hit.channels.map(channel => ({ ...channel })),
+        })),
+      },
     }
   }
 
@@ -309,7 +262,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     abortIfNeeded(options)
     const entry = this.#authorizeSnapshot(principal, request.snapshotId)
     if (!Number.isSafeInteger(request.tokenBudget) || request.tokenBudget < 1) throw new RetrievalError('INVALID_REQUEST', '证据 token 预算无效。')
-    for (const field of request.fields) if (!FIELD_SET.has(field)) throw new RetrievalError('FIELD_NOT_ALLOWED', '请求了不允许的详情字段。')
+    for (const field of request.fields) if (!this.#evidenceFields.has(field)) throw new RetrievalError('FIELD_NOT_ALLOWED', '请求了不允许的详情字段。')
     let remaining = request.tokenBudget
     let tokensUsed = 0
     const evidence: TicketEvidenceResult['evidence'][number][] = []
@@ -322,7 +275,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
         continue
       }
       for (const field of request.fields) {
-        for (const [part, value] of fieldValues(record, field).entries()) {
+        for (const [part, value] of evidenceFieldValues(record, field).entries()) {
           if (remaining <= 0) break
           const selected = truncateToEstimatedTokens(value, remaining)
           if (selected.text.length === 0) continue
@@ -364,7 +317,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
   ): Promise<TicketDetailResult> {
     abortIfNeeded(options)
     const entry = this.#authorizeSnapshot(principal, request.snapshotId)
-    for (const field of request.fields) if (!FIELD_SET.has(field)) throw new RetrievalError('FIELD_NOT_ALLOWED', '请求了不允许的详情字段。')
+    for (const field of request.fields) if (!this.#evidenceFields.has(field)) throw new RetrievalError('FIELD_NOT_ALLOWED', '请求了不允许的详情字段。')
     const details: TicketDetail[] = []
     const rejected: typeof request.candidateRefs[number][] = []
     for (const ref of request.candidateRefs) {
@@ -377,7 +330,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       const fields: Partial<Record<TicketEvidenceField, readonly string[]>> = {}
       const unavailableFields: TicketEvidenceField[] = []
       for (const field of request.fields) {
-        const values = fieldValues(record, field)
+        const values = evidenceFieldValues(record, field)
         if (values.length === 0) unavailableFields.push(field)
         else fields[field] = [...values]
       }
@@ -387,7 +340,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
         sourceVersion: record.sourceVersion,
         title: record.title,
         summary: record.summary,
-        l0: l0(record),
+        l0: candidateL0(record),
         fields,
         unavailableFields,
       })
@@ -430,6 +383,18 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     return entry
   }
 
+  #assertFiltersSupported(filters: readonly TicketFilter[]): void {
+    for (const filter of filters) {
+      const descriptor = this.#filterFields.get(filter.field)
+      if (descriptor === undefined || !descriptor.filterOperators.includes(filter.op)) {
+        throw new RetrievalError('FIELD_NOT_ALLOWED', `Provider 不支持筛选字段或操作 ${filter.field}:${filter.op}。`)
+      }
+      if (descriptor.valueKind === 'datetime' && Number.isNaN(Date.parse(filter.value))) {
+        throw new RetrievalError('INVALID_REQUEST', `筛选字段 ${filter.field} 需要有效时间。`)
+      }
+    }
+  }
+
   #encodeCursor(offset: number, snapshotId: TicketSnapshotId, queryFingerprint: string): string {
     const body = `${offset}:${queryFingerprint}`
     const signature = sha256(`${snapshotId}:${body}`).slice(0, 16)
@@ -455,8 +420,4 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     }
     return offset
   }
-}
-
-export function evidenceTextCost(record: NormalizedTicketRecord, fields: readonly TicketEvidenceField[]): number {
-  return fields.reduce((total, field) => total + fieldValues(record, field).reduce((sum, value) => sum + estimateTokens(value), 0), 0)
 }

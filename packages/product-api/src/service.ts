@@ -104,11 +104,13 @@ export class CandidateExportService {
   async exportCsv(
     principal: TrustedPrincipalContext,
     state: RetrievalState,
-    refs: readonly TicketCandidateRef[] = state.candidates.map(candidate => candidate.ref),
+    refs?: readonly TicketCandidateRef[],
     signal?: AbortSignal,
   ): Promise<CandidateExport> {
     if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '检索快照不存在。')
-    const candidates = byRef(state, refs)
+    const selectedRefs = refs ?? state.frozenEvidence?.candidates.map(candidate => candidate.ref)
+      ?? state.candidates.map(candidate => candidate.ref)
+    const candidates = byRef(state, selectedRefs)
     if (candidates.length > this.#maxRows) throw new RetrievalError('EXPORT_LIMIT_EXCEEDED', '候选数量超过单次导出限制。')
     const status = await this.#provider.status(principal, state.snapshot.snapshotId)
     if (status.snapshotValid !== true) throw new RetrievalError('SNAPSHOT_INVALID', '检索快照已失效，请重新检索后导出。')

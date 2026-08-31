@@ -71,6 +71,7 @@ describe('LocalTicketProvider authorization boundary', () => {
     const page = await provider.search(user, snapshot.snapshotId, provider.resolve({ target: 'ranked_cases', query: '登录' }), {
       topK: 10,
       maxScan: 100,
+      stage: 'baseline',
     })
 
     expect(page.candidates.map(candidate => candidate.displayId)).toEqual(['INC-1', 'INC-2'])
@@ -83,12 +84,12 @@ describe('LocalTicketProvider authorization boundary', () => {
     const user = principal()
     const snapshot = await provider.openSnapshot(user)
     const spec = provider.resolve({ target: 'ranked_cases', query: '验证码' })
-    const page = await provider.search(user, snapshot.snapshotId, spec, { topK: 5, maxScan: 100 })
+    const page = await provider.search(user, snapshot.snapshotId, spec, { topK: 5, maxScan: 100, stage: 'baseline' })
 
-    await expect(provider.search(principal({ attributes: { region: ['cn'], group: ['support', 'support'] } }), snapshot.snapshotId, spec, { topK: 5, maxScan: 100 }))
+    await expect(provider.search(principal({ attributes: { region: ['cn'], group: ['support', 'support'] } }), snapshot.snapshotId, spec, { topK: 5, maxScan: 100, stage: 'baseline' }))
       .resolves.toMatchObject({ returned: 1 })
 
-    await expect(provider.search(principal({ subjectId: 'another-user' }), snapshot.snapshotId, spec, { topK: 5, maxScan: 100 }))
+    await expect(provider.search(principal({ subjectId: 'another-user' }), snapshot.snapshotId, spec, { topK: 5, maxScan: 100, stage: 'baseline' }))
       .rejects.toMatchObject({ code: 'UNAUTHORIZED' })
 
     const details = await provider.readDetails(user, {
@@ -107,11 +108,11 @@ describe('LocalTicketProvider authorization boundary', () => {
     const user = principal()
     const snapshot = await provider.openSnapshot(user)
     const spec = provider.resolve({ target: 'ranked_cases', query: '登录' })
-    const first = await provider.search(user, snapshot.snapshotId, spec, { topK: 1, maxScan: 100 })
+    const first = await provider.search(user, snapshot.snapshotId, spec, { topK: 1, maxScan: 100, stage: 'baseline' })
     expect(first.nextCursor).toBeDefined()
     const decoded = Buffer.from(first.nextCursor!, 'base64url').toString('utf8')
     const tampered = Buffer.from(`${decoded.slice(0, -1)}x`, 'utf8').toString('base64url')
-    await expect(provider.search(user, snapshot.snapshotId, spec, { topK: 1, maxScan: 100, cursor: tampered }))
+    await expect(provider.search(user, snapshot.snapshotId, spec, { topK: 1, maxScan: 100, stage: 'next_page', cursor: tampered }))
       .rejects.toMatchObject({ code: 'INVALID_REQUEST' })
 
     const controller = new AbortController()
@@ -124,7 +125,7 @@ describe('LocalTicketProvider authorization boundary', () => {
     }, { signal: controller.signal })).rejects.toMatchObject({ code: 'CANCELLED' })
 
     now = new Date(BASE_TIME.getTime() + 1_001)
-    await expect(provider.search(user, snapshot.snapshotId, spec, { topK: 1, maxScan: 100 }))
+    await expect(provider.search(user, snapshot.snapshotId, spec, { topK: 1, maxScan: 100, stage: 'baseline' }))
       .rejects.toMatchObject({ code: 'SNAPSHOT_INVALID' })
     await expect(provider.status(user, snapshot.snapshotId)).resolves.toMatchObject({ snapshotValid: false })
   })

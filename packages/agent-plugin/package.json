@@ -21,6 +21,8 @@
     "@retrieval-agent/contracts": "workspace:*",
     "@retrieval-agent/domain": "workspace:*",
     "@retrieval-agent/dsh-compat": "workspace:*",
+    "@retrieval-agent/query-understanding": "workspace:*",
+    "@retrieval-agent/ticket-collection": "workspace:*",
     "@deepseek-ai/schemastery": "3.18.1"
   },
   "peerDependencies": {

@@ -1,12 +1,11 @@
 import type {
   RetrievalId,
-  RetrievalStateId,
   TicketCandidateRef,
   TicketEvidenceId,
   TicketId,
   TicketSnapshotId,
 } from './brand.js'
-
+import type { TicketRetrievalMode, TicketSearchTrace } from './ranking.js'
 /** Trusted identity established by the product host, never by a model or browser field. */
 export interface TrustedPrincipalContext {
   readonly tenantId: string
@@ -19,32 +18,43 @@ export interface TrustedPrincipalContext {
 }
 /** User-level retrieval target. */
 export type TicketTaskTarget = 'ranked_cases' | 'constrained_list' | 'cohort_collection' | 'resolution_path'
-
 /** Ranked retrieval intent, independent from the target set semantics. */
 export type TicketRetrievalIntent = 'known_item' | 'analogous_case'
+export type TicketCountPolicy = 'explicit' | 'adaptive' | 'provider_default'
+export interface TicketQueryAmbiguity {
+  readonly kind: 'reference' | 'quantity' | 'boundary' | 'constraint'
+  readonly text: string
+}
+export type TicketFilterOperator = 'eq' | 'neq' | 'gte' | 'lte' | 'contains'
 
-/** Allowlisted query fields. */
-export type TicketFilter =
-  | { readonly field: 'type' | 'category' | 'priority' | 'status' | 'language' | 'region' | 'product' | 'component'; readonly op: 'eq' | 'neq'; readonly value: string }
-  | { readonly field: 'createdAt' | 'updatedAt' | 'resolvedAt'; readonly op: 'gte' | 'lte'; readonly value: string }
-  | { readonly field: 'errorCodes'; readonly op: 'contains'; readonly value: string }
+/** Provider-declared query field. Syntax is validated centrally; support is enforced by the Provider. */
+export interface TicketFilter {
+  readonly field: string
+  readonly op: TicketFilterOperator
+  readonly value: string
+}
 
 /** A controller-admitted modification to an existing query. */
 export type TicketQueryDelta =
   | { readonly kind: 'add_terms'; readonly terms: readonly string[] }
   | { readonly kind: 'exclude_terms'; readonly terms: readonly string[] }
   | { readonly kind: 'add_filter'; readonly filter: TicketFilter }
-  | { readonly kind: 'remove_filter'; readonly field: TicketFilter['field'] }
+  | { readonly kind: 'remove_filter'; readonly field: string }
   | { readonly kind: 'semantic_hint'; readonly text: string }
 
 /** Initial consumer request before provider defaults are applied. */
 export interface TicketRetrievalRequest {
   readonly target: TicketTaskTarget
+  /** Exact direct-user text retained for provenance. */
   readonly query: string
+  /** Retrieval-only text after deterministic directive/constraint extraction. */
+  readonly retrievalQuery?: string
   readonly retrievalIntent?: TicketRetrievalIntent
   readonly requestedCount?: number
-  readonly mode?: 'keyword' | 'hybrid'
+  readonly countPolicy?: Extract<TicketCountPolicy, 'explicit' | 'adaptive'>
+  readonly mode?: TicketRetrievalMode
   readonly filters?: readonly TicketFilter[]
+  readonly ambiguities?: readonly TicketQueryAmbiguity[]
 }
 
 /** Fully validated query specification. */
@@ -54,8 +64,10 @@ export interface TicketRetrievalSpec {
   readonly normalizedQuery: string
   readonly retrievalIntent?: TicketRetrievalIntent
   readonly requestedCount: number
-  readonly mode: 'keyword' | 'hybrid'
+  readonly countPolicy: TicketCountPolicy
+  readonly mode: TicketRetrievalMode
   readonly filters: readonly TicketFilter[]
+  readonly ambiguities: readonly TicketQueryAmbiguity[]
   readonly excludedTerms: readonly string[]
   readonly semanticHints: readonly string[]
   readonly compilerVersion: string
@@ -70,16 +82,40 @@ export interface TicketSnapshot {
   readonly expiresAt?: string
   readonly sourceVersion: string
   readonly indexVersion: string
+  readonly retrievalProfileVersion: string
   readonly authorizationVersion: string
   readonly principalBindingHash: string
   readonly queryPolicyVersion: string
+  /** Versioned data vocabulary exposed for this authorized snapshot. */
+  readonly fieldCatalog: readonly TicketFieldDescriptor[]
   readonly capabilities: {
     readonly exhaustive: boolean
     readonly pagination: boolean
     readonly evidencePromotion: boolean
     readonly detailRead: boolean
     readonly exportRead: boolean
+    readonly keywordSearch: true
+    readonly denseSearch: boolean
+    readonly hybridFusion: boolean
+    readonly reranking: boolean
   }
+}
+
+export interface TicketFieldDescriptor {
+  readonly key: string
+  readonly label: string
+  readonly valueKind: 'keyword' | 'datetime' | 'text' | 'string_list' | 'raw_json'
+  readonly accessLevel: 'L0' | 'L2'
+  readonly filterOperators: readonly TicketFilterOperator[]
+  readonly sensitivity: 'non_sensitive' | 'source_controlled'
+}
+
+/** Already-authorized display value. `sourcePath` is provenance, not an access path. */
+export interface TicketDisplayField {
+  readonly key: string
+  readonly label: string
+  readonly value: string
+  readonly sourcePath: string
 }
 
 /** L0 fields approved for candidate-list display. */
@@ -95,6 +131,7 @@ export interface TicketL0 {
   readonly status?: string
   readonly priority?: string
   readonly language?: string
+  readonly additionalFields?: readonly TicketDisplayField[]
 }
 
 /** L1 result returned after authorization filtering. */
@@ -124,9 +161,11 @@ export interface TicketSearchPage {
   readonly elapsedMs: number
   readonly appliedFilters: readonly TicketFilter[]
   readonly warnings: readonly string[]
+  readonly trace: TicketSearchTrace
 }
 
-export type TicketEvidenceField = 'problemDescription' | 'conversationOrUpdates' | 'resolutionSteps' | 'rootCause' | 'answer'
+/** Provider-declared L2 key. The current snapshot field catalog is the runtime allowlist. */
+export type TicketEvidenceField = string
 
 /** L2 evidence is untrusted ticket content even after authorization. */
 export interface TicketEvidenceSegment {
@@ -183,181 +222,6 @@ export interface TicketProviderStatus {
   readonly warnings: readonly string[]
 }
 
-export interface RetrievalTaskContract {
-  readonly target: TicketTaskTarget
-  readonly requestedCount: number
-  readonly answerabilityPolicy: 'current_snapshot_evidence_only'
-  readonly completenessRequirement: 'top_k' | 'exhaustive'
-}
-
-export type RetrievalPhase = 'created' | 'snapshot_opened' | 'assessed' | 'awaiting_clarification' | 'frozen' | 'stopped'
-
-export type RetrievalGapKind = 'coverage' | 'constraint' | 'depth' | 'boundary' | 'ambiguity' | 'conflict' | 'version_or_prior'
-
-export interface RetrievalGap {
-  readonly kind: RetrievalGapKind
-  readonly status: 'open' | 'resolved' | 'not_applicable' | 'unknown'
-  readonly evidenceRefs: readonly string[]
-  readonly evaluator: 'system' | 'model'
-}
-
-export type RetrievalActionKind =
-  | 'search'
-  | 'search_next'
-  | 'repair_search'
-  | 'assess'
-  | 'promote'
-  | 'request_clarification'
-  | 'answer_clarification'
-  | 'freeze'
-  | 'stop'
-  | 'read_state'
-
-export interface RetrievalAllowedAction {
-  readonly kind: RetrievalActionKind
-  readonly candidateAllowlist: readonly TicketCandidateRef[]
-  readonly fieldAllowlist: readonly TicketEvidenceField[]
-  readonly maxTokens: number
-}
-
-export interface RetrievalBudgetState {
-  readonly maxRounds: number
-  readonly maxSearches: number
-  readonly maxPromotions: number
-  readonly maxEvidenceTokens: number
-  readonly maxLatencyMs: number
-  readonly roundsUsed: number
-  readonly searchesUsed: number
-  readonly promotionsUsed: number
-  readonly evidenceTokensUsed: number
-  readonly latencyMs: number
-}
-
-export interface RetrievalProgressState {
-  readonly newCandidateRefs: readonly TicketCandidateRef[]
-  readonly rankOverlap: number
-  readonly newDecisiveEvidence: boolean
-  readonly resolvedGaps: readonly RetrievalGapKind[]
-  readonly noProgressStreak: number
-}
-
-export type RetrievalTermination =
-  | 'active'
-  | 'sufficient'
-  | 'no_result'
-  | 'needs_clarification'
-  | 'partial'
-  | 'budget_exhausted'
-  | 'permission_blocked'
-  | 'backend_error'
-  | 'snapshot_invalid'
-  | 'cancelled'
-
-export interface RetrievalStateProvenance {
-  readonly rulesVersion: string
-  readonly promptVersion: string
-  readonly contextPolicyVersion: string
-  readonly model?: string
-  readonly sourceEventIds: readonly string[]
-}
-
-export interface FrozenEvidencePack {
-  readonly packId: string
-  readonly retrievalId: RetrievalId
-  readonly query: { readonly original: string; readonly normalized: string }
-  readonly target: TicketTaskTarget
-  readonly confirmedConstraints: readonly TicketFilter[]
-  readonly snapshot: TicketSnapshot
-  readonly candidates: readonly {
-    readonly ref: TicketCandidateRef
-    readonly displayId: string
-    readonly sourceVersion: string
-    readonly contentHash: string
-    readonly evidenceLevel: 'L1' | 'L2'
-    readonly evidenceIds: readonly TicketEvidenceId[]
-  }[]
-  readonly stoppingReason: Exclude<RetrievalTermination, 'active' | 'needs_clarification'>
-  readonly remainingGaps: readonly RetrievalGap[]
-  readonly budget: RetrievalBudgetState
-  readonly complete: boolean
-  readonly providerId: string
-  readonly promptVersion: string
-}
-
-/** Complete domain state, reconstructable from versioned events. */
-export interface RetrievalState {
-  readonly retrievalId: RetrievalId
-  readonly stateId: RetrievalStateId
-  readonly previousStateId?: RetrievalStateId
-  readonly revision: number
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly phase: RetrievalPhase
-  readonly task: RetrievalTaskContract
-  readonly principalBindingHash: string
-  readonly snapshot?: TicketSnapshot
-  readonly query: {
-    readonly original: string
-    readonly spec: TicketRetrievalSpec
-    readonly confirmedConstraints: readonly TicketFilter[]
-    readonly unresolvedConstraints: readonly string[]
-  }
-  readonly candidates: readonly TicketCandidate[]
-  readonly lastPage?: TicketSearchPage
-  readonly promotedEvidence: readonly TicketEvidenceSegment[]
-  readonly gaps: readonly RetrievalGap[]
-  readonly allowedActions: readonly RetrievalAllowedAction[]
-  readonly budget: RetrievalBudgetState
-  readonly progress: RetrievalProgressState
-  readonly termination: RetrievalTermination
-  readonly clarification?: {
-    readonly facet: string
-    readonly question: string
-    readonly candidateRefs: readonly TicketCandidateRef[]
-    readonly answer?: string
-  }
-  readonly frozenEvidence?: FrozenEvidencePack
-  readonly provenance: RetrievalStateProvenance
-}
-
-export interface EvidenceContextSelection {
-  readonly retrievalId: RetrievalId
-  readonly stateId: RetrievalStateId
-  readonly policyVersion: string
-  readonly includedCandidateRefs: readonly TicketCandidateRef[]
-  readonly includedEvidenceIds: readonly TicketEvidenceId[]
-  readonly excluded: readonly { readonly ref: string; readonly reason: 'unauthorized' | 'not_selected' | 'superseded' | 'token_budget' | 'unread' }[]
-  readonly tokenBudget: number
-  readonly estimatedTokens: number
-  readonly rendered: string
-}
-
-/** Public export metadata. CSV bytes remain a Host response, not a Session fact. */
-export interface CandidateExportReceipt {
-  readonly exportId: string
-  readonly retrievalId: RetrievalId
-  readonly snapshotShortId: string
-  readonly generatedAt: string
-  readonly rowCount: number
-  readonly fields: readonly string[]
-  readonly contentSha256: string
-  readonly auditId: string
-}
-
-/** Candidate node is a deterministic UI projection, never model-authored Markdown. */
-export interface TicketCandidateNode {
-  readonly retrievalId: RetrievalId
-  readonly version: number
-  readonly querySummary: string
-  readonly snapshotShortId?: string
-  readonly completeness: 'pending' | TicketSearchPage['completeness']
-  readonly status: 'searching' | 'results' | 'empty' | 'partial' | 'snapshot_invalid' | 'permission_blocked' | 'error' | 'stopped'
-  readonly candidates: readonly TicketCandidate[]
-  readonly alreadyReadEvidence: readonly TicketEvidenceSegment[]
-  readonly message?: string
-  readonly exportEnabled: boolean
-}
-
 /** Internal normalized source record used by providers; never returned wholesale. */
 export interface NormalizedTicketRecord {
   readonly ticketId: TicketId
@@ -387,4 +251,22 @@ export interface NormalizedTicketRecord {
   readonly region?: string
   readonly errorCodes: readonly string[]
   readonly piiRedactionStatus: 'not_applicable' | 'redacted' | 'unreviewed'
+  /** Optional source-native document retained inside the Provider and never projected wholesale. */
+  readonly rawSource?: {
+    readonly datasetId: string
+    readonly datasetVersion: string
+    readonly schemaVersion: string
+    readonly recordId: string
+    readonly payload: Readonly<Record<string, unknown>>
+  }
+  /** Additional source text selected by its adapter for retrieval indexing. */
+  readonly searchText?: readonly string[]
+  /** Authorized, source-specific L0 values that do not require a shared schema change. */
+  readonly additionalFields?: readonly TicketDisplayField[]
+  /** Provider-side values for source-specific filters. */
+  readonly filterValues?: Readonly<Record<string, string | readonly string[]>>
+  /** Source-specific L2 values, including an explicitly requested raw view when policy allows it. */
+  readonly additionalEvidence?: Readonly<Record<string, readonly string[]>>
+  /** Descriptors contributed by the source adapter. */
+  readonly fieldCatalog?: readonly TicketFieldDescriptor[]
 }

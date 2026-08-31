@@ -1,24 +1,37 @@
-import { useState, type CSSProperties } from 'react'
+import { useState } from 'react'
+import { Button, IconChevronDownOutline14, IconChevronUpOutline14, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { TicketCandidateRef } from '@retrieval-agent/contracts'
+import type { TicketCandidateRef, TicketCandidateNode } from '@retrieval-agent/contracts'
+import css from './CandidatePanel.module.css'
 
-export interface CandidatePanelInjected {
-  readonly exportCandidates: (sessionId: string, retrievalId: string, refs: readonly TicketCandidateRef[]) => Promise<void>
+export type CandidatePanelProps = PropsRuntime<'conversation.chat.node', 'ticket-candidates'>
+
+const STATUS_LABELS: Record<TicketCandidateNode['status'], string> = {
+  searching: '检索中',
+  results: '候选已返回',
+  empty: '无结果',
+  partial: '部分结果',
+  snapshot_invalid: '快照失效',
+  permission_blocked: '权限受限',
+  error: '来源异常',
+  stopped: '已停止',
 }
 
-export type CandidatePanelProps = PropsRuntime<'conversation.chat.node', 'ticket-candidates'> & CandidatePanelInjected
+const COMPLETENESS_LABELS: Record<TicketCandidateNode['completeness'], string> = {
+  pending: '等待检索',
+  exhaustive: '已检索全部范围',
+  bounded: '已检索限定范围',
+  unknown: '范围未知',
+}
 
-const panel: CSSProperties = { border: '1px solid var(--border-color, #d7dce2)', borderRadius: 10, padding: 12, display: 'grid', gap: 10 }
-const list: CSSProperties = { listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 8 }
-const card: CSSProperties = { border: '1px solid var(--border-color, #d7dce2)', borderRadius: 8, padding: 10, display: 'grid', gap: 5 }
-const metadata: CSSProperties = { color: 'var(--muted-color, #68717d)', fontSize: 12 }
+function compactVersion(value: string): string {
+  return value.length <= 14 ? value : `${value.slice(0, 12)}…`
+}
 
-/** Accessible deterministic rendering; no model-authored Markdown is interpreted. */
-export function CandidatePanel({ node, sessionId, exportCandidates }: CandidatePanelProps) {
+/** Deterministic collection renderer. It never interprets model-authored Markdown. */
+export function CandidatePanel({ node }: CandidatePanelProps) {
   const data = node.data
-  const refs = data.candidates.map(candidate => candidate.ref)
   const [expanded, setExpanded] = useState<ReadonlySet<TicketCandidateRef>>(() => new Set())
-  const [exportStatus, setExportStatus] = useState<'idle' | 'preparing' | 'success' | 'error'>('idle')
   const toggle = (ref: TicketCandidateRef): void => {
     setExpanded(current => {
       const next = new Set(current)
@@ -27,57 +40,96 @@ export function CandidatePanel({ node, sessionId, exportCandidates }: CandidateP
       return next
     })
   }
-  const exportCurrent = async (): Promise<void> => {
-    setExportStatus('preparing')
-    try {
-      await exportCandidates(String(sessionId), data.retrievalId, refs)
-      setExportStatus('success')
-    } catch {
-      setExportStatus('error')
-    }
-  }
+  const terminal = data.result !== undefined
+  const statusLabel = terminal && data.result?.complete === true ? '已完成' : STATUS_LABELS[data.status]
+  const heading = data.status === 'searching'
+    ? '正在查找工单'
+    : terminal
+      ? `工单集合 · ${data.candidates.length} 条`
+      : `候选工单 · ${data.candidates.length} 条`
+
   return (
-    <section style={panel} aria-label="工单检索候选" data-retrieval-status={data.status}>
-      <header>
-        <strong>工单候选</strong>
-        <div style={metadata}>查询：{data.querySummary || '—'} · 快照：{data.snapshotShortId ?? '准备中'} · 完整性：{data.completeness}</div>
+    <section className={css.panel} aria-label="工单检索结果" data-retrieval-status={data.status}>
+      <header className={css.header}>
+        <div className={css.headingLine}>
+          <div>
+            <span className={css.eyebrow}>RETRIEVAL AGENT</span>
+            <h2 className={css.heading}>{heading}</h2>
+          </div>
+          <Pill active={terminal}>{statusLabel}</Pill>
+        </div>
+        <p className={css.query}><span>检索条件</span>{data.querySummary || '—'}</p>
+        <div className={css.context} aria-label="检索上下文">
+          <span>{COMPLETENESS_LABELS[data.completeness]}</span>
+          <span aria-hidden="true">·</span>
+          <span>授权快照 {data.snapshotShortId ?? '准备中'}</span>
+          {data.result === undefined ? null : <>
+            <span aria-hidden="true">·</span>
+            <span>{data.result.complete ? '集合完整' : '集合可能不完整'}</span>
+          </>}
+        </div>
       </header>
-      {data.message === undefined ? null : <p role={data.status === 'error' ? 'alert' : 'status'}>{data.message}</p>}
-      {data.status === 'searching' ? <p role="status">正在检索授权范围内的工单…</p> : null}
-      {data.candidates.length === 0 && data.status !== 'searching' ? <p>没有可显示的候选。</p> : null}
-      <ol style={list}>
+
+      {data.message === undefined ? null : (
+        <p className={data.status === 'error' ? css.error : css.notice} role={data.status === 'error' ? 'alert' : 'status'}>
+          {data.message}
+        </p>
+      )}
+      {data.status === 'searching' ? <p className={css.empty} role="status">正在检索当前授权范围…</p> : null}
+      {data.candidates.length === 0 && data.status !== 'searching' ? <p className={css.empty}>集合中没有工单。</p> : null}
+
+      <ol className={css.list}>
         {data.candidates.map(candidate => {
           const details = data.alreadyReadEvidence.filter(evidence => evidence.candidateRef === candidate.ref)
           const isExpanded = expanded.has(candidate.ref)
           const detailId = `ticket-detail-${candidate.ref}`
-          return <li key={candidate.ref} style={card}>
-            <strong>{candidate.rank}. {candidate.displayId} — {candidate.title}</strong>
-            <span>{candidate.summary}</span>
-            <span style={metadata}>状态：{candidate.l0.status ?? '未知'} · 优先级：{candidate.l0.priority ?? '未知'} · 来源版本：{candidate.sourceVersion}</span>
-            <span><button type="button" aria-expanded={isExpanded} aria-controls={detailId} onClick={() => { toggle(candidate.ref) }}>{isExpanded ? '收起详情' : '查看已读取详情'}</button></span>
-            {!isExpanded ? null : <div id={detailId}>
-              {details.length === 0
-                ? <p>本轮尚未读取更多详情；不会因展开而访问隐藏字段。</p>
-                : details.map(detail => <section key={detail.evidenceId}>
-                    <strong>{detail.field}</strong>
-                    <p>{detail.text}</p>
-                  </section>)}
-            </div>}
-          </li>
+          const facets = [
+            candidate.l0.status === undefined ? undefined : `状态 ${candidate.l0.status}`,
+            candidate.l0.priority === undefined ? undefined : `优先级 ${candidate.l0.priority}`,
+            candidate.l0.category === undefined ? undefined : candidate.l0.category,
+            ...(candidate.l0.additionalFields?.slice(0, 2).map(field => `${field.label} ${field.value}`) ?? []),
+          ].filter((value): value is string => value !== undefined)
+          return (
+            <li key={candidate.ref} className={css.row}>
+              <div className={css.rowHeading}>
+                <span className={css.rank} aria-label={`第 ${candidate.rank} 名`}>{String(candidate.rank).padStart(2, '0')}</span>
+                <div className={css.identity}>
+                  <span className={css.ticketId}>{candidate.displayId}</span>
+                  <h3 className={css.title}>{candidate.title}</h3>
+                </div>
+              </div>
+              <p className={css.summary}>{candidate.summary}</p>
+              {facets.length === 0 ? null : <div className={css.facets}>{facets.map(facet => <Pill key={facet}>{facet}</Pill>)}</div>}
+              <div className={css.rowFooter}>
+                <span className={css.source} title={candidate.sourceVersion}>来源 {compactVersion(candidate.sourceVersion)}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={css.detailButton}
+                  icon={isExpanded ? <IconChevronUpOutline14 /> : <IconChevronDownOutline14 />}
+                  aria-expanded={isExpanded}
+                  aria-controls={detailId}
+                  onClick={() => { toggle(candidate.ref) }}
+                >
+                  {isExpanded ? '收起已读详情' : '查看已读详情'}
+                </Button>
+              </div>
+              {!isExpanded ? null : (
+                <div id={detailId} className={css.details}>
+                  {details.length === 0
+                    ? <p>本轮没有读取额外字段；展开不会触发新的数据访问。</p>
+                    : details.map(detail => (
+                        <section key={detail.evidenceId} className={css.detail}>
+                          <h4>{detail.field}</h4>
+                          <p>{detail.text}</p>
+                        </section>
+                      ))}
+                </div>
+              )}
+            </li>
+          )
         })}
       </ol>
-      <footer>
-        <button
-          type="button"
-          disabled={!data.exportEnabled || exportStatus === 'preparing'}
-          onClick={() => { void exportCurrent() }}
-        >导出当前候选</button>
-        <span role="status" aria-live="polite" style={metadata}>
-          {exportStatus === 'preparing' ? '正在重新授权并准备 CSV…' : null}
-          {exportStatus === 'success' ? 'CSV 下载已开始。' : null}
-          {exportStatus === 'error' ? '导出失败；请确认会话与授权快照仍然有效。' : null}
-        </span>
-      </footer>
     </section>
   )
 }

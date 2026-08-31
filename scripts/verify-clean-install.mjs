@@ -19,6 +19,40 @@ const packageManager = pnpmCli !== undefined
   : { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', prefix: [] }
 const pinnedDshVersion = '0.1.1-rc.2'
 const tempRoot = mkdtempSync(join(tmpdir(), 'retrieval-agent-clean-install-'))
+const browserReview = process.env.RETRIEVAL_AGENT_BROWSER_REVIEW === '1'
+
+async function seedBrowserReviewModelSettings(home) {
+  if (!browserReview) return
+  const provider = process.env.RETRIEVAL_AGENT_BROWSER_LLM_PROVIDER?.trim()
+  const model = process.env.RETRIEVAL_AGENT_BROWSER_LLM_MODEL?.trim()
+  const baseURL = process.env.RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL?.trim()
+  const apiKeyEnv = process.env.RETRIEVAL_AGENT_BROWSER_LLM_API_KEY_ENV?.trim()
+  if ([provider, model, baseURL, apiKeyEnv].every(value => value === undefined)) return
+  if (provider === undefined || model === undefined || baseURL === undefined || apiKeyEnv === undefined
+    || provider.length === 0 || model.length === 0 || baseURL.length === 0 || apiKeyEnv.length === 0) {
+    throw new Error('browser model review requires provider, model, base URL, and API-key environment name together')
+  }
+  const settings = {
+    'agent-default-model': {
+      provider,
+      model,
+      reasoningEffort: process.env.RETRIEVAL_AGENT_BROWSER_LLM_REASONING?.trim() || 'off',
+    },
+    'llm-pi-ai': {
+      providers: {
+        [provider]: {
+          displayName: process.env.RETRIEVAL_AGENT_BROWSER_LLM_DISPLAY_NAME?.trim() || provider,
+          apiKeyEnv,
+          baseURL,
+          models: [{ id: model }],
+        },
+      },
+    },
+    'ui-onboarding': { welcomeNoticeVersion: '2026-08-13.1' },
+  }
+  // JSON is a YAML 1.2 subset and avoids adding a verification-only parser.
+  await writeFile(join(home, 'settings.yaml'), `${JSON.stringify(settings, undefined, 2)}\n`, 'utf8')
+}
 
 function run(command, args, options = {}) {
   return execFileSync(command, args, {
@@ -61,6 +95,26 @@ async function verifyWebStartup(dshBin, home, cwd) {
       env: { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
+    const stopChild = () => { child.kill('SIGTERM') }
+    process.once('SIGINT', stopChild)
+    process.once('SIGTERM', stopChild)
+    let stopFromInput
+    if (browserReview && process.stdin.isTTY) {
+      stopFromInput = chunk => {
+        if (chunk.includes('\n') || chunk.includes('\r')) stopChild()
+      }
+      process.stdin.setEncoding('utf8')
+      process.stdin.resume()
+      process.stdin.on('data', stopFromInput)
+    }
+    const removeSignalHandlers = () => {
+      process.off('SIGINT', stopChild)
+      process.off('SIGTERM', stopChild)
+      if (stopFromInput !== undefined) {
+        process.stdin.off('data', stopFromInput)
+        process.stdin.pause()
+      }
+    }
     const timer = setTimeout(() => {
       child.kill('SIGTERM')
       rejectPromise(new Error(`clean DSH Web startup timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`))
@@ -81,7 +135,13 @@ async function verifyWebStartup(dshBin, home, cwd) {
             throw new Error(`Product Host route returned ${response.status}: ${body}`)
           }
           routeVerified = true
-          child.kill('SIGTERM')
+          if (browserReview) {
+            clearTimeout(timer)
+            console.log(`BROWSER_REVIEW_URL=http://127.0.0.1:${port}`)
+            if (process.stdin.isTTY) console.log('Press Enter to stop the app and remove the isolated profile.')
+          } else {
+            child.kill('SIGTERM')
+          }
         }).catch(error => {
           routeError = error
           child.kill('SIGTERM')
@@ -91,10 +151,12 @@ async function verifyWebStartup(dshBin, home, cwd) {
     child.stderr.on('data', chunk => { stderr += chunk })
     child.on('error', error => {
       clearTimeout(timer)
+      removeSignalHandlers()
       rejectPromise(error)
     })
     child.on('exit', (code, signal) => {
       clearTimeout(timer)
+      removeSignalHandlers()
       if (routeError !== undefined) rejectPromise(routeError)
       else if (ready && routeVerified) resolvePromise(undefined)
       else rejectPromise(new Error(`clean DSH Web exited before readiness (code=${String(code)}, signal=${String(signal)})\nstdout:\n${stdout}\nstderr:\n${stderr}`))
@@ -143,6 +205,7 @@ try {
   const installer = join(profile, 'node_modules', '@retrieval-agent', 'bundle', 'lib', 'install-cli.js')
   const uninstaller = join(profile, 'node_modules', '@retrieval-agent', 'bundle', 'lib', 'uninstall-cli.js')
   run(process.execPath, [installer, '--home', home], { cwd: profile })
+  await seedBrowserReviewModelSettings(home)
 
   const dshBin = join(runner, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   const version = run(process.execPath, [dshBin, '--version'], { cwd: root }).trim()
@@ -152,7 +215,11 @@ try {
     env: { ...process.env, DSH_HOME: home },
   })
   if (!config.includes('@retrieval-agent/ui-ticket-results')) throw new Error('composed DSH config is missing the candidate UI row')
+  if (!config.includes('@retrieval-agent/ui-product-shell')) throw new Error('composed DSH config is missing the product shell UI row')
   if (!config.includes('@retrieval-agent/product-host')) throw new Error('composed DSH config is missing the Product Host row')
+  if (!/id:\s*permission[\s\S]*?defaultPreset:\s*['"]?read-only['"]?/u.test(config)) {
+    throw new Error('composed DSH config is missing the read-only default permission preset')
+  }
   if (!/default:\s*['"]?retrieval-agent['"]?/u.test(config)) {
     const relevant = config.split(/\r?\n/u).filter(line => /agent-presets|retrieval-agent/u.test(line)).join('\n')
     throw new Error(`composed DSH config is missing the retrieval-agent default preset; relevant lines:\n${relevant}`)
@@ -161,32 +228,132 @@ try {
   const probe = join(profile, 'artifact-probe.mjs')
   await writeFile(probe, `
 import { readFile } from 'node:fs/promises'
+import { createServer as createHttpServer } from 'node:http'
+import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { RetrievalId } from '@retrieval-agent/contracts'
 import { foldRetrievalEvents, RetrievalController } from '@retrieval-agent/domain'
-import { SessionRetrievalEventJournal } from '@retrieval-agent/agent-plugin'
+import { RetrievalAgentService, SessionRetrievalEventJournal } from '@retrieval-agent/agent-plugin'
 import { installDshSessionCompatibility } from '@retrieval-agent/dsh-compat'
-import { LocalTicketProvider, parseFixtureJsonl } from '@retrieval-agent/provider-local'
-import { bundledFixturePath } from '@retrieval-agent/bundle/startup'
+import { MODEL_SERVICE_PROTOCOL_VERSION, ModelServiceClient } from '@retrieval-agent/model-service-client'
+import { LocalTicketProvider, parseTicketDatasetJsonl } from '@retrieval-agent/provider-local'
+import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
+import { FixturePrincipalProviderService, LocalTicketProviderService } from '@retrieval-agent/bundle'
+import { bundledFixtureRoot } from '@retrieval-agent/bundle/startup'
 
 installDshSessionCompatibility()
 const session = Session.create(SessionId('clean-install-session'))
 if (session.id !== 'clean-install-session') throw new Error('DSH Session package did not load')
 const now = new Date('2026-08-27T04:00:00.000Z')
 const principal = {
-  tenantId: 'demo', subjectId: 'demo-user', entitlementVersion: 'fixture-entitlements-v1',
-  purpose: 'ticket_retrieval', attributes: { group: ['support'], region: ['cn'] },
+  tenantId: 'demo', subjectId: 'development-admin', entitlementVersion: 'development-admin-v1',
+  purpose: 'ticket_retrieval', attributes: { group: ['admin'], region: ['cn'], role: ['administrator'], environment: ['development'] },
   issuedAt: '2026-08-27T00:00:00.000Z', expiresAt: '2026-08-28T00:00:00.000Z',
 }
-const records = parseFixtureJsonl(await readFile(bundledFixturePath(), 'utf8'))
-const provider = new LocalTicketProvider(records, { now: () => now })
+const fixtureRoot = bundledFixtureRoot()
+const records = (await Promise.all([
+  'tickets.jsonl',
+  'public/fcc-1000-seed-20260825.jsonl',
+  'public/bitext-1000-seed-20260825.jsonl',
+].map(async path => parseTicketDatasetJsonl(await readFile(join(fixtureRoot, path), 'utf8'))))).flat()
+if (records.length !== 2040) throw new Error('packed development corpus is incomplete')
+
+const dimensions = 32
+function fakeEmbedding(text) {
+  const vector = Array.from({ length: dimensions }, () => 0)
+  for (const character of text.normalize('NFKC').toLocaleLowerCase()) {
+    const point = character.codePointAt(0)
+    if (point !== undefined && !/\s/u.test(character)) vector[point % dimensions] += 1
+  }
+  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0))
+  return norm === 0 ? [1, ...Array.from({ length: dimensions - 1 }, () => 0)] : vector.map(value => value / norm)
+}
+const modelServer = createHttpServer(async (request, response) => {
+  const send = (status, value) => {
+    const data = JSON.stringify(value)
+    response.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) })
+    response.end(data)
+  }
+  if (request.method === 'GET' && request.url === '/health/ready') {
+    send(200, {
+      protocolVersion: MODEL_SERVICE_PROTOCOL_VERSION, serviceVersion: 'clean-install-fake-v1', ready: true, device: 'test',
+      models: [{
+        model: 'clean-install-embedding', revision: 'clean-install-revision-v1', kind: 'embedding', loaded: true,
+        dtype: 'float32', device: 'test', maxTokens: 12000, dimensions, pooling: 'last_token', normalization: 'l2',
+      }],
+      limits: { maxBatchSize: 128, maxTotalTokens: 100000, maxRerankCandidates: 20 },
+    })
+    return
+  }
+  if (request.method === 'POST' && request.url === '/v1/embeddings') {
+    const chunks = []
+    for await (const chunk of request) chunks.push(chunk)
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    send(200, {
+      protocolVersion: MODEL_SERVICE_PROTOCOL_VERSION, requestId: body.requestId,
+      model: 'clean-install-embedding', revision: 'clean-install-revision-v1', dimensions, normalization: 'l2',
+      data: body.input.map((text, index) => ({ index, embedding: fakeEmbedding(text) })), elapsedMs: 0,
+    })
+    return
+  }
+  send(404, { error: { code: 'NOT_FOUND', message: 'not found', retryable: false } })
+})
+await new Promise((resolvePromise, rejectPromise) => {
+  modelServer.once('error', rejectPromise)
+  modelServer.listen(0, '127.0.0.1', resolvePromise)
+})
+const modelAddress = modelServer.address()
+if (modelAddress === null || typeof modelAddress === 'string') throw new Error('fake model server has no TCP address')
+const modelServiceBaseUrl = 'http://127.0.0.1:' + modelAddress.port
+
+try {
+
+const serviceCtx = new Context()
+try {
+  await serviceCtx.plugin(FixturePrincipalProviderService, {
+    tenantId: 'demo', subjectId: 'development-admin', entitlementVersion: 'development-admin-v1',
+    groups: ['admin'], regions: ['cn'], developmentAdmin: true,
+  })
+  await serviceCtx.plugin(LocalTicketProviderService, {
+    dataPath: join(fixtureRoot, 'tickets.jsonl'),
+    additionalDataPaths: [
+      join(fixtureRoot, 'public/fcc-1000-seed-20260825.jsonl'),
+      join(fixtureRoot, 'public/bitext-1000-seed-20260825.jsonl'),
+    ],
+    providerId: 'clean-install-cordis-v1',
+    modelServiceBaseUrl,
+    embeddingModel: 'clean-install-embedding',
+    embeddingRevision: 'clean-install-revision-v1',
+    embeddingDimensions: dimensions,
+    vectorCacheDir: join(fixtureRoot, '.clean-install-vector-cache'),
+  })
+  await serviceCtx.plugin(RetrievalAgentService)
+  const serviceAgent = { session: Session.create(SessionId('clean-install-cordis-agent')) }
+  const serviceState = await serviceCtx.retrievalAgent.start(serviceAgent, {
+    target: 'ranked_cases', query: '主副卡解绑后仍共享流量', requestedCount: 5,
+  })
+  if (!serviceState.candidates.some(candidate => candidate.displayId === 'TKT-0029')) {
+    throw new Error('packed Cordis service path missed the migrated Bronze qrel')
+  }
+} finally {
+  await serviceCtx.fiber.dispose()
+}
+
+const gateway = new ModelServiceClient({
+  baseUrl: modelServiceBaseUrl,
+  embeddingModel: 'clean-install-embedding', embeddingRevision: 'clean-install-revision-v1', embeddingDimensions: dimensions,
+})
+const provider = new LocalTicketProvider(records, {
+  now: () => now,
+  ranker: new HybridRankingEngine({ gateway, minimumDenseScore: -1 }),
+})
 let serial = 0
 const nextId = () => 'clean-' + serial++
 const journal = new SessionRetrievalEventJournal(session, { now: () => now, eventId: nextId })
 const controller = new RetrievalController(provider, journal, undefined, { now: () => now, id: nextId })
-let state = await controller.start(principal, { target: 'ranked_cases', query: '登录' })
-state = await controller.search(principal, state)
-if (state.candidates.length !== 2) throw new Error('packed vertical slice returned an unexpected candidate count')
+const state = await controller.start(principal, { target: 'ranked_cases', query: '主副卡解绑后仍共享流量' })
+if (!state.candidates.some(candidate => candidate.displayId === 'TKT-0029')) throw new Error('packed vertical slice missed the migrated Bronze qrel')
 if (journal.read(RetrievalId(state.retrievalId)).length === 0) throw new Error('packed event journal is empty')
 const replayedSession = Session.create(SessionId('clean-install-replayed'), session.events)
 const replayedEvents = new SessionRetrievalEventJournal(replayedSession).read(RetrievalId(state.retrievalId))
@@ -194,11 +361,16 @@ const replayedState = foldRetrievalEvents(replayedEvents)
 if (replayedState === undefined || JSON.stringify(replayedState) !== JSON.stringify(state)) {
   throw new Error('packed DSH Session replay did not reconstruct the same retrieval state')
 }
+} finally {
+  await new Promise(resolvePromise => modelServer.close(resolvePromise))
+}
 `, 'utf8')
   run(process.execPath, [probe], { cwd: profile })
 
   const installedPreset = await readFile(join(home, '.agent-presets', 'retrieval-agent', 'agent.cordis.yml'), 'utf8')
   if (!installedPreset.includes('@retrieval-agent/agent-plugin')) throw new Error('installed preset is incomplete')
+  const installedCorpus = JSON.parse(await readFile(join(home, 'retrieval-agent', 'data', 'manifest.json'), 'utf8'))
+  if (installedCorpus.recordCount !== 2040) throw new Error('installed development corpus is incomplete')
 
   await verifyWebStartup(dshBin, home, root)
 
@@ -213,7 +385,7 @@ if (replayedState === undefined || JSON.stringify(replayedState) !== JSON.string
   const afterRemove = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8'))
   if (afterRemove.dsh.profile.bundles.includes('@retrieval-agent/bundle')) throw new Error('bundle remained active after plugin removal')
 
-  console.log(`clean install verified against published @deepseek-ai/dsh ${pinnedDshVersion}: pack, install, compose, Web startup, Host route, fixture search, Session replay, assets, remove`)
+  console.log(`clean install verified against published @deepseek-ai/dsh ${pinnedDshVersion}: pack, install, compose, Web startup, Host route, 2,040-record corpus search, Session replay, assets, remove`)
 } finally {
   const resolvedTemp = resolve(tempRoot)
   const resolvedOsTemp = resolve(tmpdir())

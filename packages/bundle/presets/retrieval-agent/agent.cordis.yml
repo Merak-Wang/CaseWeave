@@ -2,8 +2,9 @@
   name: '@deepseek-ai/dsh-persona'
   config:
     text: |-
-      你是只读工单检索 Agent。只使用当前授权快照中的候选与证据回答；
-      遵循 allowedActions，证据不足、权限不足、快照失效或来源错误时明确停止，不得补造事实。
+      你是只读工单检索 Agent。中间可以澄清和检索，但最终产品输出只能是当前授权快照中
+      已冻结的结构化工单集合，不能输出自然语言回答、总结或建议。遵循 allowedActions；
+      证据不足、权限不足、快照失效或来源错误时以集合状态收敛，不得补造工单。
     complete: false
     includeRuntimeContext: false
 
@@ -19,19 +20,34 @@
       name: '@retrieval-agent/bundle/principal'
       config:
         tenantId: !!js process.env.RETRIEVAL_AGENT_TENANT_ID ?? 'demo'
-        subjectId: !!js process.env.RETRIEVAL_AGENT_SUBJECT_ID ?? 'demo-user'
-        entitlementVersion: !!js process.env.RETRIEVAL_AGENT_ENTITLEMENT_VERSION ?? 'fixture-entitlements-v1'
-        groups: [support]
+        subjectId: !!js process.env.RETRIEVAL_AGENT_SUBJECT_ID ?? 'development-admin'
+        entitlementVersion: !!js process.env.RETRIEVAL_AGENT_ENTITLEMENT_VERSION ?? 'development-admin-v1'
+        groups: [admin]
         regions: [cn]
+        developmentAdmin: true
 
     - id: local-provider
       name: '@retrieval-agent/bundle/provider'
       config:
         dataPath: !!js process.env.RETRIEVAL_AGENT_DATA_PATH ?? dshHomePath('retrieval-agent', 'data', 'tickets.jsonl')
-        providerId: local-fixture-v1
+        additionalDataPaths:
+          - !!js dshHomePath('retrieval-agent', 'data', 'public', 'fcc-1000-seed-20260825.jsonl')
+          - !!js dshHomePath('retrieval-agent', 'data', 'public', 'bitext-1000-seed-20260825.jsonl')
+        providerId: local-dataset-v1
         defaultRequestedCount: 5
         maxRequestedCount: 20
         snapshotTtlMs: 900000
+        retrievalMode: hybrid
+        modelServiceBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
+        embeddingModel: Qwen/Qwen3-Embedding-0.6B
+        embeddingRevision: 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
+        embeddingDimensions: 1024
+        modelDeadlineMs: 120000
+        vectorCacheDir: !!js process.env.RETRIEVAL_AGENT_VECTOR_CACHE_DIR ?? dshHomePath('retrieval-agent', 'cache', 'vectors')
+        rerankerEnabled: !!js process.env.RETRIEVAL_AGENT_RERANKER_ENABLED === 'true'
+        rerankerModel: Qwen/Qwen3-Reranker-0.6B
+        rerankerRevision: 27cd75a405b9c1b46b59abfd88aaa209e6fed2a1972cde9b70e7659537c5e65b
+        allowKeywordFallback: false
 
     - id: retrieval-agent
       name: '@retrieval-agent/agent-plugin'
@@ -45,6 +61,7 @@
         searchTopK: 8
         searchMaxScan: 50000
         contextTokenBudget: 1500
+        adaptiveMaxResults: 20
         maxFinishReminders: 3
 
 - id: compaction

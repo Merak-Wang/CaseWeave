@@ -5,32 +5,35 @@ import {
   RetrievalStateId,
   type EvidenceContextSelection,
   type FrozenEvidencePack,
-  type RetrievalActionKind,
-  type RetrievalAllowedAction,
-  type RetrievalBudgetState,
-  type RetrievalGap,
   type RetrievalGapKind,
+  type RetrievalKnowledgeAssessment,
   type RetrievalState,
   type RetrievalTermination,
   type TicketCandidateRef,
   type TicketEvidenceField,
   type TicketFilter,
   type TicketQueryDelta,
+  type TicketRetrievalMode,
   type TicketRetrievalProvider,
   type TicketRetrievalRequest,
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
 import { EvidenceContextPolicy } from './context.js'
+import { planKnowledgeAssessment } from '@retrieval-agent/retrieval-policy'
 import type { RetrievalEventJournal } from './journal.js'
 import { applyQueryDelta } from './query.js'
 import {
   allowedAction as action,
   candidateFacetValues as facetValues,
-  candidateRankOverlap as rankOverlap,
   coverageGaps as systemGaps,
+  emptyBudget,
   requireAction as hasAction,
+  retrievalCompletenessSatisfied,
+  snapshotEvidenceFields,
+  stopReason,
   validateCandidateRefs as validateRefs,
 } from './state-guards.js'
+import { executeSearchTransition } from './search-transition.js'
 
 export interface RetrievalControllerConfig {
   readonly rulesVersion?: string
@@ -47,26 +50,10 @@ export interface RetrievalControllerConfig {
   readonly id?: () => string
 }
 
-export interface RetrievalAssessment {
-  readonly decision: 'sufficient' | 'no_result' | 'needs_clarification' | 'partial' | 'continue'
-  readonly selectedCandidateRefs: readonly TicketCandidateRef[]
-  readonly gaps: readonly RetrievalGap[]
-  readonly model?: string
-}
-
-function emptyBudget(config: Required<Pick<RetrievalControllerConfig, 'maxRounds' | 'maxSearches' | 'maxPromotions' | 'maxEvidenceTokens' | 'maxLatencyMs'>>): RetrievalBudgetState {
-  return {
-    maxRounds: config.maxRounds,
-    maxSearches: config.maxSearches,
-    maxPromotions: config.maxPromotions,
-    maxEvidenceTokens: config.maxEvidenceTokens,
-    maxLatencyMs: config.maxLatencyMs,
-    roundsUsed: 0,
-    searchesUsed: 0,
-    promotionsUsed: 0,
-    evidenceTokensUsed: 0,
-    latencyMs: 0,
-  }
+export interface RetrievalSearchInput {
+  readonly mode: Extract<TicketRetrievalMode, 'keyword' | 'dense'>
+  readonly delta?: TicketQueryDelta
+  readonly cursor?: string
 }
 
 /** Model intent is admitted only through these deterministic transitions. */
@@ -107,10 +94,11 @@ export class RetrievalController {
 
   async start(principal: TrustedPrincipalContext, request: TicketRetrievalRequest, signal?: AbortSignal): Promise<RetrievalState> {
     const retrievalId = RetrievalId(this.#id())
-    const spec = this.#provider.resolve(request)
+    const spec = this.#provider.resolve({ ...request, mode: 'hybrid' })
     const task = {
       target: spec.target,
       requestedCount: spec.requestedCount,
+      countPolicy: spec.countPolicy,
       answerabilityPolicy: 'current_snapshot_evidence_only' as const,
       completenessRequirement: spec.target === 'constrained_list' || spec.target === 'cohort_collection' ? 'exhaustive' as const : 'top_k' as const,
     }
@@ -130,8 +118,21 @@ export class RetrievalController {
       snapshot,
       query: { original: spec.originalQuery, spec, confirmedConstraints: [...spec.filters], unresolvedConstraints: [] },
       candidates: [],
+      candidateHistory: [],
+      rankingHistory: [],
+      excludedCandidateRefs: [],
+      selectedCandidateRefs: [],
       promotedEvidence: [],
-      gaps: [{ kind: 'coverage', status: 'unknown', evidenceRefs: [], evaluator: 'system' }],
+      gaps: [
+        { kind: 'coverage', status: 'unknown', evidenceRefs: [], evaluator: 'system' },
+        ...spec.ambiguities.map(ambiguity => ({
+          kind: 'ambiguity' as const,
+          status: 'open' as const,
+          evidenceRefs: [],
+          evaluator: 'system' as const,
+          description: ambiguity.text,
+        })),
+      ],
       allowedActions: [action('search'), action('read_state')],
       budget: emptyBudget({
         maxRounds: this.#maxRounds,
@@ -150,146 +151,70 @@ export class RetrievalController {
       },
     }
     this.#record(state)
-    return state
+    try {
+      if (!snapshot.capabilities.keywordSearch || !snapshot.capabilities.denseSearch || !snapshot.capabilities.hybridFusion) {
+        throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Provider 未声明首轮 Hybrid 所需的真实双通道能力。')
+      }
+      return await this.#executeSearch(principal, state, 'initial_hybrid', {}, signal)
+    } catch (error) {
+      const reason = stopReason(error)
+      if (reason === undefined) throw error
+      return this.stop(state, reason)
+    }
+  }
+  async search(principal: TrustedPrincipalContext, state: RetrievalState, input: RetrievalSearchInput, signal?: AbortSignal): Promise<RetrievalState> {
+    if (input.mode !== 'keyword' && input.mode !== 'dense') {
+      throw new RetrievalError('INVALID_REQUEST', '后续检索通道必须是 keyword 或 dense。')
+    }
+    if ((input.delta === undefined) === (input.cursor === undefined)) {
+      throw new RetrievalError('INVALID_REQUEST', '后续检索必须且只能提供 QueryDelta 或 Provider 游标之一。')
+    }
+    const expectedAction = state.lastAssessment?.decision === 'continue' ? state.lastAssessment.nextAction : undefined
+    if (input.cursor === undefined && ((expectedAction === 'keyword_search' && input.mode !== 'keyword')
+      || (expectedAction === 'vector_search' && input.mode !== 'dense'))) {
+      throw new RetrievalError('INVALID_TRANSITION', '检索通道与已接受的知识状态下一动作不一致。')
+    }
+    return this.#executeSearch(principal, state, input.cursor === undefined ? 'repair_search' : 'next_page', input, signal)
   }
 
-  async search(principal: TrustedPrincipalContext, state: RetrievalState, input: { readonly delta?: TicketQueryDelta; readonly cursor?: string } = {}, signal?: AbortSignal): Promise<RetrievalState> {
-    const kind: RetrievalActionKind = input.cursor !== undefined ? 'search_next' : input.delta === undefined ? 'search' : 'repair_search'
-    if (kind === 'search' && state.budget.searchesUsed > 0) hasAction(state, 'search_next')
-    else hasAction(state, kind)
-    if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '当前检索没有有效快照。')
-    if (state.budget.searchesUsed >= state.budget.maxSearches
-      || state.budget.roundsUsed >= state.budget.maxRounds
-      || state.budget.latencyMs >= state.budget.maxLatencyMs) {
-      throw new RetrievalError('BUDGET_EXHAUSTED', '检索预算已耗尽。')
+  /** Continue the current provider ranking without exposing its cursor to the model. */
+  async continueRanking(principal: TrustedPrincipalContext, state: RetrievalState, signal?: AbortSignal): Promise<RetrievalState> {
+    if (state.lastPage?.nextCursor === undefined) {
+      throw new RetrievalError('INVALID_TRANSITION', '当前检索没有可继续的 Provider 排名页。')
     }
-    const spec = applyQueryDelta(state.query.spec, input.delta)
-    const page = await this.#provider.search(principal, state.snapshot.snapshotId, spec, {
-      topK: this.#searchTopK,
-      maxScan: this.#searchMaxScan,
-      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-      ...(signal === undefined ? {} : { signal }),
-    })
-    if (page.snapshotId !== state.snapshot.snapshotId || page.candidates.some(candidate => candidate.snapshotId !== state.snapshot!.snapshotId)) {
-      throw new RetrievalError('PROTOCOL_MISMATCH', 'Provider 返回了不同快照的候选。')
-    }
-    if (new Set(page.candidates.map(candidate => candidate.ref)).size !== page.candidates.length) {
-      throw new RetrievalError('PROTOCOL_MISMATCH', 'Provider 返回了重复候选引用。')
-    }
-    const searched = this.#journal.append(state.retrievalId, 'retrieval/search-completed', { spec, page })
-    const previousRefs = state.candidates.map(candidate => candidate.ref)
-    const pageRefs = page.candidates.map(candidate => candidate.ref)
-    const candidates = input.cursor === undefined ? [...page.candidates] : [...state.candidates, ...page.candidates]
-    const newRefs = pageRefs.filter(ref => !previousRefs.includes(ref))
-    const overlap = rankOverlap(previousRefs, candidates.map(candidate => candidate.ref))
-    const noProgressStreak = newRefs.length === 0 ? state.progress.noProgressStreak + 1 : 0
-    const budget = {
-      ...state.budget,
-      roundsUsed: state.budget.roundsUsed + 1,
-      searchesUsed: state.budget.searchesUsed + 1,
-      latencyMs: state.budget.latencyMs + page.elapsedMs,
-    }
-    const candidateRefs = candidates.map(candidate => candidate.ref)
-    const canContinue = budget.searchesUsed < budget.maxSearches
-      && budget.roundsUsed < budget.maxRounds
-      && budget.latencyMs < budget.maxLatencyMs
-      && noProgressStreak < this.#noProgressLimit
-    const canPromote = budget.promotionsUsed < budget.maxPromotions
-      && budget.roundsUsed < budget.maxRounds
-      && budget.latencyMs < budget.maxLatencyMs
-      && budget.evidenceTokensUsed < budget.maxEvidenceTokens
-    const evidenceFields: readonly TicketEvidenceField[] = ['problemDescription', 'conversationOrUpdates', 'resolutionSteps', 'rootCause', 'answer']
-    const allowedActions: RetrievalAllowedAction[] = [action('assess', candidateRefs), action('read_state')]
-    if (page.nextCursor !== undefined && canContinue) allowedActions.push(action('search_next'))
-    if (canContinue) allowedActions.push(action('repair_search'))
-    if (candidateRefs.length > 0 && canPromote) {
-      allowedActions.push(action('promote', candidateRefs, evidenceFields, budget.maxEvidenceTokens - budget.evidenceTokensUsed))
-    }
-    const next = this.#next(state, {
-      phase: 'assessed',
-      query: { ...state.query, spec, confirmedConstraints: [...spec.filters] },
-      candidates,
-      lastPage: page,
-      gaps: systemGaps(candidateRefs),
-      allowedActions,
-      budget,
-      progress: {
-        newCandidateRefs: newRefs,
-        rankOverlap: overlap,
-        newDecisiveEvidence: false,
-        resolvedGaps: candidateRefs.length > 0 ? ['coverage'] : [],
-        noProgressStreak,
-      },
-      provenance: { ...state.provenance, sourceEventIds: [searched.eventId] },
-    })
-    this.#record(next)
-    return next
+    return this.#executeSearch(principal, state, 'next_page', {
+      mode: state.query.spec.mode,
+      cursor: state.lastPage.nextCursor,
+    }, signal)
   }
-
-  assess(state: RetrievalState, assessment: RetrievalAssessment): RetrievalState {
+  assess(state: RetrievalState, assessment: RetrievalKnowledgeAssessment): RetrievalState {
     hasAction(state, 'assess')
-    const selected = validateRefs(state, assessment.selectedCandidateRefs)
-    const knownEvidence = new Set<string>([
-      ...state.candidates.map(candidate => candidate.ref),
-      ...state.promotedEvidence.map(evidence => evidence.evidenceId),
-    ])
-    for (const gap of assessment.gaps) {
-      if (gap.evidenceRefs.some(ref => !knownEvidence.has(ref))) throw new RetrievalError('INVALID_REQUEST', 'Gap 引用了当前状态外的证据。')
-    }
-    const candidateRefs = state.candidates.map(candidate => candidate.ref)
-    const fields: readonly TicketEvidenceField[] = ['problemDescription', 'conversationOrUpdates', 'resolutionSteps', 'rootCause', 'answer']
-    const actions: RetrievalAllowedAction[] = [action('read_state')]
-    const canSearch = state.budget.searchesUsed < state.budget.maxSearches
-      && state.budget.roundsUsed < state.budget.maxRounds
-      && state.budget.latencyMs < state.budget.maxLatencyMs
-      && state.progress.noProgressStreak < this.#noProgressLimit
-    const canPromote = state.budget.promotionsUsed < state.budget.maxPromotions
-      && state.budget.roundsUsed < state.budget.maxRounds
-      && state.budget.latencyMs < state.budget.maxLatencyMs
-      && state.budget.evidenceTokensUsed < state.budget.maxEvidenceTokens
-    let termination: RetrievalTermination = 'active'
-    switch (assessment.decision) {
-      case 'sufficient':
-        if (selected.length === 0) throw new RetrievalError('INVALID_REQUEST', '证据充分时必须选择至少一个当前候选。')
-        actions.unshift(action('freeze', selected))
-        break
-      case 'no_result':
-        if (state.candidates.length > 0 || selected.length > 0) throw new RetrievalError('INVALID_REQUEST', '存在候选时不能评估为无结果。')
-        actions.unshift(action('freeze'))
-        break
-      case 'needs_clarification':
-        if (candidateRefs.length < 2) throw new RetrievalError('INVALID_REQUEST', '候选不足时不能生成候选差异澄清。')
-        actions.unshift(action('request_clarification', candidateRefs))
-        termination = 'needs_clarification'
-        break
-      case 'partial':
-        actions.unshift(action('freeze', selected.length === 0 ? candidateRefs : selected))
-        if (canPromote && candidateRefs.length > 0) {
-          actions.unshift(action('promote', candidateRefs, fields, state.budget.maxEvidenceTokens - state.budget.evidenceTokensUsed))
-        }
-        break
-      case 'continue':
-        if (canSearch) actions.unshift(action('repair_search'))
-        if (canPromote && candidateRefs.length > 0) {
-          actions.unshift(action('promote', candidateRefs, fields, state.budget.maxEvidenceTokens - state.budget.evidenceTokensUsed))
-        }
-        if (actions.length === 1) actions.unshift(action('freeze', candidateRefs))
-        break
-      default:
-        return assessment.decision satisfies never
-    }
+    const assessed = this.#journal.append(state.retrievalId, 'retrieval/knowledge-assessed', { assessment })
+    const patch = planKnowledgeAssessment(state, assessment, { noProgressLimit: this.#noProgressLimit })
     const next = this.#next(state, {
-      gaps: [...assessment.gaps],
-      allowedActions: actions,
-      termination,
+      ...patch,
       provenance: {
         ...state.provenance,
         ...(assessment.model === undefined ? {} : { model: assessment.model }),
-        sourceEventIds: [],
+        sourceEventIds: [assessed.eventId],
       },
     })
     this.#record(next)
     return next
+  }
+
+  /** Only an exhausted empty Provider result is semantically safe to finish without a model assessment. */
+  finalizeExhaustedEmptyResult(state: RetrievalState): RetrievalState {
+    const providerExhausted = state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined
+    if (state.phase === 'stopped' || state.candidates.length > 0 || !providerExhausted) return state
+    const assessAction = state.allowedActions.find(candidate => candidate.kind === 'assess')
+    if (assessAction === undefined) return state
+    const assessed = this.assess(state, {
+      decision: 'no_result', coverage: 1, candidateQuality: 1,
+      selectedCandidateRefs: [], excludedCandidateRefs: [], gaps: [],
+      nextAction: 'finish', stop: true,
+    })
+    return this.freeze(assessed, [])
   }
 
   async promote(principal: TrustedPrincipalContext, state: RetrievalState, refs: readonly TicketCandidateRef[], fields: readonly TicketEvidenceField[], tokenBudget: number, signal?: AbortSignal): Promise<RetrievalState> {
@@ -321,7 +246,11 @@ export class RetrievalController {
     const next = this.#next(state, {
       phase: 'assessed',
       promotedEvidence: [...state.promotedEvidence, ...result.evidence],
-      allowedActions: [action('assess', state.candidates.map(candidate => candidate.ref)), action('read_state')],
+      allowedActions: [
+        action('assess', state.candidates.map(candidate => candidate.ref)),
+        ...state.allowedActions.filter(candidate => candidate.kind === 'search_next' || candidate.kind === 'repair_search'),
+        action('read_state'),
+      ],
       budget,
       progress: { ...state.progress, newDecisiveEvidence: result.evidence.length > 0, noProgressStreak: result.evidence.length > 0 ? 0 : state.progress.noProgressStreak + 1 },
       provenance: { ...state.provenance, sourceEventIds: [promoted.eventId] },
@@ -329,9 +258,13 @@ export class RetrievalController {
     this.#record(next)
     return next
   }
-
-  requestClarification(state: RetrievalState, facet: keyof NonNullable<RetrievalState['candidates'][number]>['l0'], question: string, refs: readonly TicketCandidateRef[]): RetrievalState {
+  requestClarification(state: RetrievalState, facet: string, question: string, refs: readonly TicketCandidateRef[]): RetrievalState {
     hasAction(state, 'request_clarification')
+    const field = state.snapshot?.fieldCatalog.find(candidate => candidate.key === facet && candidate.accessLevel === 'L0')
+    if (field === undefined) throw new RetrievalError('FIELD_NOT_ALLOWED', '澄清字段未由当前授权快照声明为 L0。')
+    if (!field.filterOperators.includes('eq') && !field.filterOperators.includes('contains')) {
+      throw new RetrievalError('FIELD_NOT_ALLOWED', '澄清字段必须能转换为当前 Provider 支持的类型化过滤条件。')
+    }
     const selected = validateRefs(state, refs)
     if (selected.length < 2 || facetValues(state, facet, selected).size < 2) {
       throw new RetrievalError('INVALID_REQUEST', '澄清必须来自至少两个候选的真实字段差异。')
@@ -350,14 +283,26 @@ export class RetrievalController {
     return next
   }
 
-  answerClarification(state: RetrievalState, input: { readonly accepted: boolean; readonly answer?: string; readonly delta?: TicketQueryDelta }): RetrievalState {
+  answerClarification(state: RetrievalState, input: { readonly accepted: boolean; readonly answer?: string }): RetrievalState {
     hasAction(state, 'answer_clarification')
     if (state.clarification === undefined) throw new RetrievalError('INVALID_TRANSITION', '当前没有待回答的澄清问题。')
     const answer = input.answer?.trim()
-    if (input.accepted && (answer === undefined || answer.length === 0 || input.delta === undefined)) {
-      throw new RetrievalError('INVALID_REQUEST', '接受澄清时必须提供答案和类型化查询修改。')
+    if (input.accepted && (answer === undefined || answer.length === 0)) {
+      throw new RetrievalError('INVALID_REQUEST', '接受澄清时必须提供非空答案。')
     }
-    const spec = input.accepted ? applyQueryDelta(state.query.spec, input.delta) : state.query.spec
+    const descriptor = state.snapshot?.fieldCatalog.find(field => field.key === state.clarification!.facet)
+    const operator = descriptor?.filterOperators.includes('eq') === true
+      ? 'eq' as const
+      : descriptor?.filterOperators.includes('contains') === true ? 'contains' as const : undefined
+    if (input.accepted && operator === undefined) {
+      throw new RetrievalError('FIELD_NOT_ALLOWED', '澄清答案无法转换为 Provider 支持的类型化过滤条件。')
+    }
+    const spec = input.accepted
+      ? applyQueryDelta(state.query.spec, {
+          kind: 'add_filter',
+          filter: { field: state.clarification.facet, op: operator!, value: answer! },
+        })
+      : state.query.spec
     const event = this.#journal.append(state.retrievalId, 'retrieval/clarification-answered', {
       facet: state.clarification.facet,
       accepted: input.accepted,
@@ -374,7 +319,14 @@ export class RetrievalController {
         confirmedConstraints: [...spec.filters],
         unresolvedConstraints: input.accepted ? [] : [...state.query.unresolvedConstraints, state.clarification.facet],
       },
+      gaps: state.gaps.map(gap => input.accepted
+        && ['ambiguity', 'boundary', 'constraint'].includes(gap.kind)
+        && (gap.status === 'open' || gap.status === 'unknown')
+        ? { ...gap, status: 'resolved' as const }
+        : gap),
       clarification: { ...state.clarification, ...(answer === undefined ? {} : { answer }) },
+      selectedCandidateRefs: [],
+      lastAssessment: undefined,
       allowedActions: actions,
       termination: 'active',
       provenance: { ...state.provenance, sourceEventIds: [event.eventId] },
@@ -393,7 +345,20 @@ export class RetrievalController {
     hasAction(state, 'freeze')
     if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '当前检索没有有效快照。')
     const selected = validateRefs(state, refs)
-    const stoppingReason = reason ?? (selected.length === 0 ? 'no_result' : state.gaps.some(gap => gap.status === 'open') ? 'partial' : 'sufficient')
+    const completenessSatisfied = retrievalCompletenessSatisfied(
+      state.task, state.candidates.length, state.lastPage, state.lastAssessment,
+    )
+    const searchBudgetExhausted = state.budget.searchesUsed >= state.budget.maxSearches
+      || state.budget.roundsUsed >= state.budget.maxRounds
+      || state.budget.latencyMs >= state.budget.maxLatencyMs
+    const stoppingReason = reason ?? (!completenessSatisfied
+      ? searchBudgetExhausted ? 'budget_exhausted' : 'partial'
+      : selected.length === 0
+        ? 'no_result'
+        : state.gaps.some(gap => gap.status === 'open' || gap.status === 'unknown') ? 'partial' : 'sufficient')
+    if ((stoppingReason === 'sufficient' || stoppingReason === 'no_result') && !completenessSatisfied) {
+      throw new RetrievalError('INVALID_TRANSITION', '当前检索尚未满足任务完整性要求，不能冻结为完整集合。')
+    }
     if (stoppingReason === 'no_result' && state.candidates.length > 0) throw new RetrievalError('INVALID_TRANSITION', '存在候选时不能冻结为无结果。')
     const pack: FrozenEvidencePack = {
       packId: this.#id(),
@@ -418,7 +383,7 @@ export class RetrievalController {
       stoppingReason,
       remainingGaps: state.gaps.filter(gap => gap.status === 'open' || gap.status === 'unknown'),
       budget: state.budget,
-      complete: stoppingReason === 'sufficient' || stoppingReason === 'no_result',
+      complete: completenessSatisfied && (stoppingReason === 'sufficient' || stoppingReason === 'no_result'),
       providerId: state.snapshot.providerId,
       promptVersion: state.provenance.promptVersion,
     }
@@ -450,20 +415,38 @@ export class RetrievalController {
     return next
   }
 
-  validateFrozenReferences(state: RetrievalState, displayIds: readonly string[], evidenceIds: readonly string[]): FrozenEvidencePack {
-    const pack = state.frozenEvidence
-    if (pack === undefined) throw new RetrievalError('INVALID_TRANSITION', '回答前必须冻结证据。')
-    const allowedDisplayIds = new Set(pack.candidates.map(candidate => candidate.displayId))
-    const allowedEvidenceIds = new Set<string>(pack.candidates.flatMap(candidate => candidate.evidenceIds))
-    if (displayIds.some(id => !allowedDisplayIds.has(id)) || evidenceIds.some(id => !allowedEvidenceIds.has(id))) {
-      throw new RetrievalError('UNAUTHORIZED', '最终回答引用了冻结证据包以外的工单或证据。')
-    }
-    return pack
+  async #executeSearch(
+    principal: TrustedPrincipalContext,
+    state: RetrievalState,
+    stage: 'initial_hybrid' | 'repair_search' | 'next_page',
+    input: {
+      readonly mode?: TicketRetrievalMode
+      readonly delta?: TicketQueryDelta
+      readonly cursor?: string
+    },
+    signal?: AbortSignal,
+  ): Promise<RetrievalState> {
+    const result = await executeSearchTransition({
+      provider: this.#provider,
+      journal: this.#journal,
+      principal,
+      state,
+      stage,
+      ...(input.mode === undefined ? {} : { mode: input.mode }),
+      ...(input.delta === undefined ? {} : { delta: input.delta }),
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      ...(signal === undefined ? {} : { signal }),
+      topK: this.#searchTopK,
+      maxScan: this.#searchMaxScan,
+    })
+    const next = this.#next(state, result.patch)
+    this.#record(next)
+    return next
   }
 
   #next(state: RetrievalState, patch: Partial<RetrievalState>): RetrievalState {
     const revision = state.revision + 1
-    return {
+    const next: RetrievalState = {
       ...state,
       ...patch,
       stateId: RetrievalStateId(this.#stateId(state.retrievalId, revision)),
@@ -471,6 +454,9 @@ export class RetrievalController {
       revision,
       updatedAt: this.#now().toISOString(),
     }
+    if (next.lastAssessment !== undefined) return next
+    const { lastAssessment: _lastAssessment, ...serializable } = next
+    return serializable
   }
 
   #record(state: RetrievalState): void {

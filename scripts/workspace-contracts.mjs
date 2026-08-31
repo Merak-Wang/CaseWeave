@@ -103,6 +103,9 @@ for (const entry of contract.packages) {
       && /export\s+default\b/u.test(source)) {
       failures.push(`${relativeFile}: DSH plugin entry with named apply/inject must not export a default that hides loader metadata`)
     }
+    if (/\bextends\s+Service\b/u.test(source) && /(^|[^\w$])#[A-Za-z_$][\w$]*/mu.test(source)) {
+      failures.push(`${relativeFile}: Cordis Service subclasses must not use ECMAScript #private members because trace proxies change the method receiver`)
+    }
 
     const importPattern = /(?:from\s+|import\s*\()(['"])(@retrieval-agent\/[^'"/]+)(?:\/[^'"]*)?\1/gu
     for (const match of source.matchAll(importPattern)) {
@@ -162,11 +165,12 @@ ${rows.join('\n')}
 - 一方包必须使用 \`${contract.packageScope}*\`；禁止创建 ${contract.forbiddenGenericPackageNames.map(value => `\`${value}\``).join('、')} 这类兜底包。
 - 线协议只放在 \`${contract.protocolConvention.fileName}\`，导出载荷使用 ${contract.protocolConvention.allowedExportedTypeSuffixes.map(value => `\`*${value}\``).join('、')} 后缀。
 - 包内测试与实现相邻，使用 \`name.spec.ts\`；跨包组合测试才进入根目录 \`${contract.testConvention.repositoryIntegrationRoot}/\`。
+- Cordis \`Service\` 子类不得使用 ECMAScript \`#private\` 成员；服务必须通过 \`ctx.<service>\` trace proxy 回归测试。
 - 单个生产模块不得超过 ${contract.maxModuleLines} 行；包预算不是扩容目标，接近门槛就应重新判断能力所有权。
 
 ## 运行时边界
 
-\`ui-ticket-results\` 只渲染安全投影，并只依赖 \`product-api/protocol\` 的线协议；\`product-host\` 才能把协议绑定到 DSH Web、活动 Session 与可信 Principal。\`bundle\` 是唯一默认装配点，因而可以依赖具体本地 Provider；\`agent-plugin\` 只依赖 Provider 端口，不得把 Provider 算法收回应用层。Python 评测位于生产 pnpm workspace 之外，只能通过公开测试驱动协议观察产品。
+\`ui-ticket-results\` 只渲染安全事件投影；\`ui-product-shell\` 只通过 \`product-api/protocol\` 调用会话头能力；\`product-host\` 才能把协议绑定到 DSH Web、活动 Session 与可信 Principal。\`retrieval-ranking\` 不读取来源或执行授权，\`agent-plugin\` 也不得把 Provider 算法收回应用层。\`bundle\` 是唯一默认装配点。Python 评测与模型服务都位于生产 pnpm workspace 之外：前者只能通过公开测试驱动协议观察产品，后者只能由 \`model-service-client\` 经版本化进程协议调用。
 `
 }
 

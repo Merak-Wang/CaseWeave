@@ -4,11 +4,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   RetrievalError,
   type EvidenceContextSelection,
-  type FrozenEvidencePack,
+  type RetrievalKnowledgeAssessment,
   type RetrievalState,
   type TicketCandidateRef,
   type TicketEvidenceField,
-  type TicketQueryDelta,
   type TicketRetrievalRequest,
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
@@ -16,8 +15,8 @@ import {
   EvidenceContextPolicy,
   RetrievalController,
   foldRetrievalEvents,
-  type RetrievalAssessment,
   type RetrievalControllerConfig,
+  type RetrievalSearchInput,
 } from '@retrieval-agent/domain'
 import { installDshSessionCompatibility, readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
 import { SessionRetrievalEventJournal } from './session-journal.js'
@@ -26,6 +25,7 @@ interface ActiveRetrieval {
   readonly controller: RetrievalController
   readonly journal: SessionRetrievalEventJournal
   state: RetrievalState
+  mutationTail: Promise<void>
 }
 
 function stoppedReason(error: unknown): 'budget_exhausted' | 'permission_blocked' | 'backend_error' | 'snapshot_invalid' | 'cancelled' | undefined {
@@ -65,23 +65,23 @@ function latestRetrieval(agent: Agent): { readonly events: ReturnType<typeof rea
 /** Per-session product application; model calls only intents on this service. */
 export class RetrievalAgentService extends Service {
   static inject = ['ticketRetrievalProvider', 'ticketPrincipalProvider']
-  readonly #active = new WeakMap<Agent, ActiveRetrieval>()
-  readonly #controllerConfig: RetrievalControllerConfig
+  private readonly active = new WeakMap<Agent, ActiveRetrieval>()
+  private readonly controllerConfig: RetrievalControllerConfig
   readonly contextTokenBudget: number
 
   constructor(ctx: Context, config: RetrievalAgentServiceConfig = {}) {
     super(ctx, 'retrievalAgent')
     installDshSessionCompatibility()
-    this.#controllerConfig = config
+    this.controllerConfig = config
     this.contextTokenBudget = config.contextTokenBudget ?? 1_500
   }
 
   currentOrUndefined(agent: Agent): RetrievalState | undefined {
-    return this.#active.get(agent)?.state ?? latestRetrieval(agent)?.state
+    return this.active.get(agent)?.state ?? latestRetrieval(agent)?.state
   }
 
   current(agent: Agent): RetrievalState {
-    return this.#entry(agent).state
+    return this.entry(agent).state
   }
 
   async start(agent: Agent, request: TicketRetrievalRequest, signal?: AbortSignal): Promise<RetrievalState> {
@@ -94,91 +94,128 @@ export class RetrievalAgentService extends Service {
       this.ctx.ticketRetrievalProvider,
       journal,
       new EvidenceContextPolicy(),
-      this.#controllerConfig,
+      this.controllerConfig,
     )
-    const principal = await this.#principal(agent, 'snapshot_open', signal)
-    const state = await controller.start(principal, request, signal)
-    this.#active.set(agent, { controller, journal, state })
-    return state
-  }
-
-  async search(agent: Agent, input: { readonly delta?: TicketQueryDelta; readonly cursor?: string }, signal?: AbortSignal): Promise<RetrievalState> {
-    const entry = this.#entry(agent)
-    try {
-      const principal = await this.#principal(agent, 'search', signal)
-      entry.state = await entry.controller.search(principal, entry.state, input, signal)
-    } catch (error) {
-      const reason = stoppedReason(error)
-      if (reason === undefined) throw error
-      entry.state = entry.controller.stop(entry.state, reason)
+    const principal = await this.resolvePrincipal(agent, 'snapshot_open', signal)
+    const entry = {
+      controller,
+      journal,
+      state: await controller.start(principal, request, signal),
+      mutationTail: Promise.resolve(),
     }
-    return entry.state
+    this.active.set(agent, entry)
+    return this.finalize(entry)
   }
 
-  assess(agent: Agent, assessment: RetrievalAssessment): RetrievalState {
-    const entry = this.#entry(agent)
-    entry.state = entry.controller.assess(entry.state, assessment)
-    return entry.state
+  async search(agent: Agent, input: RetrievalSearchInput, signal?: AbortSignal): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return await this.mutate(entry, async state => {
+      if (state.phase === 'stopped') return state
+      try {
+        const principal = await this.resolvePrincipal(agent, 'search', signal)
+        return await entry.controller.search(principal, state, input, signal)
+      } catch (error) {
+        const reason = stoppedReason(error)
+        if (reason === undefined) throw error
+        return entry.controller.stop(state, reason)
+      }
+    })
+  }
+
+  async continueRanking(agent: Agent, signal?: AbortSignal): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return await this.mutate(entry, async state => {
+      const principal = await this.resolvePrincipal(agent, 'search', signal)
+      return await entry.controller.continueRanking(principal, state, signal)
+    })
+  }
+
+  async assess(agent: Agent, assessment: RetrievalKnowledgeAssessment): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return await this.mutate(entry, async state => {
+      const assessed = entry.controller.assess(state, assessment)
+      const freeze = assessed.allowedActions.find(action => action.kind === 'freeze')
+      return freeze === undefined ? assessed : entry.controller.freeze(assessed, assessed.selectedCandidateRefs)
+    })
   }
 
   async promote(agent: Agent, refs: readonly TicketCandidateRef[], fields: readonly TicketEvidenceField[], tokenBudget: number, signal?: AbortSignal): Promise<RetrievalState> {
-    const entry = this.#entry(agent)
-    try {
-      const principal = await this.#principal(agent, 'evidence_read', signal)
-      entry.state = await entry.controller.promote(principal, entry.state, refs, fields, tokenBudget, signal)
-    } catch (error) {
-      const reason = stoppedReason(error)
-      if (reason === undefined) throw error
-      entry.state = entry.controller.stop(entry.state, reason)
-    }
-    return entry.state
+    const entry = this.entry(agent)
+    return await this.mutate(entry, async state => {
+      if (state.phase === 'stopped') return state
+      try {
+        const principal = await this.resolvePrincipal(agent, 'evidence_read', signal)
+        return await entry.controller.promote(principal, state, refs, fields, tokenBudget, signal)
+      } catch (error) {
+        const reason = stoppedReason(error)
+        if (reason === undefined) throw error
+        return entry.controller.stop(state, reason)
+      }
+    })
   }
 
-  requestClarification(agent: Agent, facet: keyof RetrievalState['candidates'][number]['l0'], question: string, refs: readonly TicketCandidateRef[]): RetrievalState {
-    const entry = this.#entry(agent)
+  requestClarification(agent: Agent, facet: string, question: string, refs: readonly TicketCandidateRef[]): RetrievalState {
+    const entry = this.entry(agent)
     entry.state = entry.controller.requestClarification(entry.state, facet, question, refs)
-    return entry.state
+    return this.finalize(entry)
   }
 
-  answerClarification(agent: Agent, input: { readonly accepted: boolean; readonly answer?: string; readonly delta?: TicketQueryDelta }): RetrievalState {
-    const entry = this.#entry(agent)
+  answerClarification(agent: Agent, input: { readonly accepted: boolean; readonly answer?: string }): RetrievalState {
+    const entry = this.entry(agent)
     entry.state = entry.controller.answerClarification(entry.state, input)
-    return entry.state
+    return this.finalize(entry)
   }
 
   freeze(agent: Agent, refs: readonly TicketCandidateRef[]): RetrievalState {
-    const entry = this.#entry(agent)
+    const entry = this.entry(agent)
     entry.state = entry.controller.freeze(entry.state, refs)
-    return entry.state
+    return this.finalize(entry)
   }
 
   projectContext(agent: Agent, tokenBudget = this.contextTokenBudget): EvidenceContextSelection {
-    const entry = this.#entry(agent)
+    const entry = this.entry(agent)
     return entry.controller.projectContext(entry.state, tokenBudget)
   }
 
-  validateFrozenReferences(agent: Agent, displayIds: readonly string[], evidenceIds: readonly string[]): FrozenEvidencePack {
-    const entry = this.#entry(agent)
-    return entry.controller.validateFrozenReferences(entry.state, displayIds, evidenceIds)
-  }
-
   async principal(agent: Agent, operation: 'detail_read' | 'export', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
-    return await this.#principal(agent, operation, signal)
+    return await this.resolvePrincipal(agent, operation, signal)
   }
 
-  #entry(agent: Agent): ActiveRetrieval {
-    const active = this.#active.get(agent)
+  private entry(agent: Agent): ActiveRetrieval {
+    const active = this.active.get(agent)
     if (active !== undefined) return active
     const replayed = latestRetrieval(agent)
     if (replayed === undefined) throw new RetrievalError('INVALID_TRANSITION', '当前会话尚未开始检索。')
     const journal = new SessionRetrievalEventJournal(agent.session)
-    const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, new EvidenceContextPolicy(), this.#controllerConfig)
-    const entry = { controller, journal, state: replayed.state }
-    this.#active.set(agent, entry)
+    const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, new EvidenceContextPolicy(), this.controllerConfig)
+    const entry = { controller, journal, state: replayed.state, mutationTail: Promise.resolve() }
+    this.active.set(agent, entry)
     return entry
   }
 
-  async #principal(agent: Agent, operation: 'snapshot_open' | 'search' | 'evidence_read' | 'detail_read' | 'export', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
+  private finalize(entry: ActiveRetrieval): RetrievalState {
+    entry.state = entry.controller.finalizeExhaustedEmptyResult(entry.state)
+    return entry.state
+  }
+
+  /** Serialize state-changing tools so parallel model tool calls cannot lose updates. */
+  private async mutate(
+    entry: ActiveRetrieval,
+    operation: (state: RetrievalState) => Promise<RetrievalState>,
+  ): Promise<RetrievalState> {
+    const previous = entry.mutationTail
+    let release = (): void => undefined
+    entry.mutationTail = new Promise<void>(resolve => { release = resolve })
+    await previous
+    try {
+      entry.state = await operation(entry.state)
+      return this.finalize(entry)
+    } finally {
+      release()
+    }
+  }
+
+  private async resolvePrincipal(agent: Agent, operation: 'snapshot_open' | 'search' | 'evidence_read' | 'detail_read' | 'export', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
     return await this.ctx.ticketPrincipalProvider.resolve(
       { sessionId: String(agent.session.id), operation },
       signal === undefined ? undefined : { signal },
