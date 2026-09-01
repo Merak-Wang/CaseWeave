@@ -120,6 +120,9 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       countPolicy,
       mode: request.mode ?? this.#defaultMode,
       filters: [...request.filters ?? []],
+      ...(request.queryContract?.logic === undefined
+        ? {}
+        : { requiredConcepts: request.queryContract.logic.requiredConcepts.map(concept => ({ ...concept, alternatives: [...concept.alternatives] })) }),
       ambiguities: [...request.ambiguities ?? []],
       excludedTerms: [],
       semanticHints: [],
@@ -178,7 +181,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     if (!Number.isSafeInteger(options.maxScan) || options.maxScan < 1) throw new RetrievalError('INVALID_REQUEST', 'maxScan 无效。')
     const queryFingerprint = sha256(stableJson(query))
     const offset = this.#decodeCursor(options.cursor, snapshotId, queryFingerprint)
-    const terms = tokenize(`${query.normalizedQuery} ${query.semanticHints.join(' ')}`)
+    const terms = tokenize(`${query.normalizedQuery} ${query.semanticHints.join(' ')} ${query.requiredConcepts?.flatMap(concept => concept.alternatives).join(' ') ?? ''}`)
     const filtered = entry.records.filter(record => query.filters.every(filter => matchesFilter(record, filter)))
     const documents = rankingDocuments(filtered)
     let ranked
@@ -187,6 +190,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
         text: query.normalizedQuery,
         semanticHints: query.semanticHints,
         excludedTerms: query.excludedTerms,
+        ...(query.requiredConcepts === undefined ? {} : { requiredConcepts: query.requiredConcepts }),
         mode: query.mode,
       }, { maxScan: options.maxScan, ...(options.signal === undefined ? {} : { signal: options.signal }) })
     } catch (error) {

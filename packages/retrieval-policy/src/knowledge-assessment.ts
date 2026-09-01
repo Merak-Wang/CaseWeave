@@ -69,15 +69,15 @@ function modelGaps(state: RetrievalState, gaps: readonly RetrievalGap[]): Retrie
 
 function canSearch(state: RetrievalState, noProgressLimit: number): boolean {
   return state.budget.searchesUsed < state.budget.maxSearches
-    && state.budget.roundsUsed < state.budget.maxRounds
-    && state.budget.latencyMs < state.budget.maxLatencyMs
+    && (state.budget.modelStepsUsed ?? state.budget.roundsUsed) < state.budget.maxRounds
+    && (state.budget.wallClockElapsedMs ?? state.budget.latencyMs) < state.budget.maxLatencyMs
     && state.progress.noProgressStreak < noProgressLimit
 }
 
 function canPromote(state: RetrievalState): boolean {
   return state.budget.promotionsUsed < state.budget.maxPromotions
-    && state.budget.roundsUsed < state.budget.maxRounds
-    && state.budget.latencyMs < state.budget.maxLatencyMs
+    && (state.budget.modelStepsUsed ?? state.budget.roundsUsed) < state.budget.maxRounds
+    && (state.budget.wallClockElapsedMs ?? state.budget.latencyMs) < state.budget.maxLatencyMs
     && state.budget.evidenceTokensUsed < state.budget.maxEvidenceTokens
 }
 
@@ -121,11 +121,12 @@ export function planKnowledgeAssessment(
     && state.candidateHistory.length >= state.task.requestedCount
   const semanticCoverageAccepted = state.task.completenessRequirement === 'top_k' && assessment.stop
     && assessment.coverage >= (config.minSufficientCoverage ?? 0.6)
-  const coverageResolved = providerExhausted || explicitQuotaReached || semanticCoverageAccepted
+  const taskSatisfied = providerExhausted || (state.task.completenessRequirement === 'top_k'
+    && (explicitQuotaReached || semanticCoverageAccepted))
   const coverageGap: RetrievalGap = {
     kind: 'coverage',
-    status: coverageResolved ? 'resolved' : 'open',
-    evidenceRefs: coverageResolved ? selected : [],
+    status: providerExhausted ? 'resolved' : 'open',
+    evidenceRefs: providerExhausted ? selected : [],
     evaluator: 'system',
   }
   const gaps = [coverageGap, ...preservedSystemGaps, ...semanticGaps]
@@ -138,7 +139,7 @@ export function planKnowledgeAssessment(
     case 'sufficient':
       requireControlShape(assessment, 'sufficient', 'finish', true)
       if (selected.length === 0 || assessment.coverage < (config.minSufficientCoverage ?? 0.6)
-        || assessment.candidateQuality < (config.minSufficientQuality ?? 0.5) || !coverageResolved || openNonCoverage) {
+        || assessment.candidateQuality < (config.minSufficientQuality ?? 0.5) || !taskSatisfied || openNonCoverage) {
         throw new RetrievalError('INVALID_TRANSITION', '充分评估必须选择候选、达到质量阈值且不存在开放语义缺口。')
       }
       if (state.task.countPolicy === 'explicit' && selected.length < state.task.requestedCount && !providerExhausted) {
@@ -148,9 +149,9 @@ export function planKnowledgeAssessment(
       break
     case 'no_result':
       requireControlShape(assessment, 'no_result', 'finish', true)
-      if (selected.length > 0 || candidates.length > 0 || !coverageResolved
+      if (selected.length > 0 || candidates.length > 0 || !providerExhausted
         || assessment.coverage < (config.minSufficientCoverage ?? 0.6)) {
-        throw new RetrievalError('INVALID_TRANSITION', '无结果评估必须排除全部 active 候选并达到覆盖阈值。')
+        throw new RetrievalError('INVALID_TRANSITION', '无结果只能在 Provider 已穷尽且没有 active 候选时成立。')
       }
       actions.unshift(action('freeze'))
       break
@@ -203,5 +204,6 @@ export function planKnowledgeAssessment(
     gaps,
     allowedActions: actions,
     termination,
+    progress: { ...state.progress, newCandidateRefs: [], newEvidenceIds: [] },
   }
 }

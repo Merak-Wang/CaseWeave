@@ -79,6 +79,57 @@ describe('LocalTicketProvider authorization boundary', () => {
     expect(snapshot.authorizationVersion).toBe('entitlements-v1')
   })
 
+  it('enforces every concept in an explicit AND contract before ranking', async () => {
+    const provider = new LocalTicketProvider([
+      ...fixtureRecords(),
+      record({ ticketId: 'T-6', displayId: 'INC-6', title: '副卡新增订单失败' }),
+      record({ ticketId: 'T-7', displayId: 'INC-7', title: '副卡在省外漫游无法上网' }),
+    ], { now: () => BASE_TIME })
+    const user = principal()
+    const snapshot = await provider.openSnapshot(user)
+    const spec = provider.resolve({
+      target: 'ranked_cases',
+      query: '查找副卡和跨域有关工单',
+      retrievalQuery: '副卡和跨域',
+      requestedCount: 20,
+      countPolicy: 'adaptive',
+      filters: [],
+      ambiguities: [],
+      queryContract: {
+        schemaVersion: 2,
+        original: '查找副卡和跨域有关工单',
+        normalized: '副卡和跨域',
+        task: 'ranked_cases',
+        resultPolicy: 'adaptive_top_k',
+        maxResults: 20,
+        domain: 'telecom_ticket',
+        language: 'zh',
+        entities: [{ type: 'business_object', surface: '副卡', canonical: '副卡' }],
+        constraints: [],
+        logic: {
+          operator: 'and',
+          requiredConcepts: [
+            { surface: '副卡', canonical: '副卡', alternatives: ['副卡'] },
+            { surface: '跨域', canonical: '跨域', alternatives: ['跨域', '跨省', '省外', '漫游'] },
+          ],
+        },
+        ambiguities: [],
+        confidence: 1,
+        compilerVersion: 'direct-query-contract-v3',
+      },
+    })
+
+    const page = await provider.search(user, snapshot.snapshotId, spec, {
+      topK: 20,
+      maxScan: 100,
+      stage: 'baseline',
+    })
+
+    expect(spec.requiredConcepts?.map(concept => concept.canonical)).toEqual(['副卡', '跨域'])
+    expect(page.candidates.map(candidate => candidate.displayId)).toEqual(['INC-7'])
+    expect(page.completeness).toBe('exhaustive')
+  })
+
   it('binds snapshots to the exact trusted principal and rejects forged candidate refs', async () => {
     const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME })
     const user = principal()

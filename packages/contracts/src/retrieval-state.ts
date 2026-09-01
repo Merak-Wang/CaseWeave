@@ -11,6 +11,8 @@ import type {
   TicketEvidenceField,
   TicketEvidenceSegment,
   TicketFilter,
+  TicketQueryLogic,
+  TicketQueryContract,
   TicketRetrievalSpec,
   TicketSearchPage,
   TicketSnapshot,
@@ -92,10 +94,22 @@ export interface RetrievalBudgetState {
   readonly promotionsUsed: number
   readonly evidenceTokensUsed: number
   readonly latencyMs: number
+  /** Actual conversation-model requests admitted by the Harness. */
+  readonly modelStepsUsed?: number
+  readonly successfulToolCalls?: number
+  readonly failedToolCalls?: number
+  readonly providerLatencyMs?: number
+  readonly modelLatencyMs?: number
+  readonly wallClockElapsedMs?: number
+  readonly serializationBytes?: number
+  readonly totalInputTokens?: number
+  readonly totalOutputTokens?: number
 }
 
 export interface RetrievalProgressState {
   readonly newCandidateRefs: readonly TicketCandidateRef[]
+  /** Newly promoted L2 segments for the next compact tool delta. */
+  readonly newEvidenceIds?: readonly TicketEvidenceId[]
   readonly rankOverlap: number
   readonly newDecisiveEvidence: boolean
   readonly resolvedGaps: readonly RetrievalGapKind[]
@@ -141,6 +155,14 @@ export interface FrozenEvidencePack {
   readonly remainingGaps: readonly RetrievalGap[]
   readonly budget: RetrievalBudgetState
   readonly complete: boolean
+  /** The current task decision is terminal, independent of source exhaustion. */
+  readonly decisionFinalized: true
+  /** A ranked Top-K task accepted the frozen selection. */
+  readonly topKAccepted: boolean
+  /** True only when the Provider declared exhaustive and issued no cursor. */
+  readonly sourceExhausted: boolean
+  readonly resultMayBeIncomplete: boolean
+  readonly nextPageAvailable: boolean
   readonly providerId: string
   readonly promptVersion: string
 }
@@ -160,6 +182,11 @@ export interface TicketResultCollection {
   readonly snapshotShortId?: string
   readonly stoppingReason: Exclude<RetrievalTermination, 'active' | 'needs_clarification'>
   readonly complete: boolean
+  readonly decisionFinalized: true
+  readonly topKAccepted: boolean
+  readonly sourceExhausted: boolean
+  readonly resultMayBeIncomplete: boolean
+  readonly nextPageAvailable: boolean
   readonly tickets: readonly TicketCandidate[]
   readonly evidence: readonly TicketEvidenceSegment[]
   readonly remainingGapKinds: readonly RetrievalGapKind[]
@@ -180,6 +207,7 @@ export interface RetrievalState {
   readonly query: {
     readonly original: string
     readonly spec: TicketRetrievalSpec
+    readonly contract?: TicketQueryContract
     readonly confirmedConstraints: readonly TicketFilter[]
     readonly unresolvedConstraints: readonly string[]
   }
@@ -231,16 +259,32 @@ export interface CandidateExportReceipt {
   readonly auditId: string
 }
 
+/** Durable metadata for an authorized on-demand detail read; ticket content is not persisted here. */
+export interface CandidateDetailReadReceipt {
+  readonly readId: string
+  readonly retrievalId: RetrievalId
+  readonly snapshotShortId: string
+  readonly candidateRefs: readonly TicketCandidateRef[]
+  readonly fields: readonly TicketEvidenceField[]
+  readonly readAt: string
+  readonly auditId: string
+}
+
 /** Candidate node is a deterministic UI projection, never model-authored Markdown. */
 export interface TicketCandidateNode {
   readonly retrievalId: RetrievalId
   readonly version: number
   readonly querySummary: string
+  readonly queryLogic?: TicketQueryLogic
   readonly snapshotShortId?: string
   readonly completeness: 'pending' | TicketSearchPage['completeness']
+  readonly nextPageAvailable: boolean
+  readonly sourceExhausted: boolean
   readonly status: 'searching' | 'results' | 'empty' | 'partial' | 'snapshot_invalid' | 'permission_blocked' | 'error' | 'stopped'
   readonly candidates: readonly TicketCandidate[]
   readonly alreadyReadEvidence: readonly TicketEvidenceSegment[]
+  /** L2 text fields the Host may reauthorize for an explicit row click. */
+  readonly detailFields: readonly { readonly key: TicketEvidenceField; readonly label: string }[]
   readonly message?: string
   readonly exportEnabled: boolean
   /** Present only after the retrieval has reached a terminal product value. */

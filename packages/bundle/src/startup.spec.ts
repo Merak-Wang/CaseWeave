@@ -21,7 +21,7 @@ describe('installLocalProductAssets', () => {
     const receipt = await installLocalProductAssets(root)
 
     await expect(readFile(join(receipt.presetRoot, 'retrieval-agent', 'preset.yml'), 'utf8')).resolves.toContain('只读工单检索')
-    await expect(readFile(join(receipt.presetRoot, 'retrieval-agent', 'agent.cordis.yml'), 'utf8')).resolves.toContain('@retrieval-agent/agent-plugin')
+    await expect(readFile(join(receipt.presetRoot, 'retrieval-agent', 'agent.cordis.yml'), 'utf8')).resolves.toContain('@retrieval-agent/bundle/agent')
     await expect(readFile(receipt.dataPath, 'utf8')).resolves.toContain('TKT-0005')
     await expect(readFile(join(receipt.dataRoot, 'public', 'fcc-1000-seed-20260825.jsonl'), 'utf8')).resolves.toContain('FCC-')
     await expect(readFile(join(receipt.dataRoot, 'public', 'bitext-1000-seed-20260825.jsonl'), 'utf8')).resolves.toContain('BITEXT-')

@@ -19,7 +19,7 @@
       "kind": "definition",
       "capability": "跨进程与跨层共享的领域类型、事件和 Provider 端口；不含实现策略。",
       "allowedInternalDependencies": [],
-      "maxSourceLines": 900
+      "maxSourceLines": 1050
     },
     {
       "directory": "query-understanding",
@@ -51,7 +51,7 @@
       "kind": "domain",
       "capability": "确定性检索控制器、状态重放、查询收敛与证据上下文策略。",
       "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/retrieval-policy"],
-      "maxSourceLines": 1000
+      "maxSourceLines": 1150
     },
     {
       "directory": "model-service-client",
@@ -97,8 +97,8 @@
       "directory": "ui-ticket-results",
       "name": "@retrieval-agent/ui-ticket-results",
       "kind": "ui",
-      "capability": "从持久化事件投影候选节点，并注册 DSH 客户端 renderer。",
-      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/ticket-collection"],
+      "capability": "从持久化事件投影可折叠候选集合，通过 Product API 按需读取已重新授权的详情，并注册 DSH 客户端 renderer。",
+      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/product-api", "@retrieval-agent/ticket-collection"],
       "maxSourceLines": 1050
     },
     {
@@ -141,7 +141,7 @@
         "@retrieval-agent/query-understanding",
         "@retrieval-agent/ticket-collection"
       ],
-      "maxSourceLines": 1200
+      "maxSourceLines": 1500
     },
     {
       "directory": "bundle",

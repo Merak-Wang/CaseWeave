@@ -368,7 +368,7 @@ if (replayedState === undefined || JSON.stringify(replayedState) !== JSON.string
   run(process.execPath, [probe], { cwd: profile })
 
   const installedPreset = await readFile(join(home, '.agent-presets', 'retrieval-agent', 'agent.cordis.yml'), 'utf8')
-  if (!installedPreset.includes('@retrieval-agent/agent-plugin')) throw new Error('installed preset is incomplete')
+  if (!installedPreset.includes('@retrieval-agent/bundle/agent')) throw new Error('installed preset is incomplete')
   const installedCorpus = JSON.parse(await readFile(join(home, 'retrieval-agent', 'data', 'manifest.json'), 'utf8'))
   if (installedCorpus.recordCount !== 2040) throw new Error('installed development corpus is incomplete')
 

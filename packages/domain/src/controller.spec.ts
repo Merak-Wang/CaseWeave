@@ -305,7 +305,7 @@ describe('RetrievalController', () => {
     let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录 验证码', requestedCount: 3 })
     expect(state.phase).toBe('assessed')
     expect(state.lastPage?.trace.stage).toBe('initial_hybrid')
-    expect(state.budget).toMatchObject({ roundsUsed: 1, searchesUsed: 1 })
+    expect(state.budget).toMatchObject({ roundsUsed: 0, searchesUsed: 1, providerLatencyMs: 7, latencyMs: 0 })
     expect(state.allowedActions.map(item => item.kind)).toEqual(['assess', 'read_state'])
     expect(() => controller.freeze(state, [])).toThrowError(RetrievalError)
 
@@ -348,6 +348,18 @@ describe('RetrievalController', () => {
     const events = [...journal.read(state.retrievalId)]
     const broken = events.map((event, index) => index === 1 ? { ...event, sequence: 4 } : event)
     expect(() => foldRetrievalEvents(broken, state.retrievalId)).toThrow(/序列不连续/u)
+  })
+
+  it('rejects pre-v5 event streams instead of silently treating missing runtime metrics as zero', async () => {
+    const ids = deterministicIds()
+    const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
+    const controller = new RetrievalController(provider(), journal, undefined, { now: () => NOW, id: ids })
+    const state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    const legacy = journal.read(state.retrievalId).map(event => ({ ...event, schemaVersion: 4 }))
+    expect(() => foldRetrievalEvents(
+      legacy as unknown as Parameters<typeof foldRetrievalEvents>[0],
+      state.retrievalId,
+    )).toThrow(/不支持检索事件版本 4/u)
   })
 
   it('rejects provider data that escapes the requested snapshot or evidence allowlist', async () => {
@@ -399,7 +411,12 @@ describe('RetrievalController', () => {
       maxLatencyMs: 5,
     })
     let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    state = controller.recordModelRequest(state, {
+      estimatedInputTokens: 100, serializationBytes: 400, wallClockElapsedMs: 0, accepted: true,
+    })
+    state = controller.recordModelResponse(state, { modelLatencyMs: 7, outputTokens: 10, wallClockElapsedMs: 7 })
     expect(state.budget.latencyMs).toBe(7)
+    expect(state.budget).toMatchObject({ modelStepsUsed: 1, modelLatencyMs: 7, providerLatencyMs: 7 })
     expect(state.allowedActions.map(item => item.kind)).toEqual(['assess', 'read_state'])
 
     expect(() => controller.assess(state, assessment({
@@ -542,7 +559,7 @@ describe('RetrievalController', () => {
     expect(state).toMatchObject({
       phase: 'stopped',
       termination: 'sufficient',
-      frozenEvidence: { complete: true },
+      frozenEvidence: { complete: false, topKAccepted: true, sourceExhausted: false },
     })
   })
 
@@ -707,10 +724,24 @@ describe('RetrievalController', () => {
     expect(finalized).toMatchObject({
       phase: 'stopped',
       termination: 'sufficient',
+      gaps: [expect.objectContaining({ kind: 'coverage', status: 'open', evaluator: 'system' })],
       frozenEvidence: {
-        complete: true,
+        complete: false,
+        topKAccepted: true,
+        sourceExhausted: false,
+        resultMayBeIncomplete: true,
         candidates: [{ ref: SECOND_CANDIDATE_REF }],
+        remainingGaps: [expect.objectContaining({ kind: 'coverage', status: 'open' })],
       },
+    })
+    expect(createTicketResultCollection(finalized)).toMatchObject({
+      complete: false,
+      decisionFinalized: true,
+      topKAccepted: true,
+      sourceExhausted: false,
+      resultMayBeIncomplete: true,
+      nextPageAvailable: false,
+      remainingGapKinds: ['coverage'],
     })
     expect(finalized.provenance).not.toHaveProperty('model')
     expect(controller.finalizeExhaustedEmptyResult(finalized)).toBe(finalized)
@@ -740,6 +771,9 @@ describe('RetrievalController', () => {
       maxSearches: 4,
     })
     let state = await controller.start(PRINCIPAL, { target: 'cohort_collection', query: '登录' })
+    state = controller.recordModelRequest(state, {
+      estimatedInputTokens: 100, serializationBytes: 400, wallClockElapsedMs: 0, accepted: true,
+    })
     expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'open' }))
     expect(state.allowedActions.map(action => action.kind)).toEqual(['assess', 'read_state'])
 

@@ -156,6 +156,9 @@ export class StreamClusterTicketProvider implements TicketRetrievalProvider {
       countPolicy: request.countPolicy ?? (request.requestedCount === undefined ? 'provider_default' : 'explicit'),
       mode: request.mode ?? 'hybrid',
       filters: [...request.filters ?? []],
+      ...(request.queryContract?.logic === undefined
+        ? {}
+        : { requiredConcepts: request.queryContract.logic.requiredConcepts.map(concept => ({ ...concept, alternatives: [...concept.alternatives] })) }),
       ambiguities: [...request.ambiguities ?? []],
       excludedTerms: [],
       semanticHints: [],

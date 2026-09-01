@@ -12,15 +12,22 @@ import {
 } from '@retrieval-agent/contracts'
 import type {} from '@retrieval-agent/agent-plugin'
 import {
+  CandidateDetailService,
   CandidateExportService,
+  InMemoryDetailReadAuditSink,
   InMemoryExportAuditSink,
+  type DetailReadAuditSink,
   type ExportAuditSink,
 } from '@retrieval-agent/product-api'
 import {
   EXPORT_CANDIDATES_ENDPOINT,
+  READ_TICKET_DETAIL_ENDPOINT,
   type ExportCandidatesErrorResponse,
   type ExportCandidatesParams,
   type ExportCandidatesResponse,
+  type ReadTicketDetailErrorResponse,
+  type ReadTicketDetailParams,
+  type ReadTicketDetailResponse,
 } from '@retrieval-agent/product-api/protocol'
 
 const MAX_REQUEST_BYTES = 64 * 1024
@@ -49,16 +56,44 @@ export function parseExportCandidatesParams(value: unknown): ExportCandidatesPar
   }
 }
 
+export function parseReadTicketDetailParams(value: unknown): ReadTicketDetailParams {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new RetrievalError('INVALID_REQUEST', '详情请求格式无效。')
+  }
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).some(key => !['sessionId', 'retrievalId', 'candidateRefs', 'fields'].includes(key))) {
+    throw new RetrievalError('INVALID_REQUEST', '详情请求包含未知字段。')
+  }
+  if (typeof record.sessionId !== 'string' || record.sessionId.trim().length === 0 || record.sessionId.length > 512
+    || typeof record.retrievalId !== 'string') {
+    throw new RetrievalError('INVALID_REQUEST', '会话或检索引用无效。')
+  }
+  if (!Array.isArray(record.candidateRefs) || record.candidateRefs.length !== 1
+    || record.candidateRefs.some(ref => typeof ref !== 'string')) {
+    throw new RetrievalError('INVALID_REQUEST', '单次详情请求必须包含一个候选引用。')
+  }
+  if (!Array.isArray(record.fields) || record.fields.length > 16
+    || record.fields.some(field => typeof field !== 'string' || field.trim().length === 0 || field.length > 256)) {
+    throw new RetrievalError('INVALID_REQUEST', '详情字段无效。')
+  }
+  return {
+    sessionId: record.sessionId.trim(),
+    retrievalId: RetrievalId(record.retrievalId),
+    candidateRefs: record.candidateRefs.map(ref => TicketCandidateRef(ref as string)),
+    fields: record.fields as string[],
+  }
+}
+
 async function readJson(request: IncomingMessage): Promise<unknown> {
   if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
-    throw new RetrievalError('INVALID_REQUEST', '导出接口只接受 JSON。')
+    throw new RetrievalError('INVALID_REQUEST', '产品接口只接受 JSON。')
   }
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += buffer.length
-    if (size > MAX_REQUEST_BYTES) throw new RetrievalError('EXPORT_LIMIT_EXCEEDED', '导出请求过大。')
+    if (size > MAX_REQUEST_BYTES) throw new RetrievalError('INVALID_REQUEST', '请求体过大。')
     chunks.push(buffer)
   }
   try {
@@ -90,7 +125,11 @@ function statusOf(error: RetrievalError): number {
   }
 }
 
-function writeJson(response: ServerResponse, status: number, body: ExportCandidatesResponse | ExportCandidatesErrorResponse): void {
+function writeJson(
+  response: ServerResponse,
+  status: number,
+  body: ExportCandidatesResponse | ExportCandidatesErrorResponse | ReadTicketDetailResponse | ReadTicketDetailErrorResponse,
+): void {
   response.writeHead(status, {
     'cache-control': 'no-store',
     'content-type': 'application/json; charset=utf-8',
@@ -123,11 +162,45 @@ export async function exportCandidatesForAgent(
   const principal = await retrievalAgent.principal(agent, 'export', signal)
   const exported = await new CandidateExportService(provider, audit)
     .exportCsv(principal, state, params.candidateRefs, signal)
+  retrievalAgent.recordExport(agent, exported.receipt)
   return {
     fileName: exported.fileName,
     mediaType: exported.mediaType,
     contentUtf8: exported.content,
     receipt: exported.receipt,
+  }
+}
+
+/** Resolve an inline detail click through the live Agent, trusted Principal and active Provider. */
+export async function readTicketDetailsForAgent(
+  ctx: Context,
+  agent: Agent,
+  params: ReadTicketDetailParams,
+  audit: DetailReadAuditSink,
+  signal?: AbortSignal,
+): Promise<ReadTicketDetailResponse> {
+  const retrievalAgent = ctx.agentPresets.serviceFor(agent, 'retrievalAgent')
+  const provider = ctx.agentPresets.serviceFor(agent, 'ticketRetrievalProvider')
+  if (retrievalAgent === undefined || provider === undefined) {
+    throw new RetrievalError(
+      'PROVIDER_UNAVAILABLE',
+      '当前会话未加载工单详情能力，请重新打开会话后重试。',
+      { retryable: true },
+    )
+  }
+  const state = retrievalAgent.currentOrUndefined(agent)
+  if (state === undefined || state.retrievalId !== params.retrievalId) {
+    throw new RetrievalError('INVALID_REQUEST', '当前会话没有对应的检索结果。')
+  }
+  const principal = await retrievalAgent.principal(agent, 'detail_read', signal)
+  const read = await new CandidateDetailService(provider, audit)
+    .readDetails(principal, state, params.candidateRefs, params.fields, signal)
+  retrievalAgent.recordDetailRead(agent, read.receipt)
+  return {
+    details: read.result.details,
+    rejectedCandidateRefs: read.result.rejectedCandidateRefs,
+    warnings: read.result.warnings,
+    receipt: read.receipt,
   }
 }
 
@@ -147,6 +220,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     await ctx.workspaceRegistry.create(workspacePath, '工单检索')
   }
   const audit = new InMemoryExportAuditSink()
+  const detailAudit = new InMemoryDetailReadAuditSink()
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: EXPORT_CANDIDATES_ENDPOINT,
@@ -182,4 +256,39 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       }
     },
   }), 'retrieval-product-host: export route')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: READ_TICKET_DETAIL_ENDPOINT,
+    handler: async (request, response) => {
+      if (request.method !== 'POST') {
+        response.setHeader('allow', 'POST')
+        writeJson(response, 405, { code: 'METHOD_NOT_ALLOWED', message: '只允许 POST。', retryable: false })
+        return
+      }
+      if (!sameOrigin(request)) {
+        writeJson(response, 403, { code: 'ORIGIN_REJECTED', message: '请求来源不受信任。', retryable: false })
+        return
+      }
+      const abort = new AbortController()
+      const onAbort = (): void => { abort.abort() }
+      request.once('aborted', onAbort)
+      try {
+        const params = parseReadTicketDetailParams(await readJson(request))
+        const agent = ctx.agents.get(SessionId(params.sessionId))
+        if (agent === undefined) {
+          writeJson(response, 409, { code: 'SESSION_NOT_ACTIVE', message: '会话当前不可用，请重新打开后重试。', retryable: true })
+          return
+        }
+        writeJson(response, 200, await readTicketDetailsForAgent(ctx, agent, params, detailAudit, abort.signal))
+      } catch (error) {
+        if (error instanceof RetrievalError) {
+          writeJson(response, statusOf(error), { code: error.code, message: error.publicMessage, retryable: error.retryable })
+        } else {
+          writeJson(response, 500, { code: 'INTERNAL', message: '工单详情读取失败。', retryable: false })
+        }
+      } finally {
+        request.off('aborted', onAbort)
+      }
+    },
+  }), 'retrieval-product-host: detail route')
 }

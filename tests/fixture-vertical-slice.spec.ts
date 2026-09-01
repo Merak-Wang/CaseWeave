@@ -77,7 +77,9 @@ describe('fixture vertical slice', () => {
     expect(node.alreadyReadEvidence.length).toBeGreaterThan(0)
     expect(node.result).toMatchObject({
       type: 'ticket_collection',
-      complete: true,
+      complete: false,
+      topKAccepted: true,
+      sourceExhausted: false,
       stoppingReason: 'sufficient',
       tickets: [{ displayId: selected.displayId }],
     })

@@ -3,14 +3,13 @@ import {
   RetrievalError,
   type CandidateExportReceipt,
   type RetrievalState,
-  type TicketCandidate,
   type TicketCandidateRef,
-  type TicketDetailResult,
   type TicketEvidenceField,
   type TicketRetrievalProvider,
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
 import { encodeCsv } from './csv.js'
+import { hostAuthorizedCandidates } from './candidate-selection.js'
 
 export interface ExportAuditRecord {
   readonly auditId: string
@@ -55,13 +54,6 @@ const HEADERS = [
   'source_version', 'evidence_level',
 ] as const
 
-function byRef(state: RetrievalState, refs: readonly TicketCandidateRef[]): TicketCandidate[] {
-  const allowed = new Map(state.candidates.map(candidate => [candidate.ref, candidate]))
-  const unique = [...new Set(refs)]
-  if (unique.some(ref => !allowed.has(ref))) throw new RetrievalError('CANDIDATE_NOT_FOUND', '导出引用不属于当前候选。')
-  return unique.map(ref => allowed.get(ref)!)
-}
-
 function readEvidenceLevel(state: RetrievalState, ref: TicketCandidateRef): 'L1' | 'L2' {
   return state.promotedEvidence.some(evidence => evidence.candidateRef === ref) ? 'L2' : 'L1'
 }
@@ -84,23 +76,6 @@ export class CandidateExportService {
     this.#id = config.id ?? (() => randomUUID())
   }
 
-  async readDetails(
-    principal: TrustedPrincipalContext,
-    state: RetrievalState,
-    refs: readonly TicketCandidateRef[],
-    fields: readonly TicketEvidenceField[],
-    signal?: AbortSignal,
-  ): Promise<TicketDetailResult> {
-    if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '检索快照不存在。')
-    byRef(state, refs)
-    return await this.#provider.readDetails(principal, {
-      snapshotId: state.snapshot.snapshotId,
-      candidateRefs: refs,
-      fields,
-      purpose: 'inline_detail',
-    }, signal === undefined ? undefined : { signal })
-  }
-
   async exportCsv(
     principal: TrustedPrincipalContext,
     state: RetrievalState,
@@ -110,7 +85,7 @@ export class CandidateExportService {
     if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '检索快照不存在。')
     const selectedRefs = refs ?? state.frozenEvidence?.candidates.map(candidate => candidate.ref)
       ?? state.candidates.map(candidate => candidate.ref)
-    const candidates = byRef(state, selectedRefs)
+    const candidates = hostAuthorizedCandidates(state, selectedRefs)
     if (candidates.length > this.#maxRows) throw new RetrievalError('EXPORT_LIMIT_EXCEEDED', '候选数量超过单次导出限制。')
     const status = await this.#provider.status(principal, state.snapshot.snapshotId)
     if (status.snapshotValid !== true) throw new RetrievalError('SNAPSHOT_INVALID', '检索快照已失效，请重新检索后导出。')

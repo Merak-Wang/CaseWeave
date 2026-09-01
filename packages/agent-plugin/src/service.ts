@@ -3,6 +3,8 @@ import { Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   RetrievalError,
+  type CandidateDetailReadReceipt,
+  type CandidateExportReceipt,
   type EvidenceContextSelection,
   type RetrievalKnowledgeAssessment,
   type RetrievalState,
@@ -44,6 +46,7 @@ function stoppedReason(error: unknown): 'budget_exhausted' | 'permission_blocked
 
 export interface RetrievalAgentServiceConfig extends RetrievalControllerConfig {
   readonly contextTokenBudget?: number
+  readonly maxContextTokens?: number
 }
 
 function latestRetrieval(agent: Agent): { readonly events: ReturnType<typeof readRetrievalSessionEvents>; readonly state: RetrievalState } | undefined {
@@ -68,12 +71,14 @@ export class RetrievalAgentService extends Service {
   private readonly active = new WeakMap<Agent, ActiveRetrieval>()
   private readonly controllerConfig: RetrievalControllerConfig
   readonly contextTokenBudget: number
+  readonly maxContextTokens: number
 
   constructor(ctx: Context, config: RetrievalAgentServiceConfig = {}) {
     super(ctx, 'retrievalAgent')
     installDshSessionCompatibility()
     this.controllerConfig = config
     this.contextTokenBudget = config.contextTokenBudget ?? 1_500
+    this.maxContextTokens = config.maxContextTokens ?? 4_096
   }
 
   currentOrUndefined(agent: Agent): RetrievalState | undefined {
@@ -177,8 +182,61 @@ export class RetrievalAgentService extends Service {
     return entry.controller.projectContext(entry.state, tokenBudget)
   }
 
+  async admitModelRequest(agent: Agent, input: {
+    readonly estimatedInputTokens: number
+    readonly serializationBytes: number
+    readonly wallClockElapsedMs: number
+  }): Promise<{ readonly accepted: boolean; readonly remainingWallClockMs: number }> {
+    const entry = this.entry(agent)
+    let accepted = false
+    const state = await this.mutate(entry, async current => {
+      if (current.phase === 'stopped') return current
+      accepted = input.estimatedInputTokens <= this.maxContextTokens
+        && (current.budget.modelStepsUsed ?? current.budget.roundsUsed) < current.budget.maxRounds
+        && input.wallClockElapsedMs < current.budget.maxLatencyMs
+      const measured = entry.controller.recordModelRequest(current, { ...input, accepted })
+      return accepted ? measured : entry.controller.stop(measured, 'budget_exhausted')
+    })
+    return {
+      accepted,
+      remainingWallClockMs: Math.max(0, state.budget.maxLatencyMs - (state.budget.wallClockElapsedMs ?? 0)),
+    }
+  }
+
+  async recordModelResponse(agent: Agent, input: {
+    readonly modelLatencyMs: number
+    readonly outputTokens: number
+    readonly wallClockElapsedMs: number
+  }): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return await this.mutate(entry, async state => entry.controller.recordModelResponse(state, input))
+  }
+
+  async recordToolCall(agent: Agent, input: { readonly success: boolean; readonly serializationBytes: number }): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return await this.mutate(entry, async state => entry.controller.recordToolCall(state, input))
+  }
+
+  async stopForWallClockBudget(agent: Agent): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return await this.mutate(entry, async state => state.phase === 'stopped'
+      ? state
+      : entry.controller.stop(state, 'budget_exhausted'))
+  }
+
   async principal(agent: Agent, operation: 'detail_read' | 'export', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
     return await this.resolvePrincipal(agent, operation, signal)
+  }
+
+  recordDetailRead(agent: Agent, receipt: CandidateDetailReadReceipt): void {
+    const entry = this.entry(agent)
+    if (entry.state.retrievalId !== receipt.retrievalId) throw new RetrievalError('INVALID_TRANSITION', '详情回执不属于当前检索。')
+    entry.journal.append(entry.state.retrievalId, 'retrieval/detail-read', { receipt })
+  }
+  recordExport(agent: Agent, receipt: CandidateExportReceipt): void {
+    const entry = this.entry(agent)
+    if (entry.state.retrievalId !== receipt.retrievalId) throw new RetrievalError('INVALID_TRANSITION', '导出回执不属于当前检索。')
+    entry.journal.append(entry.state.retrievalId, 'retrieval/exported', { receipt })
   }
 
   private entry(agent: Agent): ActiveRetrieval {

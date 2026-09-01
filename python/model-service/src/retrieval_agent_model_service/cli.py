@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+import sys
+from threading import Thread
 
 from .backend import QwenModelBackend
 from .manifest import load_manifest
@@ -17,7 +20,19 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--device", default="auto")
     result.add_argument("--host", default="127.0.0.1")
     result.add_argument("--port", type=int, default=8012)
+    result.add_argument(
+        "--exit-on-stdin-close",
+        action="store_true",
+        help="exit when the supervising launcher's stdin pipe closes",
+    )
     return result
+
+
+def _exit_when_stdin_closes() -> None:
+    try:
+        sys.stdin.buffer.read()
+    finally:
+        os._exit(0)
 
 
 def main() -> None:
@@ -29,6 +44,8 @@ def main() -> None:
         args.enable_reranker, args.device,
     )
     backend.load()
+    if args.exit_on_stdin_close:
+        Thread(target=_exit_when_stdin_closes, name="launcher-watchdog", daemon=True).start()
     print(f"retrieval-agent model service ready on http://{args.host}:{args.port}", flush=True)
     try:
         serve(backend, args.host, args.port)

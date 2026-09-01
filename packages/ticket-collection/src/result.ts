@@ -23,6 +23,11 @@ export function createTicketResultCollection(state: RetrievalState): TicketResul
     ...(state.snapshot === undefined ? {} : { snapshotShortId: state.snapshot.shortId }),
     stoppingReason: state.termination,
     complete: state.frozenEvidence?.complete ?? false,
+    decisionFinalized: true,
+    topKAccepted: state.frozenEvidence?.topKAccepted ?? false,
+    sourceExhausted: state.frozenEvidence?.sourceExhausted ?? false,
+    resultMayBeIncomplete: state.frozenEvidence?.resultMayBeIncomplete ?? true,
+    nextPageAvailable: state.frozenEvidence?.nextPageAvailable ?? false,
     tickets,
     evidence: state.promotedEvidence.filter(evidence => tickets.some(ticket => ticket.ref === evidence.candidateRef)),
     remainingGapKinds: state.gaps

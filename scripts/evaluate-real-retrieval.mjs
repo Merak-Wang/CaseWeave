@@ -5,17 +5,19 @@ import { ModelServiceClient } from '@retrieval-agent/model-service-client'
 import { LocalTicketProvider, parseTicketDatasetJsonl } from '@retrieval-agent/provider-local'
 import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
 import { bundledFixtureRoot } from '@retrieval-agent/bundle/startup'
+import { loadModelDependencyManifest } from './model-dependencies.mjs'
 
 const baseUrlArgument = process.argv.find(argument => argument.startsWith('--base-url='))
 const baseUrl = baseUrlArgument?.slice('--base-url='.length) ?? process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
+const modelManifest = (await loadModelDependencyManifest(process.cwd(), process.env)).roles
 const embeddingIdentity = {
-  model: 'Qwen/Qwen3-Embedding-0.6B',
-  revision: '97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3',
-  dimensions: 1024,
+  model: modelManifest.embedding.model,
+  revision: modelManifest.embedding.revision,
+  dimensions: modelManifest.embedding.dimensions,
 }
 const rerankerIdentity = {
-  model: 'Qwen/Qwen3-Reranker-0.6B',
-  revision: '27cd75a405b9c1b46b59abfd88aaa209e6fed2a1972cde9b70e7659537c5e65b',
+  model: modelManifest.reranker.model,
+  revision: modelManifest.reranker.revision,
 }
 const gateway = new ModelServiceClient({
   baseUrl,

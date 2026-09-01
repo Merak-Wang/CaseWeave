@@ -1,11 +1,13 @@
 import type { RetrievalId, TicketCandidateRef, TicketEvidenceId } from './brand.js'
 import type {
   TicketEvidenceSegment,
+  TicketQueryContract,
   TicketRetrievalSpec,
   TicketSearchPage,
   TicketSnapshot,
 } from './types.js'
 import type {
+  CandidateDetailReadReceipt,
   CandidateExportReceipt,
   EvidenceContextSelection,
   FrozenEvidencePack,
@@ -16,7 +18,8 @@ import type {
 } from './retrieval-state.js'
 import type { TicketSearchStage } from './ranking.js'
 
-export const RETRIEVAL_EVENT_SCHEMA_VERSION = 4 as const
+export const RETRIEVAL_EVENT_SCHEMA_VERSION = 6 as const
+export const SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS = Object.freeze([5, 6] as const)
 
 /**
  * Durable UI placement is deliberately separate from retrieval-domain state.
@@ -35,7 +38,11 @@ export interface RetrievalPresentationAnchor {
 }
 
 export interface RetrievalEventDataMap {
-  'retrieval/query-contracted': { readonly contract: RetrievalTaskContract; readonly spec: TicketRetrievalSpec }
+  'retrieval/query-contracted': {
+    readonly contract: RetrievalTaskContract
+    readonly queryContract: TicketQueryContract
+    readonly spec: TicketRetrievalSpec
+  }
   'retrieval/snapshot-opened': { readonly snapshot: TicketSnapshot }
   'retrieval/search-completed': { readonly stage: TicketSearchStage; readonly spec: TicketRetrievalSpec; readonly page: TicketSearchPage }
   'retrieval/knowledge-assessed': { readonly assessment: RetrievalKnowledgeAssessment }
@@ -44,8 +51,17 @@ export interface RetrievalEventDataMap {
   'retrieval/clarification-requested': { readonly facet: string; readonly question: string; readonly candidateRefs: readonly TicketCandidateRef[] }
   'retrieval/clarification-answered': { readonly facet: string; readonly accepted: boolean; readonly answer?: string }
   'retrieval/context-projected': { readonly selection: EvidenceContextSelection }
+  'retrieval/model-request-measured': {
+    readonly estimatedInputTokens: number
+    readonly serializationBytes: number
+    readonly wallClockElapsedMs: number
+    readonly accepted: boolean
+  }
+  'retrieval/model-response-measured': { readonly modelLatencyMs: number; readonly outputTokens: number }
+  'retrieval/tool-call-measured': { readonly success: boolean; readonly serializationBytes: number }
   'retrieval/evidence-frozen': { readonly pack: FrozenEvidencePack }
   'retrieval/stopped': { readonly reason: RetrievalTermination; readonly remainingGapKinds: readonly string[] }
+  'retrieval/detail-read': { readonly receipt: CandidateDetailReadReceipt }
   'retrieval/exported': { readonly receipt: CandidateExportReceipt }
 }
 export type RetrievalEventType = keyof RetrievalEventDataMap
@@ -53,7 +69,7 @@ export type RetrievalEventType = keyof RetrievalEventDataMap
 export type RetrievalDomainEvent<T extends RetrievalEventType = RetrievalEventType> = {
   [K in RetrievalEventType]: {
     readonly eventId: string
-    readonly schemaVersion: typeof RETRIEVAL_EVENT_SCHEMA_VERSION
+    readonly schemaVersion: (typeof SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS)[number]
     readonly retrievalId: RetrievalId
     readonly sequence: number
     readonly occurredAt: string
@@ -72,8 +88,12 @@ export const REQUIRED_RETRIEVAL_EVENT_TYPES = Object.freeze([
   'retrieval/clarification-requested',
   'retrieval/clarification-answered',
   'retrieval/context-projected',
+  'retrieval/model-request-measured',
+  'retrieval/model-response-measured',
+  'retrieval/tool-call-measured',
   'retrieval/evidence-frozen',
   'retrieval/stopped',
+  'retrieval/detail-read',
   'retrieval/exported',
 ] as const satisfies readonly RetrievalEventType[])
 

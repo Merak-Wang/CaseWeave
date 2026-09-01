@@ -65,6 +65,17 @@ function excluded(document: RankingDocument, terms: ReadonlySet<string>): boolea
   return [...terms].some(term => tokens.has(term))
 }
 
+function matchesRequiredConcepts(document: RankingDocument, concepts: RankingQuery['requiredConcepts']): boolean {
+  if (concepts === undefined || concepts.length === 0) return true
+  const searchable = `${document.title}\n${document.summary}\n${document.body}\n${document.metadata}`
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+  return concepts.every(concept => concept.alternatives.some(alternative => {
+    const normalized = alternative.normalize('NFKC').trim().toLocaleLowerCase()
+    return normalized.length > 0 && searchable.includes(normalized)
+  }))
+}
+
 function keywordHits(index: Bm25fIndex, query: RankingQuery): { readonly hits: RankingHit[]; readonly elapsedMs: number } {
   const result = index.search(query.text, query.excludedTerms)
   return {
@@ -131,7 +142,8 @@ export class HybridRankingEngine implements RetrievalRanker {
     if (documents.length > options.maxScan) throw new RankingError('SCAN_LIMIT', '授权文档数量超过本地排名容量。')
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('cancelled')
     const excludedTerms = new Set(query.excludedTerms.flatMap(tokenizeRankingText))
-    const allowed = documents.filter(document => !excluded(document, excludedTerms))
+    const allowed = documents.filter(document => !excluded(document, excludedTerms)
+      && matchesRequiredConcepts(document, query.requiredConcepts))
     const lexical = query.mode === 'dense' ? undefined : keywordHits(new Bm25fIndex(allowed, this.#bm25f), query)
     const keywordExecution = lexical === undefined ? undefined : {
       channel: 'keyword' as const,

@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { ModelServiceClient, ModelServiceClientError } from '@retrieval-agent/model-service-client'
 import { parseTicketDatasetJsonl, rankingDocuments } from '@retrieval-agent/provider-local'
 import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
+import { loadModelDependencyManifest } from './model-dependencies.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const fixtureRoot = join(root, 'packages', 'bundle', 'fixtures')
@@ -38,7 +39,7 @@ async function prepareWithReadinessRetry(engine, documents, options) {
 
 /** Build the development-admin, unfiltered corpus matrix before Web accepts traffic. */
 export async function prepareDevelopmentIndex(options = {}) {
-  const manifest = JSON.parse(await readFile(join(root, 'architecture', 'model-manifest.json'), 'utf8'))
+  const manifest = (await loadModelDependencyManifest(root, process.env)).roles
   const datasetManifest = JSON.parse(await readFile(join(fixtureRoot, 'manifest.json'), 'utf8'))
   const records = (await Promise.all([
     'tickets.jsonl',

@@ -28,6 +28,15 @@ export function emptyBudget(config: Pick<RetrievalBudgetState, 'maxRounds' | 'ma
     promotionsUsed: 0,
     evidenceTokensUsed: 0,
     latencyMs: 0,
+    modelStepsUsed: 0,
+    successfulToolCalls: 0,
+    failedToolCalls: 0,
+    providerLatencyMs: 0,
+    modelLatencyMs: 0,
+    wallClockElapsedMs: 0,
+    serializationBytes: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
   }
 }
 
@@ -52,7 +61,7 @@ export function requireAction(state: RetrievalState, kind: RetrievalActionKind):
   return allowed
 }
 
-export function retrievalCompletenessSatisfied(
+export function taskCompletionSatisfied(
   task: RetrievalState['task'],
   candidateCount: number,
   page: RetrievalState['lastPage'],
@@ -70,10 +79,9 @@ export function retrievalCompletenessSatisfied(
 
 export function coverageGaps(
   candidates: readonly TicketCandidateRef[],
-  task: RetrievalState['task'],
   page: RetrievalState['lastPage'],
 ): RetrievalState['gaps'] {
-  const resolved = retrievalCompletenessSatisfied(task, candidates.length, page)
+  const resolved = page?.completeness === 'exhaustive' && page.nextCursor === undefined
   return resolved
     ? [{ kind: 'coverage', status: 'resolved', evidenceRefs: [...candidates], evaluator: 'system' }]
     : [{ kind: 'coverage', status: 'open', evidenceRefs: [], evaluator: 'system' }]

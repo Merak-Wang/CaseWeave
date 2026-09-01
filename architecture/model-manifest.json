@@ -1,9 +1,70 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "dependencies": {
+    "qwen3-embedding-0-6b": {
+      "source": {
+        "type": "huggingface",
+        "repoId": "Qwen/Qwen3-Embedding-0.6B",
+        "revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+      },
+      "localPath": "models/Qwen3-Embedding-0.6B",
+      "pathEnvironment": "RETRIEVAL_AGENT_EMBEDDING_PATH",
+      "activation": {
+        "type": "always"
+      },
+      "files": [
+        {
+          "path": "model.safetensors",
+          "sha256": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
+        },
+        {
+          "path": "config.json"
+        },
+        {
+          "path": "tokenizer.json"
+        },
+        {
+          "path": "tokenizer_config.json"
+        }
+      ]
+    },
+    "qwen3-reranker-0-6b": {
+      "source": {
+        "type": "huggingface",
+        "repoId": "Qwen/Qwen3-Reranker-0.6B",
+        "revision": "e61197ed45024b0ed8a2d74b80b4d909f1255473"
+      },
+      "localPath": "models/Qwen3-Reranker-0.6B",
+      "pathEnvironment": "RETRIEVAL_AGENT_RERANKER_PATH",
+      "activation": {
+        "type": "environment",
+        "variable": "RETRIEVAL_AGENT_RERANKER_ENABLED",
+        "values": [
+          "1",
+          "true",
+          "yes",
+          "on"
+        ]
+      },
+      "files": [
+        {
+          "path": "model.safetensors",
+          "sha256": "27cd75a405b9c1b46b59abfd88aaa209e6fed2a1972cde9b70e7659537c5e65b"
+        },
+        {
+          "path": "config.json"
+        },
+        {
+          "path": "tokenizer.json"
+        },
+        {
+          "path": "tokenizer_config.json"
+        }
+      ]
+    }
+  },
   "embedding": {
-    "model": "Qwen/Qwen3-Embedding-0.6B",
-    "revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
-    "weightSha256": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd",
+    "dependency": "qwen3-embedding-0-6b",
     "dimensions": 1024,
     "pooling": "last_token",
     "normalization": "l2",
@@ -11,9 +72,7 @@
     "queryInstruction": "Given a support ticket search query, retrieve historical tickets with matching symptoms, products, constraints, and resolution context."
   },
   "reranker": {
-    "model": "Qwen/Qwen3-Reranker-0.6B",
-    "revision": "27cd75a405b9c1b46b59abfd88aaa209e6fed2a1972cde9b70e7659537c5e65b",
-    "weightSha256": "27cd75a405b9c1b46b59abfd88aaa209e6fed2a1972cde9b70e7659537c5e65b",
+    "dependency": "qwen3-reranker-0-6b",
     "scoreKind": "yes_probability",
     "maxTokens": 512,
     "instruction": "Given a support ticket search query, determine whether the historical ticket describes the same user problem and compatible constraints."

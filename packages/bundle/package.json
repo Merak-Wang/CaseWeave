@@ -18,6 +18,10 @@
       "types": "./lib/provider.d.ts",
       "default": "./lib/provider.js"
     },
+    "./agent": {
+      "types": "./lib/agent.d.ts",
+      "default": "./lib/agent.js"
+    },
     "./streamcluster-provider": {
       "types": "./lib/streamcluster-provider.d.ts",
       "default": "./lib/streamcluster-provider.js"

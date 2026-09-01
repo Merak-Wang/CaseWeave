@@ -16,25 +16,23 @@ function defaultEstimate(text: string): number {
   return Math.max(1, Math.ceil(cjk + (text.length - cjk) / 4))
 }
 
-function candidateText(candidate: TicketCandidate): string {
+function candidateText(candidate: TicketCandidate, alias: string): string {
   return JSON.stringify({
-    ref: candidate.ref,
+    alias,
     displayId: candidate.displayId,
     rank: candidate.rank,
     title: candidate.title,
-    summary: candidate.summary,
+    ...(candidate.summary.trim() === candidate.title.trim() ? {} : { summary: candidate.summary }),
     l0: candidate.l0,
-    sourceVersion: candidate.sourceVersion,
   })
 }
 
-function evidenceText(evidence: TicketEvidenceSegment): string {
+function evidenceText(evidence: TicketEvidenceSegment, candidateAlias: string, evidenceAlias: string): string {
   return JSON.stringify({
-    evidenceId: evidence.evidenceId,
-    candidateRef: evidence.candidateRef,
+    alias: evidenceAlias,
+    candidateAlias,
     field: evidence.field,
     text: evidence.text,
-    sourceVersion: evidence.sourceVersion,
     trust: evidence.trust,
     truncated: evidence.truncated,
   })
@@ -61,23 +59,26 @@ export class EvidenceContextPolicy {
     const includedEvidenceIds: TicketEvidenceSegment['evidenceId'][] = []
     const excluded: EvidenceContextSelection['excluded'][number][] = []
     let used = 0
+    const aliases = new Map(state.candidateHistory.map((candidate, index) => [candidate.ref, `c${index + 1}`]))
     const header = JSON.stringify({
-      retrievalId: state.retrievalId,
-      stateId: state.stateId,
-      phase: state.phase,
-      query: state.query.spec,
-      candidateKnowledge: {
-        historyCount: state.candidateHistory.length,
-        activeCount: state.candidates.length,
-        excludedCandidateRefs: state.excludedCandidateRefs,
-        selectedCandidateRefs: state.selectedCandidateRefs,
-        lastAssessment: state.lastAssessment,
+      queryContract: state.query.contract ?? {
+        original: state.query.original,
+        normalized: state.query.spec.normalizedQuery,
+        task: state.task.target,
+        maxResults: state.task.requestedCount,
+      },
+      state: {
+        revision: state.revision,
+        phase: state.phase,
+        activeAliases: state.candidates.map(candidate => aliases.get(candidate.ref)),
+        gaps: state.gaps.map(gap => ({ kind: gap.kind, status: gap.status, evaluator: gap.evaluator })),
+        allowedActions: state.allowedActions.map(action => action.kind),
+        promotableFields: state.snapshot?.fieldCatalog
+          .filter(field => field.accessLevel === 'L2')
+          .map(field => field.key) ?? [],
+        sourceExhausted: state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined,
         nextPageAvailable: state.lastPage?.nextCursor !== undefined,
       },
-      gaps: state.gaps,
-      allowedActions: state.allowedActions,
-      budget: state.budget,
-      termination: state.termination,
       snapshot: state.snapshot === undefined ? undefined : {
         shortId: state.snapshot.shortId,
         sourceVersion: state.snapshot.sourceVersion,
@@ -91,7 +92,7 @@ export class EvidenceContextPolicy {
         excluded.push({ ref: candidate.ref, reason: 'not_selected' })
         continue
       }
-      const text = candidateText(candidate)
+      const text = candidateText(candidate, aliases.get(candidate.ref) ?? `c${index + 1}`)
       const cost = this.#estimate(text)
       if (used + cost > tokenBudget) {
         excluded.push({ ref: candidate.ref, reason: 'token_budget' })
@@ -106,7 +107,8 @@ export class EvidenceContextPolicy {
         excluded.push({ ref: evidence.evidenceId, reason: 'not_selected' })
         continue
       }
-      const text = evidenceText(evidence)
+      const candidateAlias = aliases.get(evidence.candidateRef) ?? 'unknown'
+      const text = evidenceText(evidence, candidateAlias, `e${index + 1}`)
       const cost = this.#estimate(text)
       if (used + cost > tokenBudget) {
         excluded.push({ ref: evidence.evidenceId, reason: 'token_budget' })

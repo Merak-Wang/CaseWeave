@@ -54,9 +54,16 @@ function stoppedState(): RetrievalState {
     task: { target: 'ranked_cases' },
     query: { original: '副卡' },
     candidates: [],
+    candidateHistory: [],
+    excludedCandidateRefs: [],
+    selectedCandidateRefs: [],
     promotedEvidence: [],
     gaps: [],
     allowedActions: [],
+    budget: {
+      maxRounds: 8, maxSearches: 4, maxPromotions: 3, maxEvidenceTokens: 1_500, maxLatencyMs: 120_000,
+      roundsUsed: 0, searchesUsed: 1, promotionsUsed: 0, evidenceTokensUsed: 0, latencyMs: 0,
+    },
   } as unknown as RetrievalState
 }
 
@@ -105,18 +112,18 @@ describe('retrieval tool surface', () => {
       expect(registered).not.toContain('ticket_freeze')
       const searchSchemas = ctx.tools.schemas()
         .filter(tool => tool.name === 'ticket_keyword_search' || tool.name === 'ticket_vector_search')
-      expect(JSON.stringify(searchSchemas)).not.toContain('cursor')
+      expect(searchSchemas.every(tool => !JSON.stringify(tool.parameters).includes('cursor'))).toBe(true)
 
       const assembly = await ctx.systemPrompt.assemble({ agent: fakeAgent('first-assembly') })
-      expect(assembly.tools.map(tool => tool.name)).toEqual([])
+      expect(assembly.tools.map(tool => tool.name)).toEqual(['ticket_assess_state'])
     } finally {
       await ctx.fiber.dispose()
     }
   })
 
   it('projects independent repair channels and keeps provider cursors model-hidden', () => {
-    expect([...visibleRetrievalTools(undefined)]).toEqual([])
-    expect([...visibleRetrievalTools(stoppedState())]).toEqual([])
+    expect([...visibleRetrievalTools(undefined)]).toEqual(['ticket_assess_state'])
+    expect([...visibleRetrievalTools(stoppedState())]).toEqual(['ticket_assess_state'])
     expect(visibleRetrievalTools(stateWithActions(['assess', 'read_state']))).toEqual(new Set([
       'ticket_assess_state', 'ticket_state',
     ]))
@@ -129,6 +136,30 @@ describe('retrieval tool surface', () => {
     expect(visibleRetrievalTools(stateWithActions(['search_next'], 'hybrid'))).toEqual(new Set(['ticket_continue_ranking']))
   })
 
+  it('returns a machine-readable recovery payload for schema failures', async () => {
+    const ctx = await mountedTools()
+    try {
+      const result = await ctx.tools.execute({
+        signal: SIGNAL,
+        callId: CallId('keyword-invalid'),
+        name: 'ticket_keyword_search',
+        arguments: { delta_kind: 'add_terms', terms: ['副卡'] },
+        agent: fakeAgent('invalid-tool-call'),
+      })
+      expect(result.isError).toBe(true)
+      const text = result.content.find(block => block.type === 'text')?.text ?? ''
+      expect(JSON.parse(text)).toMatchObject({
+        type: 'retrieval_tool_error',
+        tool: 'ticket_keyword_search',
+        code: expect.any(String),
+        allowedActions: [],
+        repairExample: { change: { type: 'add_terms', terms: ['副卡'] } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('fixes each search mode and concludes with the Harness-generated collection', async () => {
     const calls: SearchCall[] = []
     const ctx = await mountedTools(calls)
@@ -138,7 +169,7 @@ describe('retrieval tool surface', () => {
         signal: SIGNAL,
         callId: CallId('keyword-1'),
         name: 'ticket_keyword_search',
-        arguments: { delta_kind: 'add_terms', terms: ['副卡'] },
+        arguments: { change: { type: 'add_terms', terms: ['副卡'] } },
         agent,
       })
       const vector = await ctx.tools.execute({

@@ -7,16 +7,26 @@ import Loader, { Group } from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import { InMemoryExportAuditSink } from '@retrieval-agent/product-api'
+import { InMemoryDetailReadAuditSink, InMemoryExportAuditSink } from '@retrieval-agent/product-api'
 import { describe, expect, it } from 'vitest'
-import { exportCandidatesForAgent, parseExportCandidatesParams } from './index.js'
+import {
+  exportCandidatesForAgent,
+  parseExportCandidatesParams,
+  parseReadTicketDetailParams,
+  readTicketDetailsForAgent,
+} from './index.js'
 
 const ISOLATED_SERVICES_FIXTURE = `
 const candidateRef = 'candidate-isolated-1'
 const state = {
   retrievalId: 'retrieval-isolated-1',
+  phase: 'assessed',
   query: { original: '隔离服务导出' },
-  snapshot: { snapshotId: 'snapshot-isolated-1', shortId: 'snap-isolated' },
+  snapshot: {
+    snapshotId: 'snapshot-isolated-1', shortId: 'snap-isolated',
+    fieldCatalog: [{ key: 'problemDescription', label: '问题描述', valueKind: 'text', accessLevel: 'L2' }],
+    capabilities: { detailRead: true },
+  },
   candidates: [{
     ref: candidateRef,
     rank: 1,
@@ -29,6 +39,7 @@ const state = {
     l0: { status: 'resolved', priority: 'high' },
     matchFragments: [],
   }],
+  candidateHistory: [],
   promotedEvidence: [],
   lastPage: { completeness: 'bounded' },
 }
@@ -43,6 +54,8 @@ const principal = {
 const retrievalAgent = {
   currentOrUndefined: () => state,
   principal: async () => principal,
+  recordDetailRead: () => undefined,
+  recordExport: () => undefined,
 }
 const ticketRetrievalProvider = {
   providerId: 'isolated-fixture-v1',
@@ -59,7 +72,7 @@ const ticketRetrievalProvider = {
       title: '隔离 preset 中的工单',
       summary: '该记录验证 Host 能通过公开 serviceFor 读取隔离服务。',
       l0: { status: 'resolved', priority: 'high' },
-      fields: {},
+      fields: Object.fromEntries(request.fields.map(field => [field, ['数据库返回的详细问题描述']])),
       unavailableFields: [],
     })),
     rejectedCandidateRefs: [],
@@ -118,7 +131,7 @@ async function isolatedPresetHarness(): Promise<{
   }
 }
 
-describe('DSH product Host export adapter', () => {
+describe('DSH product Host adapter', () => {
   it('accepts only the explicit wire contract', () => {
     expect(parseExportCandidatesParams({
       sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: ['candidate-1'],
@@ -129,6 +142,18 @@ describe('DSH product Host export adapter', () => {
     expect(() => parseExportCandidatesParams({
       sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: Array.from({ length: 201 }, (_, index) => `ref-${index}`),
     })).toThrow(/候选引用/u)
+  })
+
+  it('accepts only one opaque candidate per explicit detail wire request', () => {
+    expect(parseReadTicketDetailParams({
+      sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: ['candidate-1'], fields: ['problemDescription'],
+    })).toMatchObject({ candidateRefs: ['candidate-1'], fields: ['problemDescription'] })
+    expect(() => parseReadTicketDetailParams({
+      sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: ['candidate-1', 'candidate-2'], fields: [],
+    })).toThrow(/一个候选/u)
+    expect(() => parseReadTicketDetailParams({
+      sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: ['candidate-1'], fields: [], ticketId: 'TKT-ISO-1',
+    })).toThrow(/未知字段/u)
   })
 
   it('exports through the public preset lookup while the real isolate hides both services', async () => {
@@ -157,6 +182,34 @@ describe('DSH product Host export adapter', () => {
           retryable: true,
           publicMessage: expect.stringMatching(/未加载工单检索能力/u),
         })
+    } finally {
+      await harness.ctx.fiber.dispose()
+      await rm(harness.root, { recursive: true, force: true })
+    }
+  })
+
+  it('reads detail through the isolated Provider and records only an audit receipt', async () => {
+    const harness = await isolatedPresetHarness()
+    try {
+      const params = parseReadTicketDetailParams({
+        sessionId: 'session-isolated-1',
+        retrievalId: 'retrieval-isolated-1',
+        candidateRefs: ['candidate-isolated-1'],
+        fields: ['problemDescription'],
+      })
+      const audit = new InMemoryDetailReadAuditSink()
+      const response = await readTicketDetailsForAgent(harness.ctx, harness.agent, params, audit)
+
+      expect(response.details).toHaveLength(1)
+      expect(response.details[0]?.displayId).toBe('TKT-ISO-1')
+      expect(response.details[0]?.fields.problemDescription).toEqual(['数据库返回的详细问题描述'])
+      expect(response.receipt).toMatchObject({
+        retrievalId: 'retrieval-isolated-1',
+        snapshotShortId: 'snap-isolated',
+        candidateRefs: ['candidate-isolated-1'],
+        fields: ['problemDescription'],
+      })
+      expect(audit.records).toHaveLength(1)
     } finally {
       await harness.ctx.fiber.dispose()
       await rm(harness.root, { recursive: true, force: true })

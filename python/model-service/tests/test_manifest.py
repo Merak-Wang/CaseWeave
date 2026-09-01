@@ -12,11 +12,27 @@ from retrieval_agent_model_service.manifest import load_manifest, verify_weights
 
 def manifest() -> dict[str, object]:
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "dependencies": {
+            "embedding-model": {
+                "source": {
+                    "type": "huggingface",
+                    "repoId": "test/embedding",
+                    "revision": "1" * 40,
+                },
+                "files": [{"path": "model.safetensors", "sha256": "a" * 64}],
+            },
+            "reranker-model": {
+                "source": {
+                    "type": "huggingface",
+                    "repoId": "test/reranker",
+                    "revision": "2" * 40,
+                },
+                "files": [{"path": "model.safetensors", "sha256": "b" * 64}],
+            },
+        },
         "embedding": {
-            "model": "embedding",
-            "revision": "embed-v1",
-            "weightSha256": "a" * 64,
+            "dependency": "embedding-model",
             "dimensions": 1024,
             "pooling": "last_token",
             "normalization": "l2",
@@ -24,9 +40,7 @@ def manifest() -> dict[str, object]:
             "queryInstruction": "retrieve tickets",
         },
         "reranker": {
-            "model": "reranker",
-            "revision": "rerank-v1",
-            "weightSha256": "b" * 64,
+            "dependency": "reranker-model",
             "scoreKind": "yes_probability",
             "maxTokens": 512,
             "instruction": "judge tickets",
@@ -41,6 +55,9 @@ def test_loads_versioned_model_semantics(tmp_path: Path) -> None:
     loaded = load_manifest(path)
 
     assert loaded.embedding.dimensions == 1024
+    assert loaded.embedding.model == "test/embedding"
+    assert loaded.embedding.revision == "1" * 40
+    assert loaded.embedding.weight_sha256 == "a" * 64
     assert loaded.embedding.pooling == "last_token"
     assert loaded.embedding.normalization == "l2"
     assert loaded.reranker.score_kind == "yes_probability"
@@ -50,7 +67,7 @@ def test_loads_versioned_model_semantics(tmp_path: Path) -> None:
     ("section", "field", "value"),
     [
         ("embedding", "pooling", "mean"),
-        ("embedding", "weightSha256", "not-a-sha"),
+        ("embedding", "dependency", "missing-model"),
         ("reranker", "scoreKind", "random_head"),
         ("reranker", "maxTokens", 0),
     ],
@@ -65,6 +82,20 @@ def test_rejects_unsupported_or_incomplete_identity(
     path.write_text(json.dumps(data), encoding="utf-8")
 
     with pytest.raises(ServiceError, match="manifest|Model|Unsupported"):
+        load_manifest(path)
+
+
+def test_rejects_dependency_without_pinned_weight_checksum(tmp_path: Path) -> None:
+    data = manifest()
+    dependencies = data["dependencies"]
+    assert isinstance(dependencies, dict)
+    embedding = dependencies["embedding-model"]
+    assert isinstance(embedding, dict) and isinstance(embedding["files"], list)
+    embedding["files"][0]["sha256"] = "not-a-sha"
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ServiceError, match="checksum"):
         load_manifest(path)
 
 

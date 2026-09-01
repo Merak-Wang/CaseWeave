@@ -42,6 +42,8 @@ export function projectTicketCandidateNode(
   const contract = relevant.find(event => event.type === 'retrieval/query-contracted')
   const states = relevant.filter((event): event is RetrievalDomainEvent<'retrieval/state-recorded'> => event.type === 'retrieval/state-recorded')
   const state = states.at(-1)?.data.state
+  const queryContract = state?.query.contract
+    ?? (contract?.type === 'retrieval/query-contracted' ? contract.data.queryContract : undefined)
   const querySummary = state?.query.original
     ?? (contract?.type === 'retrieval/query-contracted' ? contract.data.spec.originalQuery : '')
   const status = statusOf(state)
@@ -49,16 +51,23 @@ export function projectTicketCandidateNode(
     ? state.clarification?.question
     : state === undefined ? undefined : STATUS_MESSAGES[state.termination]
   const result = state?.phase === 'stopped' ? createTicketResultCollection(state) : undefined
-  const candidates = result?.tickets ?? state?.candidates ?? []
+  // Initial Hybrid candidates are an internal working set, not the user's final collection.
+  const candidates = result?.tickets ?? []
   return {
     retrievalId,
     version: state?.revision ?? 0,
     querySummary,
+    ...(queryContract?.logic === undefined ? {} : { queryLogic: queryContract.logic }),
     ...(state?.snapshot === undefined ? {} : { snapshotShortId: state.snapshot.shortId }),
     completeness: state?.lastPage?.completeness ?? 'pending',
+    nextPageAvailable: state?.lastPage?.nextCursor !== undefined,
+    sourceExhausted: state?.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined,
     status,
     candidates,
     alreadyReadEvidence: result?.evidence ?? state?.promotedEvidence ?? [],
+    detailFields: state?.snapshot?.fieldCatalog
+      .filter(field => field.accessLevel === 'L2' && field.valueKind !== 'raw_json')
+      .map(field => ({ key: field.key, label: field.label })) ?? [],
     ...(message === undefined ? {} : { message }),
     exportEnabled: state?.snapshot?.capabilities.exportRead === true
       && candidates.length > 0

@@ -26,8 +26,12 @@ declare module '@deepseek-ai/dsh-session/types' {
     'retrieval/clarification-requested': { readonly event: RetrievalDomainEvent<'retrieval/clarification-requested'> }
     'retrieval/clarification-answered': { readonly event: RetrievalDomainEvent<'retrieval/clarification-answered'> }
     'retrieval/context-projected': { readonly event: RetrievalDomainEvent<'retrieval/context-projected'> }
+    'retrieval/model-request-measured': { readonly event: RetrievalDomainEvent<'retrieval/model-request-measured'> }
+    'retrieval/model-response-measured': { readonly event: RetrievalDomainEvent<'retrieval/model-response-measured'> }
+    'retrieval/tool-call-measured': { readonly event: RetrievalDomainEvent<'retrieval/tool-call-measured'> }
     'retrieval/evidence-frozen': { readonly event: RetrievalDomainEvent<'retrieval/evidence-frozen'> }
     'retrieval/stopped': { readonly event: RetrievalDomainEvent<'retrieval/stopped'> }
+    'retrieval/detail-read': { readonly event: RetrievalDomainEvent<'retrieval/detail-read'> }
     'retrieval/exported': { readonly event: RetrievalDomainEvent<'retrieval/exported'> }
     'retrieval/presentation-anchored': RetrievalPresentationAnchor
   }
@@ -102,8 +106,12 @@ export function appendRetrievalSessionEvent(session: Session, event: RetrievalDo
     case 'retrieval/clarification-requested': session.append(event.type, { event }); return
     case 'retrieval/clarification-answered': session.append(event.type, { event }); return
     case 'retrieval/context-projected': session.append(event.type, { event }); return
+    case 'retrieval/model-request-measured': session.append(event.type, { event }); return
+    case 'retrieval/model-response-measured': session.append(event.type, { event }); return
+    case 'retrieval/tool-call-measured': session.append(event.type, { event }); return
     case 'retrieval/evidence-frozen': session.append(event.type, { event }); return
     case 'retrieval/stopped': session.append(event.type, { event }); return
+    case 'retrieval/detail-read': session.append(event.type, { event }); return
     case 'retrieval/exported': session.append(event.type, { event }); return
     default: return event satisfies never
   }

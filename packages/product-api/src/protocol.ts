@@ -1,4 +1,5 @@
 import type {
+  CandidateDetailReadReceipt,
   CandidateExportReceipt,
   RetrievalId,
   TicketCandidateNode,
@@ -9,6 +10,7 @@ import type {
 } from '@retrieval-agent/contracts'
 
 export const EXPORT_CANDIDATES_ENDPOINT = '/api/retrieval-agent/export' as const
+export const READ_TICKET_DETAIL_ENDPOINT = '/api/retrieval-agent/detail' as const
 
 /** JSON payloads exposed by the trusted Product BFF. */
 export interface StartRetrievalParams {
@@ -29,6 +31,8 @@ export interface ReadRetrievalResponse {
 }
 
 export interface ReadTicketDetailParams {
+  /** Untrusted routing identity; the Host resolves the live Agent and trusted Principal. */
+  readonly sessionId: string
   readonly retrievalId: RetrievalId
   readonly candidateRefs: readonly TicketCandidateRef[]
   readonly fields: readonly TicketEvidenceField[]
@@ -38,6 +42,13 @@ export interface ReadTicketDetailResponse {
   readonly details: readonly TicketDetail[]
   readonly rejectedCandidateRefs: readonly TicketCandidateRef[]
   readonly warnings: readonly string[]
+  readonly receipt: CandidateDetailReadReceipt
+}
+
+export interface ReadTicketDetailErrorResponse {
+  readonly code: string
+  readonly message: string
+  readonly retryable: boolean
 }
 
 export interface ExportCandidatesParams {

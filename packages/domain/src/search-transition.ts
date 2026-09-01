@@ -60,8 +60,8 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
   }
   if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '当前检索没有有效快照。')
   if (state.budget.searchesUsed >= state.budget.maxSearches
-    || state.budget.roundsUsed >= state.budget.maxRounds
-    || state.budget.latencyMs >= state.budget.maxLatencyMs) {
+    || (state.budget.modelStepsUsed ?? state.budget.roundsUsed) >= state.budget.maxRounds
+    || (state.budget.wallClockElapsedMs ?? state.budget.latencyMs) >= state.budget.maxLatencyMs) {
     throw new RetrievalError('BUDGET_EXHAUSTED', '检索预算已耗尽。')
   }
   const updated = applyQueryDelta(state.query.spec, input.delta)
@@ -99,21 +99,27 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
   const noProgressStreak = newRefs.length === 0 ? state.progress.noProgressStreak + 1 : 0
   const budget = {
     ...state.budget,
-    roundsUsed: state.budget.roundsUsed + 1,
     searchesUsed: state.budget.searchesUsed + 1,
-    latencyMs: state.budget.latencyMs + page.elapsedMs,
+    providerLatencyMs: (state.budget.providerLatencyMs ?? 0) + page.elapsedMs,
   }
   const candidateRefs = candidates.map(candidate => candidate.ref)
   const allowedActions: RetrievalAllowedAction[] = [action('assess', candidateRefs), action('read_state')]
   const gaps = [
-    ...systemGaps(candidateRefs, state.task, page),
+    ...systemGaps(candidateRefs, page),
     ...state.gaps.filter(gap => gap.kind !== 'coverage'),
   ]
   const coverageResolved = gaps.some(gap => gap.kind === 'coverage' && gap.status === 'resolved')
   return {
     patch: {
       phase: 'assessed',
-      query: { ...state.query, spec, confirmedConstraints: [...spec.filters] },
+      query: {
+        ...state.query,
+        spec,
+        ...(state.query.contract === undefined ? {} : {
+          contract: { ...state.query.contract, normalized: spec.normalizedQuery, constraints: [...spec.filters] },
+        }),
+        confirmedConstraints: [...spec.filters],
+      },
       candidates,
       candidateHistory: ranking.history,
       rankingHistory: ranking.observations,
@@ -125,6 +131,7 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
       budget,
       progress: {
         newCandidateRefs: newRefs,
+        newEvidenceIds: [],
         rankOverlap: overlap,
         newDecisiveEvidence: false,
         resolvedGaps: coverageResolved ? ['coverage'] : [],

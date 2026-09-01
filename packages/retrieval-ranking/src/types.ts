@@ -14,6 +14,11 @@ export interface RankingQuery {
   readonly text: string
   readonly semanticHints: readonly string[]
   readonly excludedTerms: readonly string[]
+  /** Every group must match; alternatives inside one group are equivalent. */
+  readonly requiredConcepts?: readonly {
+    readonly canonical: string
+    readonly alternatives: readonly string[]
+  }[]
   readonly mode: RankingMode
 }
 

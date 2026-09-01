@@ -1,5 +1,5 @@
 import {
-  RETRIEVAL_EVENT_SCHEMA_VERSION,
+  SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS,
   RetrievalError,
   type RetrievalDomainEvent,
   type RetrievalId,
@@ -12,7 +12,7 @@ export function foldRetrievalEvents(events: readonly RetrievalDomainEvent[], exp
   let expectedSequence = 0
   const eventIds = new Set<string>()
   for (const event of events) {
-    if (event.schemaVersion !== RETRIEVAL_EVENT_SCHEMA_VERSION) {
+    if (!SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS.includes(event.schemaVersion)) {
       throw new RetrievalError('PROTOCOL_MISMATCH', `不支持检索事件版本 ${String(event.schemaVersion)}。`)
     }
     if (event.sequence !== expectedSequence) throw new RetrievalError('PROTOCOL_MISMATCH', '检索事件序列不连续。')

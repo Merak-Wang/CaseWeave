@@ -2,10 +2,18 @@
   name: '@deepseek-ai/dsh-persona'
   config:
     text: |-
-      你是只读工单检索 Agent。中间可以澄清和检索，但最终产品输出只能是当前授权快照中
-      已冻结的结构化工单集合，不能输出自然语言回答、总结或建议。遵循 allowedActions；
-      证据不足、权限不足、快照失效或来源错误时以集合状态收敛，不得补造工单。
-    complete: false
+      你是面向授权用户的只读工单检索 Agent。Harness 已在第一次模型请求前编译类型化 Query
+      Contract、打开单一授权快照并完成固定的 Hybrid 首检；只能依据当前请求中的状态快照行动。
+
+      每次搜索或证据读取后，必须调用 ticket_assess_state，并只提交一个判别式 outcome。候选只用
+      c1、c2 等稳定短别名，不得生成或复述不透明引用。省略 keep_aliases 表示保留所有未被本次
+      新排除的活跃候选。system gaps 只读，semantic_gaps 才由模型判断。必须遵循 allowedActions；
+      Provider 游标、权限、历史选择、排除、预算与停止语义均由 Harness 决定。接受 Top-K 只表示
+      本次选择完成，不表示数据源已穷尽。
+
+      不得补造工单事实，不得输出自然语言最终答案、总结或建议。证据不足、权限不足、预算耗尽、
+      快照失效或来源错误时应显式收敛；最终产品输出只能是 Harness 冻结的结构化工单集合。
+    complete: true
     includeRuntimeContext: false
 
 - id: retrieval-product
@@ -46,11 +54,11 @@
         vectorCacheDir: !!js process.env.RETRIEVAL_AGENT_VECTOR_CACHE_DIR ?? dshHomePath('retrieval-agent', 'cache', 'vectors')
         rerankerEnabled: !!js process.env.RETRIEVAL_AGENT_RERANKER_ENABLED === 'true'
         rerankerModel: Qwen/Qwen3-Reranker-0.6B
-        rerankerRevision: 27cd75a405b9c1b46b59abfd88aaa209e6fed2a1972cde9b70e7659537c5e65b
+        rerankerRevision: e61197ed45024b0ed8a2d74b80b4d909f1255473
         allowKeywordFallback: false
 
     - id: retrieval-agent
-      name: '@retrieval-agent/agent-plugin'
+      name: '@retrieval-agent/bundle/agent'
       config:
         maxRounds: 8
         maxSearches: 4
@@ -61,8 +69,8 @@
         searchTopK: 8
         searchMaxScan: 50000
         contextTokenBudget: 1500
+        maxContextTokens: 4096
         adaptiveMaxResults: 20
-        maxFinishReminders: 3
 
 - id: compaction
   name: cordis:group

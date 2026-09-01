@@ -77,4 +77,43 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
     }
   }
   for (const filter of request.filters ?? []) assertTicketFilter(filter)
+  const contract = request.queryContract
+  if (contract !== undefined) {
+    if (![1, 2].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
+      || contract.normalized !== (request.retrievalQuery ?? request.query).normalize('NFKC').trim().replace(/\s+/gu, ' ')
+      || !['explicit_top_k', 'adaptive_top_k', 'exhaustive_current_snapshot'].includes(contract.resultPolicy)
+      || !['telecom_ticket', 'general_ticket'].includes(contract.domain)
+      || !['zh', 'en', 'und'].includes(contract.language)
+      || !Number.isSafeInteger(contract.maxResults) || contract.maxResults < 1 || contract.maxResults > 100
+      || !Number.isFinite(contract.confidence) || contract.confidence < 0 || contract.confidence > 1
+      || contract.compilerVersion.trim().length === 0) {
+      throw new RetrievalError('INVALID_REQUEST', 'Query Contract 与检索请求不一致或包含无效字段。')
+    }
+    if (JSON.stringify(contract.constraints) !== JSON.stringify(request.filters ?? [])
+      || JSON.stringify(contract.ambiguities) !== JSON.stringify(request.ambiguities ?? [])) {
+      throw new RetrievalError('INVALID_REQUEST', 'Query Contract 的约束或歧义与检索请求不一致。')
+    }
+    for (const entity of contract.entities) {
+      if (!['business_object', 'ticket_id'].includes(entity.type)
+        || entity.surface.trim().length === 0 || entity.canonical.trim().length === 0
+        || entity.surface.length > 200 || entity.canonical.length > 200) {
+        throw new RetrievalError('INVALID_REQUEST', 'Query Contract 包含无效实体。')
+      }
+    }
+    if (contract.logic !== undefined) {
+      if (contract.schemaVersion < 2 || contract.logic.operator !== 'and'
+        || contract.logic.requiredConcepts.length < 2 || contract.logic.requiredConcepts.length > 8) {
+        throw new RetrievalError('INVALID_REQUEST', 'Query Contract 包含无效的布尔查询结构。')
+      }
+      for (const concept of contract.logic.requiredConcepts) {
+        if (concept.surface.trim().length === 0 || concept.canonical.trim().length === 0
+          || concept.surface.length > 200 || concept.canonical.length > 200
+          || concept.alternatives.length === 0 || concept.alternatives.length > 16
+          || concept.alternatives.some(alternative => alternative.trim().length === 0 || alternative.length > 200)
+          || new Set(concept.alternatives).size !== concept.alternatives.length) {
+          throw new RetrievalError('INVALID_REQUEST', 'Query Contract 包含无效的必选概念。')
+        }
+      }
+    }
+  }
 }

@@ -75,4 +75,24 @@ describe('retrieval presentation anchors', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('anchors a budget-stopped result when cancellation skips turn-stopping', async () => {
+    installDshSessionCompatibility()
+    const ctx = new Context()
+    try {
+      await ctx.plugin(AgentRegistry)
+      const state = retrievalState('stopped')
+      installRetrievalPresentationAnchors(ctx, { currentOrUndefined: () => state })
+      const session = Session.create(SessionId('presentation-cancel-session'))
+      const agent = fakeAgent(session)
+      session.append('turn/start', { turn: 3 })
+
+      agentEvents(ctx, agent).emit('agent/status', { status: 'idle' })
+
+      expect(session.events.find(event => event.type === RETRIEVAL_PRESENTATION_EVENT_TYPE)?.data)
+        .toMatchObject({ phase: 'result', turn: 3, retrievalId: state.retrievalId })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })

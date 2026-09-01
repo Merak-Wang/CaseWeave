@@ -25,6 +25,48 @@ export interface TicketQueryAmbiguity {
   readonly kind: 'reference' | 'quantity' | 'boundary' | 'constraint'
   readonly text: string
 }
+export interface TicketQueryEntity {
+  readonly type: 'business_object' | 'ticket_id'
+  readonly surface: string
+  readonly canonical: string
+}
+
+/** One semantic concept that must be present when a user explicitly joins clauses with AND. */
+export interface TicketQueryConcept {
+  readonly surface: string
+  readonly canonical: string
+  /** Provider-executable lexical variants for this concept; one variant is sufficient. */
+  readonly alternatives: readonly string[]
+}
+
+/** Explicit Boolean meaning extracted from the direct-user query. */
+export interface TicketQueryLogic {
+  readonly operator: 'and'
+  /** Every concept group is required; alternatives inside one group are OR-equivalent. */
+  readonly requiredConcepts: readonly TicketQueryConcept[]
+}
+/**
+ * Harness-owned interpretation of one direct-user query. This is persisted
+ * before Provider access so a retrieval can explain exactly which task,
+ * language, domain, entities, constraints, and result-set policy it used.
+ */
+export interface TicketQueryContract {
+  /** Version 1 remains readable for persisted sessions; new compiler output uses version 2. */
+  readonly schemaVersion: 1 | 2
+  readonly original: string
+  readonly normalized: string
+  readonly task: TicketTaskTarget
+  readonly resultPolicy: 'explicit_top_k' | 'adaptive_top_k' | 'exhaustive_current_snapshot'
+  readonly maxResults: number
+  readonly domain: 'telecom_ticket' | 'general_ticket'
+  readonly language: 'zh' | 'en' | 'und'
+  readonly entities: readonly TicketQueryEntity[]
+  readonly constraints: readonly TicketFilter[]
+  readonly logic?: TicketQueryLogic
+  readonly ambiguities: readonly TicketQueryAmbiguity[]
+  readonly confidence: number
+  readonly compilerVersion: string
+}
 export type TicketFilterOperator = 'eq' | 'neq' | 'gte' | 'lte' | 'contains'
 
 /** Provider-declared query field. Syntax is validated centrally; support is enforced by the Provider. */
@@ -55,6 +97,8 @@ export interface TicketRetrievalRequest {
   readonly mode?: TicketRetrievalMode
   readonly filters?: readonly TicketFilter[]
   readonly ambiguities?: readonly TicketQueryAmbiguity[]
+  /** Present on the public direct-user path; manual/provider callers may omit it. */
+  readonly queryContract?: TicketQueryContract
 }
 
 /** Fully validated query specification. */
@@ -67,6 +111,8 @@ export interface TicketRetrievalSpec {
   readonly countPolicy: TicketCountPolicy
   readonly mode: TicketRetrievalMode
   readonly filters: readonly TicketFilter[]
+  /** Hard conjunction admitted by the query compiler; every concept group must match. */
+  readonly requiredConcepts?: readonly TicketQueryConcept[]
   readonly ambiguities: readonly TicketQueryAmbiguity[]
   readonly excludedTerms: readonly string[]
   readonly semanticHints: readonly string[]

@@ -7,6 +7,12 @@ export interface RetrievalPresentationApplication {
   currentOrUndefined(agent: Agent): RetrievalState | undefined
 }
 
+function anchorStoppedResult(agent: Agent, application: RetrievalPresentationApplication, turn: number): void {
+  const state = application.currentOrUndefined(agent)
+  if (state?.phase !== 'stopped') return
+  appendRetrievalPresentationAnchor(agent.session, { retrievalId: state.retrievalId, phase: 'result', turn })
+}
+
 /**
  * Persist conversational placement after DSH has admitted the user messages
  * and after all live tool calls have drained. Retrieval execution remains in
@@ -32,12 +38,14 @@ export function installRetrievalPresentationAnchors(
   })
 
   ctx.on('agent/turn-stopping', ({ agent, turn }) => {
-    const state = application.currentOrUndefined(agent)
-    if (state?.phase !== 'stopped') return
-    appendRetrievalPresentationAnchor(agent.session, {
-      retrievalId: state.retrievalId,
-      phase: 'result',
-      turn,
-    })
+    anchorStoppedResult(agent, application, turn)
+  })
+
+  // A wall-clock deadline cancels the active turn before turn-stopping runs.
+  // Publish the same idempotent terminal anchor when that driver becomes idle.
+  ctx.on('agent/status', ({ agent, status }) => {
+    if (status !== 'idle') return
+    const boundary = agent.session.events.findLast(event => event.type === 'turn/start')
+    if (boundary?.type === 'turn/start') anchorStoppedResult(agent, application, boundary.data.turn)
   })
 }

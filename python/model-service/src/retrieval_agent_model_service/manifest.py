@@ -29,11 +29,40 @@ class RetrievalModelManifest:
     reranker: ModelManifest
 
 
-def _model(value: Any, *, embedding: bool) -> ModelManifest:
+def _identity(dependencies: Any, dependency_id: Any) -> tuple[str, str, str]:
+    if not isinstance(dependencies, dict) or not isinstance(dependency_id, str):
+        raise ServiceError(500, "MANIFEST_INVALID", "Model dependency reference is invalid.")
+    dependency = dependencies.get(dependency_id)
+    if not isinstance(dependency, dict):
+        raise ServiceError(500, "MANIFEST_INVALID", "Model dependency does not exist.")
+    source = dependency.get("source")
+    files = dependency.get("files")
+    if not isinstance(source, dict) or source.get("type") != "huggingface" or not isinstance(files, list):
+        raise ServiceError(500, "MANIFEST_INVALID", "Model dependency source or files are invalid.")
+    model = source.get("repoId")
+    revision = source.get("revision")
+    weight = next(
+        (item for item in files if isinstance(item, dict) and item.get("path") == "model.safetensors"),
+        None,
+    )
+    weight_sha256 = weight.get("sha256") if isinstance(weight, dict) else None
+    if (
+        not isinstance(model, str)
+        or not model.strip()
+        or not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        or not isinstance(weight_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", weight_sha256) is None
+    ):
+        raise ServiceError(500, "MANIFEST_INVALID", "Model dependency identity or checksum is invalid.")
+    return model, revision, weight_sha256
+
+
+def _model(value: Any, dependencies: Any, *, embedding: bool) -> ModelManifest:
     if not isinstance(value, dict):
         raise ServiceError(500, "MANIFEST_INVALID", "Model manifest entry is invalid.")
     instruction_key = "queryInstruction" if embedding else "instruction"
-    required = ["model", "revision", "weightSha256", "maxTokens", instruction_key]
+    required = ["dependency", "maxTokens", instruction_key]
     required.extend(["dimensions", "pooling", "normalization"] if embedding else ["scoreKind"])
     if any(key not in value for key in required):
         raise ServiceError(500, "MANIFEST_INVALID", "Model manifest is missing required fields.")
@@ -43,19 +72,18 @@ def _model(value: Any, *, embedding: bool) -> ModelManifest:
     max_tokens = value.get("maxTokens")
     if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
         raise ServiceError(500, "MANIFEST_INVALID", "Model token limit is invalid.")
-    strings = [value.get("model"), value.get("revision"), value.get("weightSha256"), value.get(instruction_key)]
+    strings = [value.get("dependency"), value.get(instruction_key)]
     if any(not isinstance(item, str) or not item.strip() for item in strings):
         raise ServiceError(500, "MANIFEST_INVALID", "Model identity or instruction is invalid.")
-    if re.fullmatch(r"[0-9a-fA-F]{64}", value["weightSha256"]) is None:
-        raise ServiceError(500, "MANIFEST_INVALID", "Model weight checksum is invalid.")
+    model, revision, weight_sha256 = _identity(dependencies, value["dependency"])
     if embedding and (value.get("pooling") != "last_token" or value.get("normalization") != "l2"):
         raise ServiceError(500, "MANIFEST_INVALID", "Unsupported embedding pooling or normalization.")
     if not embedding and value.get("scoreKind") != "yes_probability":
         raise ServiceError(500, "MANIFEST_INVALID", "Unsupported reranker score kind.")
     return ModelManifest(
-        model=value["model"],
-        revision=value["revision"],
-        weight_sha256=value["weightSha256"].lower(),
+        model=model,
+        revision=revision,
+        weight_sha256=weight_sha256,
         max_tokens=max_tokens,
         dimensions=dimensions if embedding else None,
         instruction=value[instruction_key],
@@ -70,11 +98,11 @@ def load_manifest(path: Path) -> RetrievalModelManifest:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ServiceError(500, "MANIFEST_INVALID", "Unable to read model manifest.") from error
-    if not isinstance(data, dict) or data.get("schemaVersion") != 1:
+    if not isinstance(data, dict) or data.get("schemaVersion") != 2:
         raise ServiceError(500, "MANIFEST_INVALID", "Unsupported model manifest schema.")
     return RetrievalModelManifest(
-        embedding=_model(data.get("embedding"), embedding=True),
-        reranker=_model(data.get("reranker"), embedding=False),
+        embedding=_model(data.get("embedding"), data.get("dependencies"), embedding=True),
+        reranker=_model(data.get("reranker"), data.get("dependencies"), embedding=False),
     )
 
 
