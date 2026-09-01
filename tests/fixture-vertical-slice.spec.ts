@@ -7,6 +7,7 @@ import { CandidateExportService, InMemoryExportAuditSink } from '@retrieval-agen
 import { projectTicketCandidateNode } from '@retrieval-agent/ui-ticket-results'
 import { bundledFixturePath } from '@retrieval-agent/bundle/startup'
 import { testHybridRanker } from './support/fake-model-gateway.js'
+import { testRetrievalPolicy } from './support/retrieval-policy.js'
 
 const NOW = new Date('2026-08-27T04:00:00.000Z')
 const PRINCIPAL: TrustedPrincipalContext = {
@@ -36,6 +37,7 @@ describe('fixture vertical slice', () => {
     const controllerIds = ids('domain')
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: eventIds })
     const controller = new RetrievalController(provider, journal, undefined, {
+      policy: testRetrievalPolicy(),
       now: () => NOW,
       id: controllerIds,
       searchTopK: 10,
@@ -50,26 +52,22 @@ describe('fixture vertical slice', () => {
     expect(state.candidates[0]?.displayId).toBe('TKT-0029')
 
     const selected = state.candidates[0]!
-    state = controller.assess(state, {
+    state = await controller.assess(state, {
       decision: 'continue',
-      coverage: 0.6,
-      candidateQuality: 0.9,
+      evaluator: 'model',
       selectedCandidateRefs: [selected.ref],
       excludedCandidateRefs: [],
       gaps: [{ kind: 'depth', status: 'open', evidenceRefs: [selected.ref], evaluator: 'model' }],
       nextAction: 'promote',
-      stop: false,
     })
     state = await controller.promote(PRINCIPAL, state, [selected.ref], ['problemDescription', 'answer'], 100)
-    state = controller.assess(state, {
-      decision: 'sufficient',
-      coverage: 0.9,
-      candidateQuality: 0.95,
+    state = await controller.assess(state, {
+      decision: 'accept_current_top_k',
+      evaluator: 'model',
       selectedCandidateRefs: [selected.ref],
       excludedCandidateRefs: [],
       gaps: [{ kind: 'depth', status: 'resolved', evidenceRefs: state.promotedEvidence.map(evidence => evidence.evidenceId), evaluator: 'model' }],
-      nextAction: 'finish',
-      stop: true,
+      nextAction: 'accept_current_top_k',
     })
     state = controller.freeze(state, [selected.ref])
     const node = projectTicketCandidateNode(journal.read(state.retrievalId), state.retrievalId)
@@ -79,8 +77,8 @@ describe('fixture vertical slice', () => {
       type: 'ticket_collection',
       complete: false,
       topKAccepted: true,
-      sourceExhausted: false,
-      stoppingReason: 'sufficient',
+      resultPagesExhausted: false,
+      stoppingReason: 'top_k_accepted',
       tickets: [{ displayId: selected.displayId }],
     })
     expect(node.candidates.map(candidate => candidate.ref)).toEqual([selected.ref])

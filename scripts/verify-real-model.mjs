@@ -36,10 +36,9 @@ const gateway = new ModelServiceClient({
 })
 const ready = await gateway.ready()
 const ranker = new HybridRankingEngine({
-  gateway,
+  baseUrl,
   embeddingIdentity: { model: embeddingModel, revision: embeddingRevision, dimensions: modelManifest.embedding.dimensions },
   ...(rerankerEnabled ? { rerankerIdentity: { model: rerankerModel, revision: rerankerRevision } } : {}),
-  cacheDir: join(process.cwd(), '.cache', 'retrieval-agent-vectors'),
   modelDeadlineMs: 180_000,
   rerankerEnabled,
   rerankTopN: 8,
@@ -85,18 +84,16 @@ for (const query of [
   // judgment quality. Use an explicit deterministic smoke assessment so the
   // diagnostic cannot silently reintroduce the removed "count == sufficient"
   // product rule.
-  state = controller.assess(state, {
-    decision: 'sufficient',
-    coverage: 1,
-    candidateQuality: 1,
+  state = await controller.assess(state, {
+    decision: 'accept_current_top_k',
     selectedCandidateRefs: [expected.ref],
     excludedCandidateRefs: [],
     gaps: [],
-    nextAction: 'finish',
-    stop: true,
+    nextAction: 'accept_current_top_k',
+    evaluator: 'model',
   })
   state = controller.freeze(state, state.selectedCandidateRefs)
-  if (state.phase !== 'stopped' || state.termination !== 'sufficient') {
+  if (state.phase !== 'stopped' || state.termination !== 'top_k_accepted') {
     throw new Error('deterministic smoke assessment did not produce a structured collection')
   }
   const collection = createTicketResultCollection(state)

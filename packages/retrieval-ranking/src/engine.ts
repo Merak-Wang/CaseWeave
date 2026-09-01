@@ -1,25 +1,30 @@
-import { createHash } from 'node:crypto'
-import { performance } from 'node:perf_hooks'
-import type { RetrievalModelGateway } from '@retrieval-agent/model-service-client'
-import { Bm25fIndex, BM25F_VERSION, type Bm25fOptions } from './bm25f.js'
-import { DENSE_RANKING_VERSION, DenseRanker } from './dense.js'
-import { FUSION_VERSION, weightedReciprocalRankFusion, type FusionOptions } from './fusion.js'
-import { tokenizeRankingText } from './tokenize.js'
-import type {
-  RankOptions,
-  RankingDocument,
-  RankingChannelExecution,
-  RankingHit,
-  RankingQuery,
-  RankingResult,
-  RetrievalRanker,
-} from './types.js'
+import { createHash, randomUUID } from 'node:crypto'
+import {
+  RAG_SERVICE_PROTOCOL_VERSION,
+  type PrepareRankingParams,
+  type PrepareRankingResponse,
+  type RankDocumentsParams,
+  type RankDocumentsResponse,
+  type RankingProfileParams,
+} from './protocol.js'
+import type { RankOptions, RankingDocument, RankingHit, RankingQuery, RankingResult, RetrievalRanker } from './types.js'
+
+export interface Bm25fOptions {
+  readonly k1?: number
+  readonly fields?: Readonly<Record<'title' | 'summary' | 'body' | 'metadata', { readonly weight: number; readonly b: number }>>
+  readonly minimumScore?: number
+}
+
+export interface FusionOptions {
+  readonly rankConstant?: number
+  readonly keywordWeight?: number
+  readonly vectorWeight?: number
+}
 
 export interface HybridRankingOptions {
-  readonly gateway?: RetrievalModelGateway
+  readonly baseUrl?: string
   readonly embeddingIdentity?: { readonly model: string; readonly revision: string; readonly dimensions: number }
   readonly rerankerIdentity?: { readonly model: string; readonly revision: string }
-  readonly cacheDir?: string
   readonly embeddingInstruction?: string
   readonly rerankerInstruction?: string
   readonly embeddingBatchSize?: number
@@ -30,275 +35,212 @@ export interface HybridRankingOptions {
   readonly rerankerEnabled?: boolean
   readonly rerankTopN?: number
   readonly allowKeywordFallback?: boolean
+  readonly fetch?: typeof globalThis.fetch
 }
 
 export class RankingError extends Error {
-  constructor(readonly code: 'SCAN_LIMIT' | 'HYBRID_UNAVAILABLE', message: string, options?: ErrorOptions) {
+  constructor(readonly code: string, message: string, readonly retryable = false, readonly status?: number, options?: ErrorOptions) {
     super(message, options)
     this.name = 'RankingError'
   }
 }
 
-const DEFAULT_EMBEDDING_INSTRUCTION = 'Given a support ticket search query, retrieve historical tickets with matching symptoms, products, constraints, and resolution context.'
-const DEFAULT_RERANKER_INSTRUCTION = 'Given a support ticket search query, determine whether the historical ticket describes the same user problem and compatible constraints.'
+const EMBEDDING_INSTRUCTION = 'Given a support ticket search query, retrieve historical tickets with matching symptoms, products, constraints, and resolution context.'
+const RERANKER_INSTRUCTION = 'Given a support ticket search query, determine whether the historical ticket describes the same user problem and compatible constraints.'
 
-function profileVersion(options: HybridRankingOptions): string {
-  const value = JSON.stringify({
-    version: 'quick-hybrid-v1',
-    embeddingIdentity: options.embeddingIdentity,
-    rerankerIdentity: options.rerankerIdentity,
-    embeddingInstruction: options.embeddingInstruction ?? DEFAULT_EMBEDDING_INSTRUCTION,
-    rerankerInstruction: options.rerankerInstruction ?? DEFAULT_RERANKER_INSTRUCTION,
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`
+  if (typeof value === 'object' && value !== null) {
+    // Code-point ordering is deliberately shared with Python; localeCompare would make profile hashes host-dependent.
+    return `{${Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, item]) => `${JSON.stringify(key)}:${stable(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function createProfile(options: HybridRankingOptions): RankingProfileParams {
+  return {
+    ...(options.embeddingIdentity === undefined ? {} : { embeddingIdentity: { ...options.embeddingIdentity } }),
+    ...(options.rerankerIdentity === undefined ? {} : { rerankerIdentity: { ...options.rerankerIdentity } }),
+    embeddingInstruction: options.embeddingInstruction ?? EMBEDDING_INSTRUCTION,
+    rerankerInstruction: options.rerankerInstruction ?? RERANKER_INSTRUCTION,
     embeddingBatchSize: options.embeddingBatchSize ?? 16,
+    modelDeadlineMs: options.modelDeadlineMs ?? 120_000,
     minimumDenseScore: options.minimumDenseScore ?? 0.1,
-    fusion: options.fusion ?? {},
-    bm25f: options.bm25f ?? {},
+    fusion: {
+      rankConstant: options.fusion?.rankConstant ?? 60,
+      keywordWeight: options.fusion?.keywordWeight ?? 0.55,
+      vectorWeight: options.fusion?.vectorWeight ?? 0.45,
+    },
+    bm25f: { ...options.bm25f },
     rerankerEnabled: options.rerankerEnabled ?? false,
     rerankTopN: options.rerankTopN ?? 20,
-  })
-  return `quick-hybrid-v1:${createHash('sha256').update(value).digest('hex').slice(0, 16)}`
-}
-
-function excluded(document: RankingDocument, terms: ReadonlySet<string>): boolean {
-  if (terms.size === 0) return false
-  const tokens = new Set(tokenizeRankingText(`${document.title}\n${document.summary}\n${document.body}\n${document.metadata}`))
-  return [...terms].some(term => tokens.has(term))
-}
-
-function matchesRequiredConcepts(document: RankingDocument, concepts: RankingQuery['requiredConcepts']): boolean {
-  if (concepts === undefined || concepts.length === 0) return true
-  const searchable = `${document.title}\n${document.summary}\n${document.body}\n${document.metadata}`
-    .normalize('NFKC')
-    .toLocaleLowerCase()
-  return concepts.every(concept => concept.alternatives.some(alternative => {
-    const normalized = alternative.normalize('NFKC').trim().toLocaleLowerCase()
-    return normalized.length > 0 && searchable.includes(normalized)
-  }))
-}
-
-function keywordHits(index: Bm25fIndex, query: RankingQuery): { readonly hits: RankingHit[]; readonly elapsedMs: number } {
-  const result = index.search(query.text, query.excludedTerms)
-  return {
-    elapsedMs: result.elapsedMs,
-    hits: result.hits.map(hit => ({
-      documentId: hit.documentId,
-      rank: hit.rank,
-      score: hit.score,
-      channels: [{ channel: 'keyword', rank: hit.rank, score: hit.score }],
-    })),
+    allowKeywordFallback: options.allowKeywordFallback ?? false,
   }
 }
 
-/** Provider-neutral implementation of the patent-mapped fixed quick hybrid retrieval stage. */
+function profileVersion(profile: RankingProfileParams): string {
+  const identity = {
+    version: 'quick-hybrid-v1',
+    embeddingIdentity: profile.embeddingIdentity ?? null,
+    rerankerIdentity: profile.rerankerIdentity ?? null,
+    embeddingInstruction: profile.embeddingInstruction,
+    rerankerInstruction: profile.rerankerInstruction,
+    embeddingBatchSize: profile.embeddingBatchSize,
+    minimumDenseScore: profile.minimumDenseScore,
+    fusion: profile.fusion,
+    bm25f: profile.bm25f,
+    rerankerEnabled: profile.rerankerEnabled,
+    rerankTopN: profile.rerankTopN,
+  }
+  return `quick-hybrid-v1:${createHash('sha256').update(stable(identity)).digest('hex').slice(0, 16)}`
+}
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined
+}
+
+function finite(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function validHits(value: unknown, documents: readonly RankingDocument[]): value is readonly RankingHit[] {
+  if (!Array.isArray(value)) return false
+  const admitted = new Set(documents.map(document => document.id))
+  const returned = new Set<string>()
+  return value.every((raw, index) => {
+    const hit = object(raw)
+    if (typeof hit?.documentId !== 'string' || !admitted.has(hit.documentId) || returned.has(hit.documentId)
+      || hit.rank !== index + 1 || !finite(hit.score) || !Array.isArray(hit.channels) || hit.channels.length === 0) return false
+    returned.add(hit.documentId)
+    return hit.channels.every(rawChannel => {
+      const channel = object(rawChannel)
+      return ['keyword', 'vector', 'reranker'].includes(String(channel?.channel))
+        && Number.isSafeInteger(channel?.rank) && Number(channel?.rank) >= 1 && finite(channel?.score)
+    })
+  })
+}
+
+function validResult(value: unknown, documents: readonly RankingDocument[], expectedProfile: string): value is RankingResult {
+  const result = object(value)
+  const execution = object(result?.execution)
+  if (!validHits(result?.hits, documents) || execution?.strategyVersion !== expectedProfile
+    || !['keyword', 'dense', 'hybrid'].includes(String(execution?.requestedMode))
+    || !['keyword', 'dense', 'hybrid', 'keyword_fallback'].includes(String(execution?.executedMode))
+    || !Array.isArray(execution.channels) || execution.channels.length === 0
+    || !Number.isSafeInteger(result?.scanned) || Number(result?.scanned) < 0 || Number(result?.scanned) > documents.length
+    || !Number.isSafeInteger(result?.keywordEligible) || Number(result?.keywordEligible) < 0
+    || Number(result?.keywordEligible) > Number(result?.scanned) || result?.rankedHits !== result.hits.length
+    || !Array.isArray(result.warnings) || !result.warnings.every(item => typeof item === 'string')) return false
+  return execution.channels.every(raw => {
+    const channel = object(raw)
+    return ['keyword', 'vector', 'reranker'].includes(String(channel?.channel))
+      && typeof channel?.implementation === 'string' && typeof channel.version === 'string'
+      && Number.isSafeInteger(channel.resultCount) && Number(channel.resultCount) >= 0 && finite(channel.elapsedMs)
+  })
+}
+
+/** HTTP adapter for BM25F/dense/fusion/reranking implemented by the uv-managed Python service. */
 export class HybridRankingEngine implements RetrievalRanker {
   readonly profileVersion: string
   readonly capabilities: RetrievalRanker['capabilities']
-  readonly #gateway: RetrievalModelGateway | undefined
-  readonly #dense?: DenseRanker
-  readonly #bm25f: Bm25fOptions | undefined
-  readonly #fusion: FusionOptions
-  readonly #rerankerInstruction: string
-  readonly #rerankerEnabled: boolean
-  readonly #rerankTopN: number
-  readonly #allowKeywordFallback: boolean
-  readonly #modelDeadlineMs: number
+  readonly #baseUrl: string
+  readonly #profile: RankingProfileParams
+  readonly #deadlineMs: number
+  readonly #fetch: typeof globalThis.fetch
 
   constructor(options: HybridRankingOptions = {}) {
-    this.profileVersion = profileVersion(options)
-    this.#gateway = options.gateway
-    this.#bm25f = options.bm25f
-    this.#fusion = options.fusion ?? {}
-    this.#rerankerInstruction = options.rerankerInstruction ?? DEFAULT_RERANKER_INSTRUCTION
-    this.#rerankerEnabled = options.rerankerEnabled ?? false
-    this.#rerankTopN = options.rerankTopN ?? 20
-    this.#allowKeywordFallback = options.allowKeywordFallback ?? false
-    this.#modelDeadlineMs = options.modelDeadlineMs ?? 120_000
-    if (this.#gateway !== undefined) {
-      this.#dense = new DenseRanker({
-        gateway: this.#gateway,
-        ...(options.cacheDir === undefined ? {} : { cacheDir: options.cacheDir }),
-        instruction: options.embeddingInstruction ?? DEFAULT_EMBEDDING_INSTRUCTION,
-        ...(options.embeddingBatchSize === undefined ? {} : { batchSize: options.embeddingBatchSize }),
-        ...(options.minimumDenseScore === undefined ? {} : { minimumScore: options.minimumDenseScore }),
-        ...(options.modelDeadlineMs === undefined ? {} : { deadlineMs: options.modelDeadlineMs }),
-      })
-    }
+    this.#baseUrl = (options.baseUrl ?? 'http://127.0.0.1:8012').replace(/\/+$/u, '')
+    this.#profile = createProfile(options)
+    this.#deadlineMs = options.modelDeadlineMs ?? 120_000
+    this.#fetch = options.fetch ?? globalThis.fetch
+    this.profileVersion = profileVersion(this.#profile)
     this.capabilities = {
       keyword: true,
-      dense: this.#dense !== undefined,
-      fusion: this.#dense !== undefined,
-      reranker: this.#dense !== undefined && this.#rerankerEnabled,
+      dense: options.embeddingIdentity !== undefined,
+      fusion: options.embeddingIdentity !== undefined,
+      reranker: options.embeddingIdentity !== undefined && (options.rerankerEnabled ?? false),
     }
-    if (!Number.isSafeInteger(this.#rerankTopN) || this.#rerankTopN < 1) throw new TypeError('rerankTopN must be positive')
+    if (!/^https?:\/\//u.test(this.#baseUrl)) throw new TypeError('RAG service baseUrl must use http or https')
+    if (!Number.isSafeInteger(this.#deadlineMs) || this.#deadlineMs < 100) throw new TypeError('modelDeadlineMs must be at least 100ms')
   }
 
   async prepare(documents: readonly RankingDocument[], options: { readonly signal?: AbortSignal } = {}) {
-    if (this.#dense === undefined) throw new RankingError('HYBRID_UNAVAILABLE', 'Dense 预加载要求已配置 Embedding 服务。')
-    return await this.#dense.prepare(documents, options.signal)
+    const identity = this.#profile.embeddingIdentity
+    if (identity === undefined) throw new RankingError('HYBRID_UNAVAILABLE', 'Dense 预加载要求已配置 Embedding 身份。')
+    const requestId = randomUUID()
+    const body: PrepareRankingParams = {
+      protocolVersion: RAG_SERVICE_PROTOCOL_VERSION,
+      requestId,
+      documents,
+      profile: this.#profile,
+      options: { maxScan: Math.max(1, documents.length), deadlineMs: this.#deadlineMs },
+    }
+    const response = await this.#request<PrepareRankingResponse>('/v1/ranking/prepare', body, options.signal)
+    if (response.protocolVersion !== RAG_SERVICE_PROTOCOL_VERSION || response.requestId !== requestId
+      || response.documentCount !== documents.length || response.profileVersion !== this.profileVersion
+      || response.model !== identity.model || response.revision !== identity.revision
+      || response.dimensions !== identity.dimensions || !finite(response.elapsedMs)) {
+      throw new RankingError('PROTOCOL_MISMATCH', 'RAG 服务返回了无效的索引预热响应。')
+    }
+    return response
   }
 
   async rank(documents: readonly RankingDocument[], query: RankingQuery, options: RankOptions): Promise<RankingResult> {
     if (!Number.isSafeInteger(options.maxScan) || options.maxScan < 1) throw new TypeError('maxScan must be positive')
     if (documents.length > options.maxScan) throw new RankingError('SCAN_LIMIT', '授权文档数量超过本地排名容量。')
-    if (options.signal?.aborted) throw options.signal.reason ?? new Error('cancelled')
-    const excludedTerms = new Set(query.excludedTerms.flatMap(tokenizeRankingText))
-    const allowed = documents.filter(document => !excluded(document, excludedTerms)
-      && matchesRequiredConcepts(document, query.requiredConcepts))
-    const lexical = query.mode === 'dense' ? undefined : keywordHits(new Bm25fIndex(allowed, this.#bm25f), query)
-    const keywordExecution = lexical === undefined ? undefined : {
-      channel: 'keyword' as const,
-      implementation: 'bm25f',
-      version: BM25F_VERSION,
-      resultCount: lexical.hits.length,
-      elapsedMs: lexical.elapsedMs,
+    const requestId = randomUUID()
+    const body: RankDocumentsParams = {
+      protocolVersion: RAG_SERVICE_PROTOCOL_VERSION,
+      requestId,
+      documents,
+      query,
+      profile: this.#profile,
+      options: { maxScan: options.maxScan, deadlineMs: this.#deadlineMs },
     }
-    if (query.mode === 'keyword') {
-      return {
-        hits: lexical!.hits,
-        execution: {
-          requestedMode: 'keyword', executedMode: 'keyword', strategyVersion: this.profileVersion,
-          channels: [keywordExecution!],
-        },
-        scanned: allowed.length,
-        warnings: [],
-      }
+    const response = await this.#request<RankDocumentsResponse>('/v1/ranking/rank', body, options.signal)
+    if (response.protocolVersion !== RAG_SERVICE_PROTOCOL_VERSION || response.requestId !== requestId
+      || !finite(response.elapsedMs) || !validResult(response.result, documents, this.profileVersion)
+      || response.result.execution.requestedMode !== query.mode) {
+      throw new RankingError('PROTOCOL_MISMATCH', 'RAG 服务返回了越界或无效的排名响应。')
     }
-    if (this.#dense === undefined) {
-      if (query.mode === 'dense' || !this.#allowKeywordFallback) {
-        throw new RankingError('HYBRID_UNAVAILABLE', 'Dense 或 Hybrid 检索要求已配置的 Embedding 服务。')
-      }
-      return {
-        hits: lexical!.hits,
-        execution: {
-          requestedMode: 'hybrid', executedMode: 'keyword_fallback', strategyVersion: this.profileVersion,
-          channels: [keywordExecution!],
-        },
-        scanned: allowed.length,
-        warnings: ['dense_unavailable_keyword_fallback'],
-      }
-    }
-    const denseQuery = [query.text, ...query.semanticHints].filter(Boolean).join('\n')
-    let dense
+    return response.result
+  }
+
+  async #request<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+    const controller = new AbortController()
+    const onAbort = (): void => controller.abort(signal?.reason)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    const timeout = setTimeout(() => controller.abort(new Error('deadline exceeded')), this.#deadlineMs)
     try {
-      dense = await this.#dense.search(allowed, denseQuery, options.signal)
+      const response = await this.#fetch(`${this.#baseUrl}${path}`, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+      const value: unknown = await response.json().catch(() => undefined)
+      if (!response.ok) {
+        const error = object(object(value)?.error)
+        throw new RankingError(
+          typeof error?.code === 'string' ? error.code : 'HTTP_ERROR',
+          typeof error?.message === 'string' ? error.message : `RAG 服务返回 HTTP ${response.status}。`,
+          typeof error?.retryable === 'boolean' ? error.retryable : response.status >= 500,
+          response.status,
+        )
+      }
+      if (object(value) === undefined) throw new RankingError('PROTOCOL_MISMATCH', 'RAG 服务返回了无效 JSON。')
+      return value as T
     } catch (error) {
-      if (options.signal?.aborted) throw error
-      if (query.mode === 'dense' || !this.#allowKeywordFallback) {
-        throw new RankingError('HYBRID_UNAVAILABLE', 'Dense 检索失败，禁止静默冒充可用通道。', { cause: error })
+      if (error instanceof RankingError) throw error
+      const cancelled = signal?.aborted === true
+      if (controller.signal.aborted) {
+        throw new RankingError(cancelled ? 'CANCELLED' : 'DEADLINE_EXCEEDED', cancelled ? 'RAG 请求已取消。' : 'RAG 请求超过截止时间。', !cancelled, undefined, { cause: error })
       }
-      return {
-        hits: lexical!.hits,
-        execution: {
-          requestedMode: 'hybrid', executedMode: 'keyword_fallback', strategyVersion: this.profileVersion,
-          channels: [keywordExecution!],
-        },
-        scanned: allowed.length,
-        warnings: ['dense_failed_keyword_fallback'],
-      }
-    }
-    const denseExecution = {
-      channel: 'vector' as const,
-      implementation: 'exact_cosine',
-      version: DENSE_RANKING_VERSION,
-      resultCount: dense.hits.length,
-      elapsedMs: dense.elapsedMs,
-      model: dense.model,
-      revision: dense.revision,
-      dimensions: dense.dimensions,
-    }
-    if (query.mode === 'dense') {
-      return {
-        hits: dense.hits.map(hit => ({
-          documentId: hit.documentId,
-          rank: hit.rank,
-          score: hit.score,
-          channels: [{ channel: 'vector', rank: hit.rank, score: hit.score }],
-        })),
-        execution: {
-          requestedMode: 'dense', executedMode: 'dense', strategyVersion: this.profileVersion,
-          channels: [denseExecution],
-        },
-        scanned: allowed.length,
-        warnings: [],
-      }
-    }
-    let hits = weightedReciprocalRankFusion(
-      lexical!.hits.map(hit => ({ documentId: hit.documentId, rank: hit.rank, score: hit.score })),
-      dense.hits,
-      this.#fusion,
-    )
-    const channels: RankingChannelExecution[] = [keywordExecution!, denseExecution]
-    const warnings: string[] = []
-    let reranker: { readonly model: string; readonly revision: string; readonly topN: number; readonly scoreKind: 'yes_probability' } | undefined
-    if (this.#rerankerEnabled && this.#gateway !== undefined && hits.length > 0) {
-      const started = performance.now()
-      const selected = hits.slice(0, this.#rerankTopN)
-      const byId = new Map(allowed.map(document => [document.id, document]))
-      try {
-        const ready = await this.#gateway.ready(options.signal)
-        const descriptor = ready.models.find(model => model.kind === 'reranker' && model.loaded)
-        if (descriptor === undefined) throw new Error('reranker model is not ready')
-        const ranked = await this.#gateway.rerank({
-          query: query.text,
-          candidates: selected.map(hit => {
-            const document = byId.get(hit.documentId)!
-            return { id: hit.documentId, text: `${document.title}\n${document.summary}\n${document.body}`.slice(0, 12_000) }
-          }),
-          instruction: this.#rerankerInstruction,
-          topK: selected.length,
-          deadlineMs: this.#modelDeadlineMs,
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
-        })
-        const selectedIds = new Set(selected.map(hit => hit.documentId))
-        const rankedIds = new Set(ranked.map(item => item.id))
-        const rankedRanks = new Set(ranked.map(item => item.rank))
-        if (ranked.length !== selected.length || rankedIds.size !== ranked.length || rankedRanks.size !== ranked.length
-          || ranked.some(item => !selectedIds.has(item.id) || !Number.isSafeInteger(item.rank)
-            || item.rank < 1 || item.rank > ranked.length || !Number.isFinite(item.score))) {
-          throw new Error('reranker returned candidates outside the admitted fusion pool')
-        }
-        const reranked = new Map(ranked.map(item => [item.id, item]))
-        hits = [...hits].sort((left, right) => {
-          const leftRank = reranked.get(left.documentId)?.rank
-          const rightRank = reranked.get(right.documentId)?.rank
-          if (leftRank !== undefined && rightRank !== undefined) return leftRank - rightRank
-          if (leftRank !== undefined) return -1
-          if (rightRank !== undefined) return 1
-          return left.rank - right.rank
-        }).map((hit, index) => {
-          const score = reranked.get(hit.documentId)
-          return {
-            ...hit,
-            rank: index + 1,
-            channels: score === undefined ? hit.channels : [...hit.channels, { channel: 'reranker' as const, rank: score.rank, score: score.score }],
-          }
-        })
-        channels.push({
-          channel: 'reranker', implementation: 'qwen_yes_no', version: 'qwen-reranker-v1',
-          resultCount: ranked.length, elapsedMs: Math.max(0, performance.now() - started),
-          model: descriptor.model, revision: descriptor.revision,
-        })
-        reranker = { model: descriptor.model, revision: descriptor.revision, topN: selected.length, scoreKind: 'yes_probability' }
-      } catch (error) {
-        if (options.signal?.aborted) throw error
-        warnings.push('reranker_failed_open')
-      }
-    }
-    return {
-      hits,
-      execution: {
-        requestedMode: 'hybrid', executedMode: 'hybrid', strategyVersion: this.profileVersion,
-        channels,
-        fusion: {
-          method: 'weighted_rrf', version: FUSION_VERSION,
-          rankConstant: this.#fusion.rankConstant ?? 60,
-          keywordWeight: this.#fusion.keywordWeight ?? 0.55,
-          vectorWeight: this.#fusion.vectorWeight ?? 0.45,
-        },
-        ...(reranker === undefined ? {} : { reranker }),
-      },
-      scanned: allowed.length,
-      warnings,
+      throw new RankingError('UNAVAILABLE', '无法连接本地 RAG 服务。', true, undefined, { cause: error })
+    } finally {
+      clearTimeout(timeout)
+      signal?.removeEventListener('abort', onAbort)
     }
   }
 }

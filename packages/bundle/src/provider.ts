@@ -18,9 +18,8 @@ import {
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
 import { TicketRetrievalProviderService } from '@retrieval-agent/agent-plugin'
-import { ModelServiceClient } from '@retrieval-agent/model-service-client'
 import { LocalTicketProvider, parseTicketDatasetJsonl, rankingDocuments } from '@retrieval-agent/provider-local'
-import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
+import { HybridRankingEngine, type RetrievalRanker } from '@retrieval-agent/retrieval-ranking'
 
 export interface Config {
   readonly dataPath: string
@@ -35,11 +34,12 @@ export interface Config {
   readonly embeddingRevision?: string
   readonly embeddingDimensions?: number
   readonly modelDeadlineMs?: number
-  readonly vectorCacheDir?: string
   readonly rerankerEnabled?: boolean
   readonly rerankerModel?: string
   readonly rerankerRevision?: string
   readonly allowKeywordFallback?: boolean
+  /** Non-serialized Provider seam used by deterministic composition tests. */
+  readonly ranker?: RetrievalRanker
 }
 
 export const Config: z<Config> = z.object({
@@ -55,7 +55,6 @@ export const Config: z<Config> = z.object({
   embeddingRevision: z.string(),
   embeddingDimensions: z.number().step(1).min(1).default(1024),
   modelDeadlineMs: z.number().step(1).min(100).default(120_000),
-  vectorCacheDir: z.string().default('.cache/retrieval-agent-vectors'),
   rerankerEnabled: z.boolean().default(false),
   rerankerModel: z.string().default('Qwen/Qwen3-Reranker-0.6B'),
   rerankerRevision: z.string(),
@@ -88,23 +87,14 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
     if (config.rerankerEnabled === true && (rerankerRevision === undefined || rerankerRevision.length === 0)) {
       throw new TypeError('enabled reranking requires a pinned rerankerRevision')
     }
-    const gateway = mode !== 'keyword' ? new ModelServiceClient({
+    const ranker = config.ranker ?? new HybridRankingEngine({
       baseUrl: config.modelServiceBaseUrl ?? 'http://127.0.0.1:8012',
-      embeddingModel,
-      embeddingDimensions,
-      embeddingRevision: embeddingRevision!,
-      ...(config.rerankerEnabled !== true ? {} : { rerankerModel, rerankerRevision: rerankerRevision! }),
-      defaultDeadlineMs: config.modelDeadlineMs ?? 120_000,
-    }) : undefined
-    const ranker = new HybridRankingEngine({
-      ...(gateway === undefined ? {} : { gateway }),
       ...(mode === 'keyword' ? {} : {
         embeddingIdentity: { model: embeddingModel, revision: embeddingRevision!, dimensions: embeddingDimensions },
       }),
       ...(config.rerankerEnabled !== true ? {} : {
         rerankerIdentity: { model: rerankerModel, revision: rerankerRevision! },
       }),
-      ...(config.vectorCacheDir === undefined ? {} : { cacheDir: config.vectorCacheDir }),
       modelDeadlineMs: config.modelDeadlineMs ?? 120_000,
       rerankerEnabled: config.rerankerEnabled ?? false,
       allowKeywordFallback: config.allowKeywordFallback ?? false,

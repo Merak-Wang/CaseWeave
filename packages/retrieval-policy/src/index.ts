@@ -1,2 +1,2 @@
-export * from './candidate-ranking.js'
-export * from './knowledge-assessment.js'
+export * from './client.js'
+export * from './protocol.js'

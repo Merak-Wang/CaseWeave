@@ -13,7 +13,7 @@ import type {
   TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
 
-export const STREAMCLUSTER_PROTOCOL_VERSION = 'retrieval-agent.streamcluster.v2' as const
+export const STREAMCLUSTER_PROTOCOL_VERSION = 'retrieval-agent.streamcluster.v3' as const
 
 export interface StreamClusterCapabilitiesResponse {
   readonly protocolVersion: typeof STREAMCLUSTER_PROTOCOL_VERSION

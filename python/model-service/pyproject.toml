@@ -1,7 +1,7 @@
 [project]
 name = "retrieval-agent-model-service"
 version = "0.1.0"
-description = "Long-lived local Qwen embedding and reranking data plane for Retrieval Agent"
+description = "Long-lived uv/FastAPI data plane for query analysis, RAG ranking/policy, Qwen inference, and vector caching"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = []
@@ -10,11 +10,16 @@ dependencies = []
 retrieval-agent-model-service = "retrieval_agent_model_service.cli:main"
 
 [dependency-groups]
-dev = ["pytest==8.4.2"]
+dev = ["httpx==0.28.1", "pytest==8.4.2"]
 runtime = [
+  "fastapi==0.141.1",
   "huggingface-hub==0.36.2",
+  "numpy==2.5.2",
+  "spacy==3.8.7",
   "torch==2.9.1",
-  "transformers==4.57.6"
+  "transformers==4.57.6",
+  "uvicorn==0.52.4",
+  "zh-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/zh_core_web_sm-3.8.0/zh_core_web_sm-3.8.0-py3-none-any.whl"
 ]
 
 [build-system]

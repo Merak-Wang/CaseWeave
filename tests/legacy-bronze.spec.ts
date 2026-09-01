@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import type { TicketFilter, TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import { LocalTicketProvider, parseFixtureJsonl } from '@retrieval-agent/provider-local'
+import { testHybridRanker } from './support/fake-model-gateway.js'
 
 interface BronzeCase {
   readonly caseId: string
@@ -23,7 +24,7 @@ describe('migrated 162-case Bronze development baseline', () => {
     const records = parseFixtureJsonl(await readFile('packages/bundle/fixtures/tickets.jsonl', 'utf8'))
     const cases = (await readFile('python/evals/data/legacy-bronze-v1/cases.jsonl', 'utf8'))
       .split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line) as BronzeCase)
-    const provider = new LocalTicketProvider(records, { now: () => new Date('2026-08-27T01:00:00.000Z') })
+    const provider = new LocalTicketProvider(records, { now: () => new Date('2026-08-27T01:00:00.000Z'), ranker: testHybridRanker() })
     const opened = await provider.openSnapshot(principal)
     const failures: string[] = []
     for (const testCase of cases) {

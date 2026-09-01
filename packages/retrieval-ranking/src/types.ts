@@ -12,6 +12,12 @@ export interface RankingDocument {
 
 export interface RankingQuery {
   readonly text: string
+  readonly fastPath?: boolean
+  readonly semanticText?: string
+  readonly keywordQuery?: {
+    readonly terms: readonly string[]
+    readonly operator: 'and' | 'or'
+  }
   readonly semanticHints: readonly string[]
   readonly excludedTerms: readonly string[]
   /** Every group must match; alternatives inside one group are equivalent. */
@@ -44,6 +50,7 @@ export interface RankingChannelExecution {
   readonly model?: string
   readonly revision?: string
   readonly dimensions?: number
+  readonly querySource?: 'direct_user_original' | 'direct_user_keywords' | 'agent_rewrite'
 }
 
 export interface RankingExecution {
@@ -70,6 +77,8 @@ export interface RankingResult {
   readonly hits: readonly RankingHit[]
   readonly execution: RankingExecution
   readonly scanned: number
+  readonly keywordEligible: number
+  readonly rankedHits: number
   readonly warnings: readonly string[]
 }
 

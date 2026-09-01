@@ -1,7 +1,7 @@
 {
   "name": "@retrieval-agent/retrieval-ranking",
   "version": "0.1.0",
-  "description": "Deterministic BM25F, dense retrieval, fusion, vector cache, and optional reranking pipeline",
+  "description": "Validated TypeScript protocol adapter for the uv-managed Python RAG ranking service",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -16,9 +16,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "dependencies": {
-    "@retrieval-agent/model-service-client": "workspace:*"
   },
   "publishConfig": { "access": "public" },
   "license": "MIT"

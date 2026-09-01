@@ -11,10 +11,12 @@ class FakeBackend:
         manifest: object,
         embedding_path: Path,
         reranker_path: Path | None,
+        spacy_path: Path,
+        domain_lexicon_path: Path | None,
         enable_reranker: bool,
         device: str,
     ) -> None:
-        del manifest, embedding_path, reranker_path, enable_reranker, device
+        del manifest, embedding_path, reranker_path, spacy_path, domain_lexicon_path, enable_reranker, device
 
     def load(self) -> None:
         return None
@@ -40,6 +42,8 @@ def test_keyboard_interrupt_stops_without_a_traceback(
             str(manifest_path),
             "--embedding-path",
             str(embedding_path),
+            "--spacy-path",
+            str(tmp_path / "spacy"),
         ],
     )
 
@@ -76,6 +80,8 @@ def test_supervised_mode_starts_stdin_watchdog(
             str(manifest_path),
             "--embedding-path",
             str(embedding_path),
+            "--spacy-path",
+            str(tmp_path / "spacy"),
             "--exit-on-stdin-close",
         ],
     )

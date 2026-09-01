@@ -44,10 +44,18 @@ function data(): TicketCandidateNode {
         { surface: '跨域', canonical: '跨域', alternatives: ['跨域', '省外'] },
       ],
     },
+    fastQuery: {
+      schemaVersion: 1,
+      source: 'direct_user',
+      rewriteApplied: false,
+      keyword: { terms: ['副卡', '跨域'], operator: 'and' },
+      vector: { text: '帮我找副卡和跨域有关工单' },
+    },
     snapshotShortId: 'snap-1',
     completeness: 'bounded',
     nextPageAvailable: true,
-    sourceExhausted: false,
+    resultPagesExhausted: false,
+    semanticRecallKnown: false,
     status: 'results',
     candidates,
     alreadyReadEvidence: [{
@@ -72,11 +80,12 @@ function data(): TicketCandidateNode {
       retrievalId: RetrievalId('retrieval-ui-density'),
       query: '副卡',
       target: 'ranked_cases',
-      stoppingReason: 'sufficient',
+      stoppingReason: 'top_k_accepted',
       complete: false,
       decisionFinalized: true,
       topKAccepted: true,
-      sourceExhausted: false,
+      resultPagesExhausted: false,
+      semanticRecallKnown: false,
       resultMayBeIncomplete: true,
       nextPageAvailable: true,
       tickets: candidates,
@@ -87,15 +96,28 @@ function data(): TicketCandidateNode {
 }
 
 describe('CandidatePanel density', () => {
-  it('renders only the collapsed collection frame and makes the AND interpretation explicit', () => {
+  it('shows the first five rows, a continuation control, and the zero-rewrite AND interpretation', () => {
     const html = renderToStaticMarkup(<CandidatePanel {...({ node: { data: data() }, sessionId: 'session-ui' } as CandidatePanelProps)} />)
     expect(html).toContain('候选工单（集合） · 6 条')
     expect(html).toContain('aria-expanded="false"')
     expect(html).toContain('原始查询')
-    expect(html).toContain('必须同时满足')
+    expect(html).toContain('关键词同时包含')
     expect(html).toContain('副卡')
     expect(html).toContain('跨域')
-    expect(html).not.toContain('工单编号 TKT-1')
-    expect(html).toContain('Top-K 已完成；结果不代表数据源全集。')
+    expect(html).toContain('工单编号 TKT-1')
+    expect(html).not.toContain('工单编号 TKT-6')
+    expect(html).toContain('继续显示 1 条')
+    expect(html).toContain('当前 Top-K 已接受；语义召回范围仍未知。')
+    expect(html).not.toContain('继续检索下一批')
+  })
+
+  it('offers Provider-cursor continuation while the current Top-K is presented but not frozen', () => {
+    const current = data()
+    const html = renderToStaticMarkup(<CandidatePanel {...({
+      node: { data: { ...current, result: undefined } }, sessionId: 'session-ui',
+    } as CandidatePanelProps)} />)
+    expect(html).toContain('首批候选 · 6 条')
+    expect(html).toContain('继续检索下一批')
+    expect(html).toContain('当前检索表达式仍有后续候选')
   })
 })

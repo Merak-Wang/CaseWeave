@@ -6,7 +6,8 @@ import type {
   RetrievalState,
   TicketRetrievalRequest,
 } from '@retrieval-agent/contracts'
-import { compileDirectTicketQuery } from '@retrieval-agent/query-understanding'
+import { buildFastTicketRequest } from '@retrieval-agent/query-understanding'
+import type { TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
 
 const PLUGIN_NAME = 'retrieval-agent'
 const SNAPSHOT_SECTION = 'retrieval-agent:state'
@@ -19,6 +20,7 @@ export interface AutomaticRetrievalApplication {
 
 export interface AutomaticRetrievalStartConfig {
   readonly adaptiveMaxResults: number
+  readonly analyzer: TicketQueryAnalyzer
 }
 
 function acceptedDirectMessages(
@@ -31,7 +33,7 @@ function acceptedDirectMessages(
   return proposed.filter(message => message.source.kind === 'user' && acceptedIds.has(String(message.id)))
 }
 
-/** Preserve direct-user text exactly; normalization belongs to the query compiler. */
+/** 保留 direct-user 原文；请求装配最多派生 NFKC 检索视图，首轮向量通道仍使用这里返回的完整文本。 */
 function originalQuery(messages: readonly UserMessage[]): string | undefined {
   const messageTexts = messages.map(message => message.content
     .filter(block => block.type === 'text')
@@ -54,10 +56,8 @@ function insertAfterLastDirectUser(
 }
 
 /**
- * DSH deliberately treats an admitted empty first step as a completed turn
- * without an LLM request. Persist the already-admitted messages ourselves so
- * that taking that public fast path does not remove the user's query or any
- * downstream durable context from the Session surface.
+ * DSH 会把已准入但消息为空的第一步视为无需 LLM 的已完成轮次。
+ * 因此这里主动持久化已经准入的消息，避免走公开快路径时从 Session 表面丢失用户 query 或后续持久上下文。
  */
 function persistCompletedPreStep(agent: Agent, messages: readonly UserMessage[]): void {
   for (const message of messages) {
@@ -65,10 +65,7 @@ function persistCompletedPreStep(agent: Agent, messages: readonly UserMessage[])
   }
 }
 
-/**
- * Start a new retrieval from accepted direct-user input before the first model
- * request, then append the durable state snapshot to that same request.
- */
+/** 在第一次模型请求前用已接受的 direct-user 输入启动检索，并把持久化状态快照追加到同一次请求。 */
 export function installAutomaticRetrievalStart(
   ctx: Context,
   application: AutomaticRetrievalApplication,
@@ -88,9 +85,13 @@ export function installAutomaticRetrievalStart(
     const current = application.currentOrUndefined(agent)
     if (current !== undefined && current.phase !== 'stopped') return decision
 
-    const state = await application.start(agent, compileDirectTicketQuery(query, {
+    // 在首次模型请求之前完成 spaCy 分析和固定 Hybrid 计划，模型只能在看到首轮知识状态后决定是否修复查询。
+    const request = await buildFastTicketRequest(query, {
       adaptiveMaxResults: config.adaptiveMaxResults,
-    }), signal)
+      analyzer: config.analyzer,
+      signal,
+    })
+    const state = await application.start(agent, request, signal)
     if (signal.aborted) return decision
 
     const selection = application.projectContext(agent)

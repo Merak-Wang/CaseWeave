@@ -24,6 +24,7 @@ function candidateText(candidate: TicketCandidate, alias: string): string {
     title: candidate.title,
     ...(candidate.summary.trim() === candidate.title.trim() ? {} : { summary: candidate.summary }),
     l0: candidate.l0,
+    match: candidate.matchSignals,
   })
 }
 
@@ -60,24 +61,74 @@ export class EvidenceContextPolicy {
     const excluded: EvidenceContextSelection['excluded'][number][] = []
     let used = 0
     const aliases = new Map(state.candidateHistory.map((candidate, index) => [candidate.ref, `c${index + 1}`]))
-    const header = JSON.stringify({
-      queryContract: state.query.contract ?? {
+    const queryContract = state.query.contract ?? {
         original: state.query.original,
         normalized: state.query.spec.normalizedQuery,
         task: state.task.target,
         maxResults: state.task.requestedCount,
-      },
-      state: {
-        revision: state.revision,
-        phase: state.phase,
-        activeAliases: state.candidates.map(candidate => aliases.get(candidate.ref)),
-        gaps: state.gaps.map(gap => ({ kind: gap.kind, status: gap.status, evaluator: gap.evaluator })),
-        allowedActions: state.allowedActions.map(action => action.kind),
-        promotableFields: state.snapshot?.fieldCatalog
-          .filter(field => field.accessLevel === 'L2')
-          .map(field => field.key) ?? [],
-        sourceExhausted: state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined,
-        nextPageAvailable: state.lastPage?.nextCursor !== undefined,
+      }
+    const pageBoundary = state.lastPage?.boundary
+    const resultPagesExhausted = pageBoundary?.resultPagesExhausted
+      ?? (state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined)
+    const lastSignals = state.lastPage?.trace.signals ?? []
+    const bothChannels = lastSignals.filter(signal => {
+      const channels = new Set(signal.channels.map(channel => channel.channel))
+      return channels.has('keyword') && channels.has('vector')
+    }).length
+    const header = JSON.stringify({
+      knowledgeState: {
+        queryContract,
+        retrievalObservation: {
+          stage: state.lastPage?.trace.stage,
+          channels: state.lastPage?.trace.channels.map(channel => ({
+            channel: channel.channel,
+            resultCount: channel.resultCount,
+            elapsedMs: channel.elapsedMs,
+            querySource: channel.querySource,
+          })) ?? [],
+          bothChannelCandidates: bothChannels,
+          returnedThisPage: state.lastPage?.returned ?? 0,
+          newCandidateCount: state.progress.newCandidateRefs.length,
+          cumulativeCandidateCount: state.candidateHistory.length,
+          rankOverlap: state.progress.rankOverlap,
+          noProgressStreak: state.progress.noProgressStreak,
+          scores: lastSignals.map(signal => ({
+            alias: aliases.get(signal.candidateRef),
+            finalRank: signal.finalRank,
+            fusedScore: signal.fusedScore,
+            channels: signal.channels,
+          })),
+        },
+        evidenceState: {
+          activeAliases: state.candidates.map(candidate => aliases.get(candidate.ref)),
+          promotedEvidenceCount: state.promotedEvidence.length,
+          gaps: state.gaps.map(gap => ({
+            kind: gap.kind,
+            status: gap.status,
+            evaluator: gap.evaluator,
+            description: gap.description,
+          })),
+          promotableFields: state.snapshot?.fieldCatalog
+            .filter(field => field.accessLevel === 'L2')
+            .map(field => field.key) ?? [],
+        },
+        boundaryState: {
+          authorizedCorpusSize: pageBoundary?.authorizedCorpusSize,
+          documentsAfterStructuredFilters: pageBoundary?.documentsAfterStructuredFilters,
+          documentsEligibleForKeywordChannel: pageBoundary?.documentsEligibleForKeywordChannel,
+          rankedHits: pageBoundary?.rankedHits,
+          resultPagesExhausted,
+          semanticRecallKnown: pageBoundary?.semanticRecallKnown ?? false,
+          nextPageAvailable: state.lastPage?.nextCursor !== undefined,
+          budget: state.budget,
+        },
+        actionState: {
+          callableToolsNow: state.allowedActions.map(action => action.kind),
+          permittedDecisionRequests: [
+            'present_current_top_k', 'accept_current_top_k', 'continue_ranking', 'keyword_repair',
+            'vector_repair', 'promote_evidence', 'clarify',
+          ],
+        },
       },
       snapshot: state.snapshot === undefined ? undefined : {
         shortId: state.snapshot.shortId,

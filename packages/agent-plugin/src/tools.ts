@@ -24,8 +24,7 @@ import {
   compactTerminalReceipt,
 } from './compact.js'
 import { RETRIEVAL_TOOL_OUTPUT_SCHEMA } from './tool-output-schema.js'
-
-const POLICY = `You are a read-only ticket retrieval agent. Harness has already compiled a typed Query Contract, opened one authorized snapshot, and run the fixed first Hybrid search before the first model request. Use stable short aliases such as c1; never invent or copy opaque candidate refs. After each search or evidence read, call ticket_assess_state with one discriminated outcome. Omitted keep_aliases means keep every active candidate not newly excluded. System gaps are read-only; semantic_gaps are model-owned. Provider cursors, authorization, historical selections, exclusions, and stop semantics remain Harness-owned. A sufficient Top-K decision does not mean the source is exhausted. Never produce a natural-language final answer; Harness emits the terminal structured collection.`
+const POLICY = `You are a read-only ticket retrieval agent. Before the first model request, Harness opened one authorized snapshot and ran a zero-rewrite fast search: the keyword channel used the recorded direct-user keyword terms, while the vector channel embedded the exact original query. Use stable aliases such as c1; never invent opaque refs. You may directly continue the hidden Provider cursor, rewrite a later keyword/vector query, promote L2 evidence, clarify, or submit one semantic assessment. Omitted keep_aliases keeps every active candidate not newly excluded. System gaps and boundary facts are read-only. When an adaptive Top-K has more pages and the first batch is useful, use present_current_top_k so the user can inspect it and continue later; accept_current_top_k is terminal and never proves corpus recall. Never produce a natural-language final answer; Harness emits terminal collections.`
 const SEARCH_TOOLS = ['ticket_keyword_search', 'ticket_vector_search'] as const
 const TOOL_NAMES = new Set([
   ...SEARCH_TOOLS,
@@ -37,10 +36,10 @@ const TOOL_NAMES = new Set([
   'ticket_state',
 ])
 const REPAIR_EXAMPLES: Readonly<Record<string, unknown>> = {
-  ticket_assess_state: { outcome: { verdict: 'sufficient' } },
+  ticket_assess_state: { outcome: { verdict: 'accept_current_top_k' } },
   ticket_continue_ranking: {},
-  ticket_keyword_search: { change: { type: 'add_terms', terms: ['副卡'] } },
-  ticket_vector_search: { semantic_hint: '副卡异常' },
+  ticket_keyword_search: { change: { type: 'replace_terms', terms: ['副卡', '跨域'], operator: 'and' } },
+  ticket_vector_search: { query: '副卡办理后跨省使用异常' },
   ticket_promote: { candidate_aliases: ['c1'], fields: ['problemDescription'], token_budget: 200 },
   ticket_request_clarification: { facet: 'category', question: '请选择工单类别', candidate_aliases: ['c1', 'c2'] },
   ticket_answer_clarification: { accepted: true, answer: '移动业务' },
@@ -48,7 +47,6 @@ const REPAIR_EXAMPLES: Readonly<Record<string, unknown>> = {
 }
 type ToolValue = InferValue<typeof RETRIEVAL_TOOL_OUTPUT_SCHEMA>
 type TicketSearchChannel = Extract<TicketRetrievalMode, 'keyword' | 'dense'>
-
 const ALIAS_LIST = { type: 'array', items: { type: 'string' } } as const
 const SEMANTIC_GAPS = {
   type: 'array',
@@ -84,15 +82,11 @@ const ASSESSMENT_OUTCOME = {
   oneOf: [
     {
       type: 'object', additionalProperties: false,
-      properties: { verdict: { type: 'string', required: true, const: 'sufficient' }, ...COMMON_ASSESSMENT_PROPERTIES },
+      properties: { verdict: { type: 'string', required: true, const: 'present_current_top_k' }, ...COMMON_ASSESSMENT_PROPERTIES },
     },
     {
       type: 'object', additionalProperties: false,
-      properties: { verdict: { type: 'string', required: true, const: 'no_result' }, exclude_new_aliases: ALIAS_LIST },
-    },
-    {
-      type: 'object', additionalProperties: false,
-      properties: { verdict: { type: 'string', required: true, const: 'partial' }, ...COMMON_ASSESSMENT_PROPERTIES },
+      properties: { verdict: { type: 'string', required: true, const: 'accept_current_top_k' }, ...COMMON_ASSESSMENT_PROPERTIES },
     },
     {
       type: 'object', additionalProperties: false,
@@ -111,6 +105,14 @@ const ASSESSMENT_OUTCOME = {
 type AssessmentOutcome = InferValue<typeof ASSESSMENT_OUTCOME>
 const KEYWORD_CHANGE = {
   oneOf: [
+    {
+      type: 'object', additionalProperties: false,
+      properties: {
+        type: { type: 'string', required: true, const: 'replace_terms' },
+        terms: { ...ALIAS_LIST, required: true },
+        operator: { type: 'string', required: true, enum: ['and', 'or'] },
+      },
+    },
     {
       type: 'object', additionalProperties: false,
       properties: {
@@ -143,7 +145,6 @@ const KEYWORD_CHANGE = {
     },
   ],
 } as const
-
 export interface RetrievalToolApplication {
   readonly contextTokenBudget: number
   currentOrUndefined(agent: Agent): RetrievalState | undefined
@@ -157,18 +158,16 @@ export interface RetrievalToolApplication {
   promote(agent: Agent, refs: readonly TicketCandidateRef[], fields: readonly TicketEvidenceField[], tokenBudget: number, signal?: AbortSignal): Promise<RetrievalState>
   requestClarification(agent: Agent, facet: string, question: string, refs: readonly TicketCandidateRef[]): RetrievalState
   answerClarification(agent: Agent, input: { readonly accepted: boolean; readonly answer?: string }): RetrievalState
+  recordToolCall(agent: Agent, input: { readonly success: boolean; readonly serializationBytes: number }): Promise<RetrievalState>
 }
-
 export interface RetrievalToolConfig {
   /** @deprecated Reminders are no longer used as normal control flow. */
   readonly maxFinishReminders?: number
 }
-
 function agentFor(agent: Agent | undefined, tool: string): Agent {
   if (agent === undefined) throw new Error(`${tool} requires a calling Agent`)
   return agent
 }
-
 function toolValue(value: unknown): ToolValue {
   return JSON.parse(JSON.stringify(value)) as ToolValue
 }
@@ -179,15 +178,12 @@ function output<const S extends ValueSchemaSpec>(schema: S, compact: (value: unk
     render: (_args: unknown, value: InferValue<S>) => [{ type: 'text' as const, text: JSON.stringify(compact(value)) }],
   }
 }
-
 function stateOutput() {
   return output(RETRIEVAL_TOOL_OUTPUT_SCHEMA)
 }
-
 function stateOrResultOutput() {
   return output(RETRIEVAL_TOOL_OUTPUT_SCHEMA)
 }
-
 function presentation(
   application: RetrievalToolApplication,
   title: string,
@@ -213,17 +209,17 @@ function presentation(
     },
   }
 }
-
 interface KeywordSearchArgs {
-  readonly type: 'add_terms' | 'exclude_terms' | 'add_filter' | 'remove_filter'
+  readonly type: 'replace_terms' | 'add_terms' | 'exclude_terms' | 'add_filter' | 'remove_filter'
   readonly terms?: readonly string[]
+  readonly operator?: 'and' | 'or'
   readonly field?: string
   readonly op?: string
   readonly value?: string
 }
-
 function keywordDelta(change: KeywordSearchArgs): TicketQueryDelta {
   switch (change.type) {
+    case 'replace_terms': return { kind: 'replace_terms', terms: change.terms ?? [], operator: change.operator ?? 'and' }
     case 'add_terms': return { kind: 'add_terms', terms: change.terms ?? [] }
     case 'exclude_terms': return { kind: 'exclude_terms', terms: change.terms ?? [] }
     case 'remove_filter': return { kind: 'remove_filter', field: change.field as TicketFilter['field'] }
@@ -234,13 +230,26 @@ function keywordDelta(change: KeywordSearchArgs): TicketQueryDelta {
     default: return change.type satisfies never
   }
 }
-
 function terminalToolValue(state: RetrievalState, exec: { concludeTurn(): void }): ToolValue {
   if (state.phase !== 'stopped') return toolValue(compactRetrievalState(state))
   exec.concludeTurn()
   return toolValue(compactTerminalReceipt(state))
 }
-
+async function measuredToolValue(
+  application: RetrievalToolApplication,
+  agent: Agent,
+  state: RetrievalState,
+  exec: { concludeTurn(): void },
+  concludeCurrentTurn = false,
+): Promise<ToolValue> {
+  const preview = state.phase === 'stopped' ? compactTerminalReceipt(state) : compactRetrievalState(state)
+  const measured = await application.recordToolCall(agent, {
+    success: true,
+    serializationBytes: Buffer.byteLength(JSON.stringify(preview), 'utf8'),
+  })
+  if (concludeCurrentTurn && measured.phase !== 'stopped') exec.concludeTurn()
+  return terminalToolValue(measured, exec)
+}
 function aliasesToActiveRefs(
   state: RetrievalState,
   aliases: readonly string[],
@@ -259,7 +268,6 @@ function aliasesToActiveRefs(
   }
   return refs
 }
-
 function evidenceRefsForAliases(state: RetrievalState, aliases: readonly string[]): string[] {
   return [...new Set(aliases)].map((alias) => {
     const candidateRef = candidateRefForAlias(state, alias)
@@ -270,21 +278,14 @@ function evidenceRefsForAliases(state: RetrievalState, aliases: readonly string[
     return evidence.evidenceId
   })
 }
-
 function assessmentFromOutcome(state: RetrievalState, outcome: AssessmentOutcome): RetrievalKnowledgeAssessment {
-  const newlyExcluded = outcome.verdict === 'no_result'
-    ? state.candidates.map(candidate => candidate.ref)
-    : aliasesToActiveRefs(state, outcome.exclude_new_aliases ?? [], 'exclude_new_aliases', true)
+  const newlyExcluded = aliasesToActiveRefs(state, outcome.exclude_new_aliases ?? [], 'exclude_new_aliases', true)
   const excluded = new Set(newlyExcluded)
   const defaultSelected = state.candidates.map(candidate => candidate.ref).filter(ref => !excluded.has(ref))
-  const selected = outcome.verdict === 'no_result'
-    ? []
-    : outcome.keep_aliases === undefined
+  const selected = outcome.keep_aliases === undefined
       ? defaultSelected
       : aliasesToActiveRefs(state, outcome.keep_aliases, 'keep_aliases').filter(ref => !excluded.has(ref))
-  const gaps = outcome.verdict === 'no_result'
-    ? []
-    : (outcome.semantic_gaps ?? []).map(gap => ({
+  const gaps = (outcome.semantic_gaps ?? []).map(gap => ({
         kind: gap.kind as RetrievalGapKind,
         status: gap.status,
         evidenceRefs: evidenceRefsForAliases(state, gap.evidence_aliases ?? []),
@@ -293,44 +294,41 @@ function assessmentFromOutcome(state: RetrievalState, outcome: AssessmentOutcome
       }))
 
   switch (outcome.verdict) {
-    case 'sufficient': return {
-      decision: 'sufficient', coverage: 1, candidateQuality: 1,
+    case 'present_current_top_k': return {
+      decision: 'present_current_top_k', evaluator: 'model',
       selectedCandidateRefs: selected, excludedCandidateRefs: newlyExcluded,
-      gaps, nextAction: 'finish', stop: true,
+      gaps, nextAction: 'present_current_top_k',
     }
-    case 'no_result': return {
-      decision: 'no_result', coverage: 1, candidateQuality: 1,
-      selectedCandidateRefs: [], excludedCandidateRefs: newlyExcluded,
-      gaps: [], nextAction: 'finish', stop: true,
-    }
-    case 'partial': return {
-      decision: 'partial', coverage: 0.5, candidateQuality: 0.5,
+    case 'accept_current_top_k': return {
+      decision: 'accept_current_top_k', evaluator: 'model',
       selectedCandidateRefs: selected, excludedCandidateRefs: newlyExcluded,
-      gaps, nextAction: 'finish', stop: true,
+      gaps, nextAction: 'accept_current_top_k',
     }
     case 'needs_clarification': return {
-      decision: 'needs_clarification', coverage: 0.5, candidateQuality: 0.5,
+      decision: 'needs_clarification', evaluator: 'model',
       selectedCandidateRefs: selected, excludedCandidateRefs: newlyExcluded,
-      gaps, nextAction: 'clarify', stop: false,
+      gaps, nextAction: 'clarify',
     }
     case 'continue': return {
-      decision: 'continue', coverage: 0.5, candidateQuality: 0.6,
+      decision: 'continue', evaluator: 'model',
       selectedCandidateRefs: selected, excludedCandidateRefs: newlyExcluded,
-      gaps, nextAction: outcome.next.type, stop: false,
+      gaps, nextAction: outcome.next.type,
     }
     default: return outcome satisfies never
   }
 }
-
 /**
  * Model-visible tools for the state assembled before a pre-step hook runs.
  * DSH assembles tools before `agent/pre-step`; a missing/stopped state therefore
  * means a direct-user query may establish a fresh retrieval in that same step.
- * Keeping only assessment visible is safe because execute re-reads and validates
- * the post-pre-step state.
+ * The first request therefore exposes the bounded retrieval tool family; every
+ * execute path re-reads and validates the post-pre-step state and allowlist.
  */
 export function visibleRetrievalTools(state: RetrievalState | undefined): ReadonlySet<string> {
-  if (state === undefined || state.phase === 'stopped') return new Set(['ticket_assess_state'])
+  if (state === undefined || state.phase === 'stopped') return new Set([
+    'ticket_assess_state', 'ticket_continue_ranking', 'ticket_keyword_search',
+    'ticket_vector_search', 'ticket_promote', 'ticket_request_clarification', 'ticket_state',
+  ])
 
   const allowed = new Set(state.allowedActions.map(action => action.kind))
   const visible = new Set<string>()
@@ -347,7 +345,6 @@ export function visibleRetrievalTools(state: RetrievalState | undefined): Readon
   if (visible.size === 0 || allowed.has('read_state')) visible.add('ticket_state')
   return visible
 }
-
 /** Install model policy, state-focused visibility, completion enforcement, and tools. */
 export function installRetrievalTools(ctx: Context, application: RetrievalToolApplication, _config: RetrievalToolConfig = {}): void {
   ctx.systemPrompt.section({ name: 'retrieval-agent:policy', order: 55, text: () => POLICY })
@@ -359,7 +356,7 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
   })
   ctx.tools.register(defineTool({
     name: 'ticket_assess_state',
-    description: 'Submit one incremental, idempotent judgment using stable candidate aliases. verdict fixes stop and next-action semantics; Harness owns scores, history, system gaps, opaque refs, and freezing.',
+    description: 'Submit a semantic suggestion using stable aliases. No verdict creates a score or proves recall; Harness validates boundary facts and decides whether freezing is legal.',
     parameters: {
       outcome: { ...ASSESSMENT_OUTCOME, required: true },
     },
@@ -368,7 +365,7 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
     async execute(args, exec) {
       const agent = agentFor(exec.agent, 'ticket_assess_state')
       const state = await application.assess(agent, assessmentFromOutcome(application.current(agent), args.outcome))
-      return terminalToolValue(state, exec)
+      return await measuredToolValue(application, agent, state, exec, args.outcome.verdict === 'present_current_top_k')
     },
   }))
 
@@ -379,45 +376,48 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
     output: stateOrResultOutput(),
     ...presentation(application, '继续当前排名', 'search'),
     async execute(_args, exec) {
-      const state = await application.continueRanking(agentFor(exec.agent, 'ticket_continue_ranking'), exec.signal)
-      return terminalToolValue(state, exec)
+      const agent = agentFor(exec.agent, 'ticket_continue_ranking')
+      const state = await application.continueRanking(agent, exec.signal)
+      return await measuredToolValue(application, agent, state, exec)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'ticket_keyword_search',
-    description: 'Run one independent lexical repair using exactly one typed change. This tool never accepts a cursor; Provider pagination remains Harness-owned.',
+    description: 'Run one post-fast-path lexical repair. replace_terms is an explicit Agent rewrite and is persisted separately from the immutable initial keyword terms.',
     parameters: {
       change: { ...KEYWORD_CHANGE, required: true },
     },
     output: stateOrResultOutput(),
     ...presentation(application, '关键词检索工单', 'search'),
     async execute(args, exec) {
-      const state = await application.search(agentFor(exec.agent, 'ticket_keyword_search'), {
+      const agent = agentFor(exec.agent, 'ticket_keyword_search')
+      const state = await application.search(agent, {
         mode: 'keyword',
         delta: keywordDelta(args.change),
       }, exec.signal)
-      return terminalToolValue(state, exec)
+      return await measuredToolValue(application, agent, state, exec)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'ticket_vector_search',
-    description: 'Run one independent semantic follow-up repair. This tool always fixes the channel to dense vector search; pagination is Harness-owned.',
+    description: 'Run one post-fast-path dense search using the Agent-rewritten query. The immutable initial vector query remains the exact direct-user text.',
     parameters: {
-      semantic_hint: { type: 'string', required: true },
+      query: { type: 'string', required: true },
     },
     output: stateOrResultOutput(),
     ...presentation(application, '向量检索工单', 'search'),
     async execute(args, exec) {
-      const delta: TicketQueryDelta | undefined = args.semantic_hint === undefined
+      const delta: TicketQueryDelta | undefined = args.query === undefined
         ? undefined
-        : { kind: 'semantic_hint', text: args.semantic_hint }
-      const state = await application.search(agentFor(exec.agent, 'ticket_vector_search'), {
+        : { kind: 'rewrite_semantic_query', text: args.query }
+      const agent = agentFor(exec.agent, 'ticket_vector_search')
+      const state = await application.search(agent, {
         mode: 'dense',
         delta: delta!,
       }, exec.signal)
-      return terminalToolValue(state, exec)
+      return await measuredToolValue(application, agent, state, exec)
     },
   }))
 
@@ -438,7 +438,7 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
         aliasesToActiveRefs(application.current(agent), args.candidate_aliases, 'candidate_aliases'),
         args.fields as TicketEvidenceField[], args.token_budget, exec.signal,
       )
-      return terminalToolValue(state, exec)
+      return await measuredToolValue(application, agent, state, exec)
     },
   }))
 
@@ -452,13 +452,13 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
     },
     output: stateOrResultOutput(),
     ...presentation(application, '请求用户澄清'),
-    execute(args, exec) {
+    async execute(args, exec) {
       const agent = agentFor(exec.agent, 'ticket_request_clarification')
       const state = application.requestClarification(
         agent, args.facet, args.question,
         aliasesToActiveRefs(application.current(agent), args.candidate_aliases, 'candidate_aliases'),
       )
-      return Promise.resolve(terminalToolValue(state, exec))
+      return await measuredToolValue(application, agent, state, exec)
     },
   }))
 
@@ -468,12 +468,13 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
     parameters: { accepted: { type: 'boolean', required: true }, answer: { type: 'string' } },
     output: stateOrResultOutput(),
     ...presentation(application, '应用澄清答案'),
-    execute(args, exec) {
-      const state = application.answerClarification(agentFor(exec.agent, 'ticket_answer_clarification'), {
+    async execute(args, exec) {
+      const agent = agentFor(exec.agent, 'ticket_answer_clarification')
+      const state = application.answerClarification(agent, {
         accepted: args.accepted,
         ...(args.answer === undefined ? {} : { answer: args.answer }),
       })
-      return Promise.resolve(terminalToolValue(state, exec))
+      return await measuredToolValue(application, agent, state, exec)
     },
   }))
 
@@ -483,10 +484,15 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
     parameters: {},
     output: stateOutput(),
     ...presentation(application, '读取检索状态', 'read'),
-    execute(_args, exec) {
-      return Promise.resolve(toolValue(compactRetrievalState(
-        application.current(agentFor(exec.agent, 'ticket_state')), true,
-      )))
+    async execute(_args, exec) {
+      const agent = agentFor(exec.agent, 'ticket_state')
+      const state = application.current(agent)
+      const preview = compactRetrievalState(state, true)
+      await application.recordToolCall(agent, {
+        success: true,
+        serializationBytes: Buffer.byteLength(JSON.stringify(preview), 'utf8'),
+      })
+      return toolValue(compactRetrievalState(application.current(agent), true))
     },
   }))
 }

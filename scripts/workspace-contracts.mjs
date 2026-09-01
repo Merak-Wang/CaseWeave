@@ -1,6 +1,7 @@
 import { readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const contractPath = join(root, 'architecture', 'workspace.json')
@@ -31,10 +32,24 @@ function slash(path) {
   return path.split(sep).join('/')
 }
 
-function sourceLineCount(text) {
+/**
+ * 统计有效实现行，而不是物理文件行。
+ *
+ * 使用 TypeScript 官方 Scanner 找出行注释和块注释，在保留字符串、模板字符串、正则表达式与换行位置的前提下
+ * 清空注释，再统计仍包含代码的非空行。这样独立注释和空行不占源码预算，而“代码 + 行尾注释”仍按一行计算。
+ */
+function implementationLineCount(text) {
   if (text.length === 0) return 0
-  const normalized = text.replace(/\r\n/gu, '\n')
-  return normalized.split('\n').length - (normalized.endsWith('\n') ? 1 : 0)
+  const characters = text.split('')
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.JSX, text)
+  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+    if (token !== ts.SyntaxKind.SingleLineCommentTrivia && token !== ts.SyntaxKind.MultiLineCommentTrivia) continue
+    for (let index = scanner.getTokenPos(); index < scanner.getTextPos(); index += 1) {
+      // 保留换行以维持物理行边界，其余注释字符替换为空白。
+      if (characters[index] !== '\r' && characters[index] !== '\n') characters[index] = ' '
+    }
+  }
+  return characters.join('').replace(/\r\n/gu, '\n').split('\n').filter(line => line.trim().length > 0).length
 }
 
 for (const forbidden of contract.forbiddenGenericPackageNames) {
@@ -85,7 +100,7 @@ for (const entry of contract.packages) {
   for (const file of sourceFiles) {
     const relativeFile = slash(relative(root, file))
     const source = await readFile(file, 'utf8')
-    const lines = sourceLineCount(source)
+    const lines = implementationLineCount(source)
     const isTest = /\.spec\.tsx?$/u.test(file)
     if (isTest) {
       const implementation = file.replace(/\.spec(\.tsx?)$/u, '$1')
@@ -97,7 +112,7 @@ for (const entry of contract.packages) {
       continue
     }
     packageLines += lines
-    if (lines > contract.maxModuleLines) failures.push(`${relativeFile}: ${lines} lines exceeds module limit ${contract.maxModuleLines}`)
+    if (lines > contract.maxModuleLines) failures.push(`${relativeFile}: ${lines} implementation lines exceeds module limit ${contract.maxModuleLines}`)
     if (/export\s+function\s+apply\s*\(/u.test(source)
       && /export\s+const\s+inject\s*=/u.test(source)
       && /export\s+default\b/u.test(source)) {
@@ -124,7 +139,7 @@ for (const entry of contract.packages) {
       }
     }
   }
-  if (packageLines > entry.maxSourceLines) failures.push(`${entry.name}: ${packageLines} production lines exceeds package budget ${entry.maxSourceLines}`)
+  if (packageLines > entry.maxSourceLines) failures.push(`${entry.name}: ${packageLines} production implementation lines exceeds package budget ${entry.maxSourceLines}`)
 
   const misplacedTests = (await filesUnder(packageDirectory)).filter(path => /\.spec\.tsx?$/u.test(path) && !path.startsWith(`${sourceDirectory}${sep}`))
   for (const file of misplacedTests) failures.push(`${slash(relative(root, file))}: package tests must be adjacent under src/`)
@@ -156,7 +171,7 @@ ${nodes.join('\n')}
 ${edges.join('\n')}
 \`\`\`
 
-| 包 | 角色 | 独占能力 | 允许的一方依赖 | 生产源码预算 |
+| 包 | 角色 | 独占能力 | 允许的一方依赖 | 有效生产源码预算 |
 | --- | --- | --- | --- | ---: |
 ${rows.join('\n')}
 
@@ -166,11 +181,12 @@ ${rows.join('\n')}
 - 线协议只放在 \`${contract.protocolConvention.fileName}\`，导出载荷使用 ${contract.protocolConvention.allowedExportedTypeSuffixes.map(value => `\`*${value}\``).join('、')} 后缀。
 - 包内测试与实现相邻，使用 \`name.spec.ts\`；跨包组合测试才进入根目录 \`${contract.testConvention.repositoryIntegrationRoot}/\`。
 - Cordis \`Service\` 子类不得使用 ECMAScript \`#private\` 成员；服务必须通过 \`ctx.<service>\` trace proxy 回归测试。
-- 单个生产模块不得超过 ${contract.maxModuleLines} 行；包预算不是扩容目标，接近门槛就应重新判断能力所有权。
+- 行数门槛只统计去除空行、行注释和块注释后的有效实现行；含实际语句的行尾注释仍计为实现行。
+- 单个生产模块不得超过 ${contract.maxModuleLines} 个有效实现行；包预算不是扩容目标，接近门槛就应重新判断能力所有权。
 
 ## 运行时边界
 
-\`ui-ticket-results\` 只渲染安全事件投影；\`ui-product-shell\` 只通过 \`product-api/protocol\` 调用会话头能力；\`product-host\` 才能把协议绑定到 DSH Web、活动 Session 与可信 Principal。\`retrieval-ranking\` 不读取来源或执行授权，\`agent-plugin\` 也不得把 Provider 算法收回应用层。\`bundle\` 是唯一默认装配点。Python 评测与模型服务都位于生产 pnpm workspace 之外：前者只能通过公开测试驱动协议观察产品，后者只能由 \`model-service-client\` 经版本化进程协议调用。
+\`ui-ticket-results\` 只渲染安全事件投影；\`ui-product-shell\` 只通过 \`product-api/protocol\` 调用会话头能力；\`product-host\` 才能把协议绑定到 DSH Web、活动 Session 与可信 Principal。\`retrieval-ranking\` 不读取来源或执行授权，\`retrieval-policy\` 不拥有最终状态，\`agent-plugin\` 也不得把 Provider 算法收回应用层。\`bundle\` 是唯一默认装配点。Python 评测与 Retrieval 服务都位于生产 pnpm workspace 之外：前者只能通过公开测试驱动协议观察产品，后者只能由 \`model-service-client\`、\`query-understanding\`、\`retrieval-ranking\` 和 \`retrieval-policy\` 经各自版本化进程协议调用。
 `
 }
 

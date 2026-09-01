@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import { LocalTicketProvider, parseTicketDatasetJsonl } from '@retrieval-agent/provider-local'
+import { testHybridRanker } from './support/fake-model-gateway.js'
 
 const ADMIN: TrustedPrincipalContext = {
   tenantId: 'demo', subjectId: 'development-admin', entitlementVersion: 'development-admin-v1',
@@ -23,7 +24,9 @@ describe('complete captured development corpus', () => {
     expect(new Set(records.map(record => record.ticketId)).size).toBe(2_040)
     expect(records.filter(record => record.rawSource !== undefined)).toHaveLength(2_000)
 
-    const provider = new LocalTicketProvider(records, { now: () => new Date('2026-08-27T01:00:00.000Z'), maxRequestedCount: 50 })
+    const provider = new LocalTicketProvider(records, {
+      now: () => new Date('2026-08-27T01:00:00.000Z'), maxRequestedCount: 50, ranker: testHybridRanker(),
+    })
     const snapshot = await provider.openSnapshot(ADMIN)
     expect(snapshot.fieldCatalog.map(field => field.key)).toContain('source.raw')
     const spec = provider.resolve({

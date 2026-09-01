@@ -1,7 +1,7 @@
 {
   "name": "@retrieval-agent/query-understanding",
   "version": "0.1.0",
-  "description": "Deterministic direct-user query compilation into ticket retrieval contracts",
+  "description": "spaCy-backed direct-user query analysis and fast ticket request assembly",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -14,7 +14,9 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "dependencies": { "@retrieval-agent/contracts": "workspace:*" },
+  "dependencies": {
+    "@retrieval-agent/contracts": "workspace:*"
+  },
   "publishConfig": { "access": "public" },
   "license": "MIT"
 }

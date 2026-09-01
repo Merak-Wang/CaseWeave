@@ -78,7 +78,7 @@ export class RetrievalAgentService extends Service {
     installDshSessionCompatibility()
     this.controllerConfig = config
     this.contextTokenBudget = config.contextTokenBudget ?? 1_500
-    this.maxContextTokens = config.maxContextTokens ?? 4_096
+    this.maxContextTokens = config.maxContextTokens ?? 8_192
   }
 
   currentOrUndefined(agent: Agent): RetrievalState | undefined {
@@ -109,7 +109,7 @@ export class RetrievalAgentService extends Service {
       mutationTail: Promise.resolve(),
     }
     this.active.set(agent, entry)
-    return this.finalize(entry)
+    return await this.finalize(entry, signal)
   }
 
   async search(agent: Agent, input: RetrievalSearchInput, signal?: AbortSignal): Promise<RetrievalState> {
@@ -138,7 +138,7 @@ export class RetrievalAgentService extends Service {
   async assess(agent: Agent, assessment: RetrievalKnowledgeAssessment): Promise<RetrievalState> {
     const entry = this.entry(agent)
     return await this.mutate(entry, async state => {
-      const assessed = entry.controller.assess(state, assessment)
+      const assessed = await entry.controller.assess(state, assessment)
       const freeze = assessed.allowedActions.find(action => action.kind === 'freeze')
       return freeze === undefined ? assessed : entry.controller.freeze(assessed, assessed.selectedCandidateRefs)
     })
@@ -162,19 +162,19 @@ export class RetrievalAgentService extends Service {
   requestClarification(agent: Agent, facet: string, question: string, refs: readonly TicketCandidateRef[]): RetrievalState {
     const entry = this.entry(agent)
     entry.state = entry.controller.requestClarification(entry.state, facet, question, refs)
-    return this.finalize(entry)
+    return entry.state
   }
 
   answerClarification(agent: Agent, input: { readonly accepted: boolean; readonly answer?: string }): RetrievalState {
     const entry = this.entry(agent)
     entry.state = entry.controller.answerClarification(entry.state, input)
-    return this.finalize(entry)
+    return entry.state
   }
 
   freeze(agent: Agent, refs: readonly TicketCandidateRef[]): RetrievalState {
     const entry = this.entry(agent)
     entry.state = entry.controller.freeze(entry.state, refs)
-    return this.finalize(entry)
+    return entry.state
   }
 
   projectContext(agent: Agent, tokenBudget = this.contextTokenBudget): EvidenceContextSelection {
@@ -251,8 +251,8 @@ export class RetrievalAgentService extends Service {
     return entry
   }
 
-  private finalize(entry: ActiveRetrieval): RetrievalState {
-    entry.state = entry.controller.finalizeExhaustedEmptyResult(entry.state)
+  private async finalize(entry: ActiveRetrieval, signal?: AbortSignal): Promise<RetrievalState> {
+    entry.state = await entry.controller.finalizeExhaustedEmptyResult(entry.state, signal)
     return entry.state
   }
 
@@ -267,7 +267,7 @@ export class RetrievalAgentService extends Service {
     await previous
     try {
       entry.state = await operation(entry.state)
-      return this.finalize(entry)
+      return await this.finalize(entry)
     } finally {
       release()
     }

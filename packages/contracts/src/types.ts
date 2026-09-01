@@ -22,16 +22,70 @@ export type TicketTaskTarget = 'ranked_cases' | 'constrained_list' | 'cohort_col
 export type TicketRetrievalIntent = 'known_item' | 'analogous_case'
 export type TicketCountPolicy = 'explicit' | 'adaptive' | 'provider_default'
 export interface TicketQueryAmbiguity {
-  readonly kind: 'reference' | 'quantity' | 'boundary' | 'constraint'
+  readonly kind: 'reference' | 'quantity' | 'boundary' | 'constraint' | 'boolean_logic' | 'task_type'
   readonly text: string
 }
 export interface TicketQueryEntity {
-  readonly type: 'business_object' | 'ticket_id'
+  readonly type: 'business_object' | 'ticket_id' | 'topic'
   readonly surface: string
   readonly canonical: string
 }
 
-/** One semantic concept that must be present when a user explicitly joins clauses with AND. */
+/** Legacy deterministic NLP trace retained so persisted Query Contract v4 remains readable. */
+export interface TicketQueryNlpTraceV4 {
+  readonly schemaVersion: 1
+  readonly analyzerVersion: string
+  readonly tokenization: string
+  readonly keywordTerms: readonly string[]
+  readonly tokens: readonly {
+    readonly surface: string
+    readonly kind: 'word' | 'latin' | 'number' | 'relation' | 'task' | 'function'
+  }[]
+  readonly triples: readonly {
+    readonly subject: 'ticket_collection'
+    readonly predicate: 'must_contain' | 'may_contain' | 'topic'
+    readonly object: string
+  }[]
+}
+
+/** Replayable spaCy POS/dependency provenance used by Query Contract v5. */
+export interface TicketQueryNlpTraceV5 {
+  readonly schemaVersion: 2
+  readonly engine: 'spacy'
+  readonly engineVersion: string
+  readonly pipeline: string
+  readonly pipelineVersion: string
+  readonly lexiconVersion: string
+  readonly keywordTerms: readonly string[]
+  readonly tokens: readonly {
+    readonly surface: string
+    readonly start: number
+    readonly end: number
+    readonly lemma: string
+    readonly pos: string
+    readonly tag: string
+    readonly dep: string
+    readonly head: number
+    readonly isStop: boolean
+    readonly entityType: string
+  }[]
+  readonly entities: readonly {
+    readonly surface: string
+    readonly label: string
+    readonly start: number
+    readonly end: number
+  }[]
+  readonly triples: readonly {
+    readonly subject: string
+    readonly predicate: string
+    readonly object: string
+    readonly source: 'dependency' | 'coordination'
+  }[]
+}
+
+export type TicketQueryNlpTrace = TicketQueryNlpTraceV4 | TicketQueryNlpTraceV5
+
+/** One semantic concept extracted from explicit user syntax. */
 export interface TicketQueryConcept {
   readonly surface: string
   readonly canonical: string
@@ -41,9 +95,28 @@ export interface TicketQueryConcept {
 
 /** Explicit Boolean meaning extracted from the direct-user query. */
 export interface TicketQueryLogic {
-  readonly operator: 'and'
-  /** Every concept group is required; alternatives inside one group are OR-equivalent. */
+  readonly operator: 'and' | 'or'
+  /** Concepts keep user surfaces; alternatives are explanation-only on the initial fast path. */
   readonly requiredConcepts: readonly TicketQueryConcept[]
+  readonly grouping?: 'single_set' | 'separate_sets'
+}
+
+/**
+ * Immutable zero-rewrite plan for the first low-cost search. The keyword and
+ * vector channels consume direct-user material and run against one snapshot.
+ */
+export interface TicketFastQueryPlan {
+  readonly schemaVersion: 1
+  readonly source: 'direct_user'
+  readonly rewriteApplied: false
+  readonly keyword: {
+    readonly terms: readonly string[]
+    readonly operator: 'and' | 'or'
+  }
+  readonly vector: {
+    /** Exact direct-user query; normalization and Agent repairs are later stages. */
+    readonly text: string
+  }
 }
 /**
  * Harness-owned interpretation of one direct-user query. This is persisted
@@ -51,8 +124,8 @@ export interface TicketQueryLogic {
  * language, domain, entities, constraints, and result-set policy it used.
  */
 export interface TicketQueryContract {
-  /** Version 1 remains readable for persisted sessions; new compiler output uses version 2. */
-  readonly schemaVersion: 1 | 2
+  /** Versions 1-4 remain readable; version 5 records spaCy POS/dependency provenance. */
+  readonly schemaVersion: 1 | 2 | 3 | 4 | 5
   readonly original: string
   readonly normalized: string
   readonly task: TicketTaskTarget
@@ -63,8 +136,11 @@ export interface TicketQueryContract {
   readonly entities: readonly TicketQueryEntity[]
   readonly constraints: readonly TicketFilter[]
   readonly logic?: TicketQueryLogic
+  readonly fastQuery?: TicketFastQueryPlan
+  readonly nlp?: TicketQueryNlpTrace
   readonly ambiguities: readonly TicketQueryAmbiguity[]
-  readonly confidence: number
+  /** Syntax provenance, not an empirically calibrated probability. */
+  readonly interpretationBasis?: 'deterministic_syntax' | 'clarification_required'
   readonly compilerVersion: string
 }
 export type TicketFilterOperator = 'eq' | 'neq' | 'gte' | 'lte' | 'contains'
@@ -79,10 +155,12 @@ export interface TicketFilter {
 /** A controller-admitted modification to an existing query. */
 export type TicketQueryDelta =
   | { readonly kind: 'add_terms'; readonly terms: readonly string[] }
+  | { readonly kind: 'replace_terms'; readonly terms: readonly string[]; readonly operator: 'and' | 'or' }
   | { readonly kind: 'exclude_terms'; readonly terms: readonly string[] }
   | { readonly kind: 'add_filter'; readonly filter: TicketFilter }
   | { readonly kind: 'remove_filter'; readonly field: string }
   | { readonly kind: 'semantic_hint'; readonly text: string }
+  | { readonly kind: 'rewrite_semantic_query'; readonly text: string }
 
 /** Initial consumer request before provider defaults are applied. */
 export interface TicketRetrievalRequest {
@@ -97,6 +175,8 @@ export interface TicketRetrievalRequest {
   readonly mode?: TicketRetrievalMode
   readonly filters?: readonly TicketFilter[]
   readonly ambiguities?: readonly TicketQueryAmbiguity[]
+  /** Present only for the direct-user initial path; repairs never mutate it. */
+  readonly fastQuery?: TicketFastQueryPlan
   /** Present on the public direct-user path; manual/provider callers may omit it. */
   readonly queryContract?: TicketQueryContract
 }
@@ -111,8 +191,12 @@ export interface TicketRetrievalSpec {
   readonly countPolicy: TicketCountPolicy
   readonly mode: TicketRetrievalMode
   readonly filters: readonly TicketFilter[]
-  /** Hard conjunction admitted by the query compiler; every concept group must match. */
+  /** Explanation of explicit user logic; only the keyword channel applies it on the fast path. */
   readonly requiredConcepts?: readonly TicketQueryConcept[]
+  readonly keywordQuery?: { readonly terms: readonly string[]; readonly operator: 'and' | 'or' }
+  readonly semanticQuery?: string
+  /** Immutable proof that the initial two channels were not Agent-rewritten. */
+  readonly fastQuery?: TicketFastQueryPlan
   readonly ambiguities: readonly TicketQueryAmbiguity[]
   readonly excludedTerms: readonly string[]
   readonly semanticHints: readonly string[]
@@ -151,7 +235,7 @@ export interface TicketFieldDescriptor {
   readonly key: string
   readonly label: string
   readonly valueKind: 'keyword' | 'datetime' | 'text' | 'string_list' | 'raw_json'
-  readonly accessLevel: 'L0' | 'L2'
+  readonly accessLevel: 'L0' | 'L2' | 'L3'
   readonly filterOperators: readonly TicketFilterOperator[]
   readonly sensitivity: 'non_sensitive' | 'source_controlled'
 }
@@ -193,6 +277,22 @@ export interface TicketCandidate {
   readonly summary: string
   readonly l0: TicketL0
   readonly matchFragments: readonly { readonly field: 'title' | 'summary'; readonly text: string; readonly truncated: boolean }[]
+  /** Retrieval diagnostics, not ticket-source facts. */
+  readonly matchSignals?: {
+    readonly channels: readonly ('keyword' | 'vector' | 'reranker')[]
+    readonly keywordTerms: readonly string[]
+  }
+}
+
+export interface TicketSearchBoundaryObservation {
+  readonly authorizedCorpusSize: number
+  readonly documentsAfterStructuredFilters: number
+  readonly documentsEligibleForKeywordChannel: number
+  readonly rankedHits: number
+  /** Pagination fact for this exact expression and ranking result only. */
+  readonly resultPagesExhausted: boolean
+  /** False unless an external, calibrated oracle can prove semantic recall. */
+  readonly semanticRecallKnown: boolean
 }
 
 /** Bounded, deterministic page of authorized candidates. */
@@ -208,9 +308,10 @@ export interface TicketSearchPage {
   readonly appliedFilters: readonly TicketFilter[]
   readonly warnings: readonly string[]
   readonly trace: TicketSearchTrace
+  readonly boundary: TicketSearchBoundaryObservation
 }
 
-/** Provider-declared L2 key. The current snapshot field catalog is the runtime allowlist. */
+/** Provider-declared L2/L3 key. The current snapshot field catalog is the runtime allowlist. */
 export type TicketEvidenceField = string
 
 /** L2 evidence is untrusted ticket content even after authorization. */

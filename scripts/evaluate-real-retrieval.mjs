@@ -46,21 +46,20 @@ const principal = {
   attributes: { group: ['admin'], region: ['cn'], role: ['administrator'], environment: ['development'] },
   issuedAt: new Date(now.getTime() - 60_000).toISOString(), expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
 }
-const cacheDir = join(process.cwd(), '.cache', 'retrieval-agent-vectors')
 const variants = [
-  { name: 'bm25f', mode: 'keyword', ranker: new HybridRankingEngine() },
+  { name: 'bm25f', mode: 'keyword', ranker: new HybridRankingEngine({ baseUrl }) },
   {
     name: 'qwen_dense', mode: 'dense',
-    ranker: new HybridRankingEngine({ gateway, embeddingIdentity, cacheDir }),
+    ranker: new HybridRankingEngine({ baseUrl, embeddingIdentity }),
   },
   {
     name: 'fixed_hybrid', mode: 'hybrid',
-    ranker: new HybridRankingEngine({ gateway, embeddingIdentity, cacheDir }),
+    ranker: new HybridRankingEngine({ baseUrl, embeddingIdentity }),
   },
   {
     name: 'fixed_hybrid_qwen_rerank', mode: 'hybrid',
     ranker: new HybridRankingEngine({
-      gateway, embeddingIdentity, rerankerIdentity, cacheDir, rerankerEnabled: true, rerankTopN: 10,
+      baseUrl, embeddingIdentity, rerankerIdentity, rerankerEnabled: true, rerankTopN: 10,
     }),
   },
 ]

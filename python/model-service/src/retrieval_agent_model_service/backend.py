@@ -9,6 +9,7 @@ from typing import Any
 
 from .errors import ServiceError
 from .manifest import RetrievalModelManifest, verify_weights
+from .query_analysis import SpacyQueryAnalyzer
 
 
 class QwenModelBackend:
@@ -17,6 +18,8 @@ class QwenModelBackend:
         manifest: RetrievalModelManifest,
         embedding_path: Path,
         reranker_path: Path | None,
+        spacy_path: Path,
+        domain_lexicon_path: Path | None,
         enable_reranker: bool,
         device_name: str,
         max_batch_size: int = 16,
@@ -26,6 +29,7 @@ class QwenModelBackend:
         self.manifest = manifest
         self.embedding_path = embedding_path.resolve()
         self.reranker_path = reranker_path.resolve() if reranker_path else None
+        self.query_analyzer = SpacyQueryAnalyzer(spacy_path, domain_lexicon_path)
         self.enable_reranker = enable_reranker
         self.device_name = device_name
         self.max_batch_size = max_batch_size
@@ -49,6 +53,7 @@ class QwenModelBackend:
         except ImportError as error:
             raise ServiceError(500, "RUNTIME_MISSING", "Install the model-service runtime dependency group.") from error
         self._torch = torch
+        self.query_analyzer.load()
         verify_weights(self.embedding_path, self.manifest.embedding.weight_sha256)
         if self.enable_reranker:
             if self.reranker_path is None:
@@ -107,6 +112,12 @@ class QwenModelBackend:
                 "scoreKind": self.manifest.reranker.score_kind,
             })
         return result
+
+    def query_analysis_descriptor(self) -> dict[str, Any]:
+        return self.query_analyzer.descriptor()
+
+    def analyze_query(self, query: str) -> dict[str, Any]:
+        return self.query_analyzer.analyze(query)
 
     def _acquire(self) -> None:
         if not self._gate.acquire(blocking=False):

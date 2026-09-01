@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import json
-import threading
-from contextlib import contextmanager
-from http.server import ThreadingHTTPServer
+import asyncio
 from types import SimpleNamespace
-from typing import Any, Iterator
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from typing import Any
+
+import httpx
 
 from retrieval_agent_model_service import PROTOCOL_VERSION
-from retrieval_agent_model_service.server import ModelRequestHandler
+from retrieval_agent_model_service.ranking import RAG_PROTOCOL_VERSION
+from retrieval_agent_model_service.server import create_app
 
 
 class FakeBackend:
@@ -37,6 +35,21 @@ class FakeBackend:
             },
         ]
 
+    def query_analysis_descriptor(self) -> dict[str, Any]:
+        return {
+            "engine": "spacy", "engineVersion": "3.8.7", "pipeline": "zh_core_web_sm-3.8.0",
+            "pipelineVersion": "3.8.0", "lexiconVersion": "telecom-query-phrases-v1",
+            "loaded": True, "components": ["tagger", "parser"],
+        }
+
+    def analyze_query(self, query: str) -> dict[str, Any]:
+        return {
+            "language": "zh", "keywords": ["副卡", "跨域"],
+            "candidates": [], "tokens": [], "entities": [],
+            "triples": [{"subject": "副卡", "predicate": "and", "object": "跨域", "source": "coordination"}],
+            "boolean": {"operator": "and", "terms": ["副卡", "跨域"], "grouping": "single_set"},
+        }
+
     def embed(self, texts: list[str], input_type: str, instruction: str | None, dimensions: int) -> list[list[float]]:
         assert input_type in {"query", "document"}
         assert dimensions == 2
@@ -50,73 +63,97 @@ class FakeBackend:
         ]
 
 
-@contextmanager
-def service() -> Iterator[str]:
-    handler = type("TestModelRequestHandler", (ModelRequestHandler,), {"backend": FakeBackend()})
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+def call(method: str, path: str, body: dict[str, Any] | None = None) -> httpx.Response:
+    async def execute() -> httpx.Response:
+        transport = httpx.ASGITransport(app=create_app(FakeBackend()))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.request(method, path, json=body)
+    return asyncio.run(execute())
 
 
-def request(base_url: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
-    value = None if body is None else json.dumps(body).encode("utf-8")
-    call = Request(
-        f"{base_url}{path}", data=value,
-        headers={"content-type": "application/json"} if value is not None else {},
-        method="POST" if value is not None else "GET",
-    )
-    try:
-        with urlopen(call, timeout=2) as response:
-            return response.status, json.loads(response.read())
-    except HTTPError as error:
-        return error.code, json.loads(error.read())
+def test_health_embedding_and_query_analysis_protocol() -> None:
+    ready = call("GET", "/health/ready")
+    assert ready.status_code == 200
+    assert ready.json()["protocolVersion"] == PROTOCOL_VERSION
+    assert ready.json()["queryAnalysis"]["engine"] == "spacy"
 
+    result = call("POST", "/v1/embeddings", {
+        "protocolVersion": PROTOCOL_VERSION,
+        "requestId": "embed-1",
+        "model": "embedding",
+        "input": ["query"],
+        "inputType": "query",
+        "dimensions": 2,
+        "normalize": True,
+        "instruction": "retrieve",
+    })
+    assert result.status_code == 200
+    assert result.json()["data"] == [{"index": 0, "embedding": [1.0, 0.0]}]
 
-def test_health_and_embedding_protocol() -> None:
-    with service() as base_url:
-        status, ready = request(base_url, "/health/ready")
-        assert status == 200
-        assert ready["protocolVersion"] == PROTOCOL_VERSION
-        assert ready["models"][0]["pooling"] == "last_token"
-
-        status, result = request(base_url, "/v1/embeddings", {
-            "protocolVersion": PROTOCOL_VERSION,
-            "requestId": "embed-1",
-            "model": "embedding",
-            "input": ["query"],
-            "inputType": "query",
-            "dimensions": 2,
-            "normalize": True,
-            "instruction": "retrieve",
-        })
-        assert status == 200
-        assert result["requestId"] == "embed-1"
-        assert result["data"] == [{"index": 0, "embedding": [1.0, 0.0]}]
+    analysis = call("POST", "/v1/query-analysis", {
+        "protocolVersion": PROTOCOL_VERSION,
+        "requestId": "nlp-1",
+        "query": "帮我找副卡和跨域有关工单",
+    })
+    assert analysis.status_code == 200
+    assert analysis.json()["keywords"] == ["副卡", "跨域"]
+    assert analysis.json()["boolean"]["operator"] == "and"
 
 
 def test_rejects_protocol_drift_and_duplicate_rerank_ids() -> None:
-    with service() as base_url:
-        status, error = request(base_url, "/v1/embeddings", {
-            "protocolVersion": "old",
-            "requestId": "bad",
-        })
-        assert status == 409
-        assert error["error"]["code"] == "PROTOCOL_MISMATCH"
+    error = call("POST", "/v1/embeddings", {
+        "protocolVersion": "old",
+        "requestId": "bad",
+    })
+    assert error.status_code == 409
+    assert error.json()["error"]["code"] == "PROTOCOL_MISMATCH"
 
-        status, error = request(base_url, "/v1/rerank", {
-            "protocolVersion": PROTOCOL_VERSION,
-            "requestId": "rerank-1",
-            "model": "reranker",
-            "query": "q",
-            "instruction": "judge",
-            "topK": 1,
-            "candidates": [{"id": "same", "text": "A"}, {"id": "same", "text": "B"}],
-        })
-        assert status == 400
-        assert error["error"]["code"] == "INVALID_REQUEST"
+    error = call("POST", "/v1/rerank", {
+        "protocolVersion": PROTOCOL_VERSION,
+        "requestId": "rerank-1",
+        "model": "reranker",
+        "query": "q",
+        "instruction": "judge",
+        "topK": 1,
+        "candidates": [{"id": "same", "text": "A"}, {"id": "same", "text": "B"}],
+    })
+    assert error.status_code == 400
+    assert error.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_rag_ranking_and_policy_endpoints_use_a_separate_versioned_protocol() -> None:
+    profile = {
+        "embeddingInstruction": "retrieve", "rerankerInstruction": "judge",
+        "embeddingBatchSize": 16, "modelDeadlineMs": 5_000, "minimumDenseScore": 0.1,
+        "fusion": {"rankConstant": 60, "keywordWeight": 0.55, "vectorWeight": 0.45},
+        "bm25f": {}, "rerankerEnabled": False, "rerankTopN": 20, "allowKeywordFallback": False,
+    }
+    ranked = call("POST", "/v1/ranking/rank", {
+        "protocolVersion": RAG_PROTOCOL_VERSION, "requestId": "rank-1",
+        "documents": [{
+            "id": "ticket-1", "contentHash": "hash-1", "title": "副卡跨域失败",
+            "summary": "办理失败", "body": "", "metadata": "",
+        }],
+        "query": {"text": "副卡跨域", "semanticHints": [], "excludedTerms": [], "mode": "keyword"},
+        "options": {"maxScan": 10, "deadlineMs": 5_000}, "profile": profile,
+    })
+    assert ranked.status_code == 200
+    assert ranked.json()["protocolVersion"] == RAG_PROTOCOL_VERSION
+    assert ranked.json()["result"]["hits"][0]["documentId"] == "ticket-1"
+
+    policy = call("POST", "/v1/policy/candidate-ranking", {
+        "protocolVersion": RAG_PROTOCOL_VERSION, "requestId": "policy-1",
+        "input": {
+            "previousHistory": [], "previousObservations": [],
+            "page": [{"ref": "c1", "rank": 1}], "searchEventId": "event-1",
+            "stage": "initial_hybrid", "queryFingerprint": "query-1", "excludedRefs": [],
+        },
+    })
+    assert policy.status_code == 200
+    assert policy.json()["result"]["active"] == [{"ref": "c1", "rank": 1}]
+
+    mismatch = call("POST", "/v1/policy/candidate-ranking", {
+        "protocolVersion": PROTOCOL_VERSION, "requestId": "bad-policy", "input": {},
+    })
+    assert mismatch.status_code == 409
+    assert mismatch.json()["protocolVersion"] == RAG_PROTOCOL_VERSION

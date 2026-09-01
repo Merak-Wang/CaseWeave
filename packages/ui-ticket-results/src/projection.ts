@@ -7,7 +7,7 @@ import type {
 import { createTicketResultCollection } from '@retrieval-agent/ticket-collection'
 
 const STATUS_MESSAGES: Partial<Record<RetrievalState['termination'], string>> = {
-  no_result: '当前授权快照中没有匹配工单。',
+  no_result: '当前检索表达式没有返回候选；这不能证明授权工单库中不存在语义相关工单。',
   partial: '已返回部分候选，仍有未解决的证据缺口。',
   budget_exhausted: '检索预算已耗尽，以下结果可能不完整。',
   permission_blocked: '当前身份没有足够权限完成此检索。',
@@ -28,7 +28,7 @@ function statusOf(state: RetrievalState | undefined): TicketCandidateNode['statu
     case 'cancelled': return 'stopped'
     case 'active': return state.candidates.length === 0 ? 'searching' : 'results'
     case 'needs_clarification': return state.candidates.length === 0 ? 'searching' : 'results'
-    case 'sufficient': return state.candidates.length === 0 ? 'empty' : 'results'
+    case 'top_k_accepted': return state.candidates.length === 0 ? 'empty' : 'results'
     default: return state.termination satisfies never
   }
 }
@@ -51,17 +51,26 @@ export function projectTicketCandidateNode(
     ? state.clarification?.question
     : state === undefined ? undefined : STATUS_MESSAGES[state.termination]
   const result = state?.phase === 'stopped' ? createTicketResultCollection(state) : undefined
-  // Initial Hybrid candidates are an internal working set, not the user's final collection.
-  const candidates = result?.tickets ?? []
+  const candidates = result?.tickets ?? state?.candidates ?? []
+  const resultPagesExhausted = state?.lastPage?.boundary?.resultPagesExhausted
+    ?? (state?.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined)
   return {
     retrievalId,
     version: state?.revision ?? 0,
     querySummary,
     ...(queryContract?.logic === undefined ? {} : { queryLogic: queryContract.logic }),
+    ...(queryContract === undefined ? {} : {
+      normalizedQuery: queryContract.normalized,
+      resultPolicy: queryContract.resultPolicy,
+      fastQuery: queryContract.fastQuery,
+      queryAmbiguities: queryContract.ambiguities,
+    }),
     ...(state?.snapshot === undefined ? {} : { snapshotShortId: state.snapshot.shortId }),
     completeness: state?.lastPage?.completeness ?? 'pending',
     nextPageAvailable: state?.lastPage?.nextCursor !== undefined,
-    sourceExhausted: state?.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined,
+    resultPagesExhausted,
+    semanticRecallKnown: state?.lastPage?.boundary?.semanticRecallKnown ?? false,
+    ...(state?.lastPage?.boundary === undefined ? {} : { boundary: state.lastPage.boundary }),
     status,
     candidates,
     alreadyReadEvidence: result?.evidence ?? state?.promotedEvidence ?? [],

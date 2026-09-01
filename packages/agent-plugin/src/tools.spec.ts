@@ -87,6 +87,7 @@ function stubApplication(searchCalls: SearchCall[]): RetrievalToolApplication {
     promote: () => Promise.resolve(stopped),
     requestClarification: () => stopped,
     answerClarification: () => stopped,
+    recordToolCall: () => Promise.resolve(stopped),
   }
 }
 
@@ -115,15 +116,24 @@ describe('retrieval tool surface', () => {
       expect(searchSchemas.every(tool => !JSON.stringify(tool.parameters).includes('cursor'))).toBe(true)
 
       const assembly = await ctx.systemPrompt.assemble({ agent: fakeAgent('first-assembly') })
-      expect(assembly.tools.map(tool => tool.name)).toEqual(['ticket_assess_state'])
+      expect(assembly.tools.map(tool => tool.name)).toEqual([
+        'ticket_assess_state', 'ticket_continue_ranking', 'ticket_keyword_search', 'ticket_promote',
+        'ticket_request_clarification', 'ticket_state', 'ticket_vector_search',
+      ])
     } finally {
       await ctx.fiber.dispose()
     }
   })
 
   it('projects independent repair channels and keeps provider cursors model-hidden', () => {
-    expect([...visibleRetrievalTools(undefined)]).toEqual(['ticket_assess_state'])
-    expect([...visibleRetrievalTools(stoppedState())]).toEqual(['ticket_assess_state'])
+    expect([...visibleRetrievalTools(undefined)]).toEqual([
+      'ticket_assess_state', 'ticket_continue_ranking', 'ticket_keyword_search', 'ticket_vector_search',
+      'ticket_promote', 'ticket_request_clarification', 'ticket_state',
+    ])
+    expect([...visibleRetrievalTools(stoppedState())]).toEqual([
+      'ticket_assess_state', 'ticket_continue_ranking', 'ticket_keyword_search', 'ticket_vector_search',
+      'ticket_promote', 'ticket_request_clarification', 'ticket_state',
+    ])
     expect(visibleRetrievalTools(stateWithActions(['assess', 'read_state']))).toEqual(new Set([
       'ticket_assess_state', 'ticket_state',
     ]))
@@ -153,7 +163,7 @@ describe('retrieval tool surface', () => {
         tool: 'ticket_keyword_search',
         code: expect.any(String),
         allowedActions: [],
-        repairExample: { change: { type: 'add_terms', terms: ['副卡'] } },
+        repairExample: { change: { type: 'replace_terms', terms: ['副卡', '跨域'] } },
       })
     } finally {
       await ctx.fiber.dispose()
@@ -176,13 +186,13 @@ describe('retrieval tool surface', () => {
         signal: SIGNAL,
         callId: CallId('vector-1'),
         name: 'ticket_vector_search',
-        arguments: { semantic_hint: '解绑后流量仍共享' },
+        arguments: { query: '解绑后流量仍共享' },
         agent,
       })
 
       expect(calls).toEqual([
         { mode: 'keyword', delta: { kind: 'add_terms', terms: ['副卡'] } },
-        { mode: 'dense', delta: { kind: 'semantic_hint', text: '解绑后流量仍共享' } },
+        { mode: 'dense', delta: { kind: 'rewrite_semantic_query', text: '解绑后流量仍共享' } },
       ])
       expect(keyword).toMatchObject({
         isError: false,

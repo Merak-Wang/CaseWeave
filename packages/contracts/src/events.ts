@@ -18,8 +18,8 @@ import type {
 } from './retrieval-state.js'
 import type { TicketSearchStage } from './ranking.js'
 
-export const RETRIEVAL_EVENT_SCHEMA_VERSION = 6 as const
-export const SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS = Object.freeze([5, 6] as const)
+export const RETRIEVAL_EVENT_SCHEMA_VERSION = 7 as const
+export const SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS = Object.freeze([5, 6, 7] as const)
 
 /**
  * Durable UI placement is deliberately separate from retrieval-domain state.

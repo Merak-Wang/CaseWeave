@@ -40,19 +40,17 @@ export interface RetrievalGap {
   readonly description?: string
 }
 
-export type RetrievalKnowledgeDecision = 'sufficient' | 'no_result' | 'needs_clarification' | 'partial' | 'continue'
-export type RetrievalNextAction = 'finish' | 'continue_ranking' | 'keyword_search' | 'vector_search' | 'promote' | 'clarify'
+export type RetrievalKnowledgeDecision = 'present_current_top_k' | 'accept_current_top_k' | 'return_partial' | 'no_result' | 'needs_clarification' | 'continue'
+export type RetrievalNextAction = 'present_current_top_k' | 'accept_current_top_k' | 'finish_partial' | 'finish_no_result' | 'continue_ranking' | 'keyword_search' | 'vector_search' | 'promote' | 'clarify'
 
 /** Strict semantic judgment proposed by the model and admitted by Harness. */
 export interface RetrievalKnowledgeAssessment {
   readonly decision: RetrievalKnowledgeDecision
-  readonly coverage: number
-  readonly candidateQuality: number
   readonly selectedCandidateRefs: readonly TicketCandidateRef[]
   readonly excludedCandidateRefs: readonly TicketCandidateRef[]
   readonly gaps: readonly RetrievalGap[]
   readonly nextAction: RetrievalNextAction
-  readonly stop: boolean
+  readonly evaluator: 'model' | 'system'
   readonly model?: string
 }
 
@@ -118,7 +116,7 @@ export interface RetrievalProgressState {
 
 export type RetrievalTermination =
   | 'active'
-  | 'sufficient'
+  | 'top_k_accepted'
   | 'no_result'
   | 'needs_clarification'
   | 'partial'
@@ -148,7 +146,7 @@ export interface FrozenEvidencePack {
     readonly displayId: string
     readonly sourceVersion: string
     readonly contentHash: string
-    readonly evidenceLevel: 'L1' | 'L2'
+    readonly evidenceLevel: 'L1' | 'L2' | 'L3'
     readonly evidenceIds: readonly TicketEvidenceId[]
   }[]
   readonly stoppingReason: Exclude<RetrievalTermination, 'active' | 'needs_clarification'>
@@ -159,8 +157,9 @@ export interface FrozenEvidencePack {
   readonly decisionFinalized: true
   /** A ranked Top-K task accepted the frozen selection. */
   readonly topKAccepted: boolean
-  /** True only when the Provider declared exhaustive and issued no cursor. */
-  readonly sourceExhausted: boolean
+  /** Exact query/ranking pagination fact; it is not a corpus-recall claim. */
+  readonly resultPagesExhausted: boolean
+  readonly semanticRecallKnown: boolean
   readonly resultMayBeIncomplete: boolean
   readonly nextPageAvailable: boolean
   readonly providerId: string
@@ -184,7 +183,8 @@ export interface TicketResultCollection {
   readonly complete: boolean
   readonly decisionFinalized: true
   readonly topKAccepted: boolean
-  readonly sourceExhausted: boolean
+  readonly resultPagesExhausted: boolean
+  readonly semanticRecallKnown: boolean
   readonly resultMayBeIncomplete: boolean
   readonly nextPageAvailable: boolean
   readonly tickets: readonly TicketCandidate[]
@@ -279,7 +279,13 @@ export interface TicketCandidateNode {
   readonly snapshotShortId?: string
   readonly completeness: 'pending' | TicketSearchPage['completeness']
   readonly nextPageAvailable: boolean
-  readonly sourceExhausted: boolean
+  readonly resultPagesExhausted: boolean
+  readonly semanticRecallKnown: boolean
+  readonly boundary?: TicketSearchPage['boundary']
+  readonly normalizedQuery?: string
+  readonly resultPolicy?: TicketQueryContract['resultPolicy']
+  readonly fastQuery?: TicketQueryContract['fastQuery']
+  readonly queryAmbiguities?: TicketQueryContract['ambiguities']
   readonly status: 'searching' | 'results' | 'empty' | 'partial' | 'snapshot_invalid' | 'permission_blocked' | 'error' | 'stopped'
   readonly candidates: readonly TicketCandidate[]
   readonly alreadyReadEvidence: readonly TicketEvidenceSegment[]

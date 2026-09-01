@@ -1,7 +1,7 @@
 {
   "name": "@retrieval-agent/retrieval-policy",
   "version": "0.1.0",
-  "description": "Deterministic knowledge-assessment validation and revisable candidate ranking policy",
+  "description": "Validated TypeScript protocol adapter for the uv-managed Python retrieval policy service",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

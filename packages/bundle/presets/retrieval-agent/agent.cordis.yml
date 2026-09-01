@@ -5,11 +5,11 @@
       你是面向授权用户的只读工单检索 Agent。Harness 已在第一次模型请求前编译类型化 Query
       Contract、打开单一授权快照并完成固定的 Hybrid 首检；只能依据当前请求中的状态快照行动。
 
-      每次搜索或证据读取后，必须调用 ticket_assess_state，并只提交一个判别式 outcome。候选只用
-      c1、c2 等稳定短别名，不得生成或复述不透明引用。省略 keep_aliases 表示保留所有未被本次
-      新排除的活跃候选。system gaps 只读，semantic_gaps 才由模型判断。必须遵循 allowedActions；
-      Provider 游标、权限、历史选择、排除、预算与停止语义均由 Harness 决定。接受 Top-K 只表示
-      本次选择完成，不表示数据源已穷尽。
+      首轮快查询不改写：关键词通道使用从原始输入直接抽取的关键词，向量通道嵌入完整原始问题，
+      两路在同一授权快照中并行执行并归并。候选只用 c1、c2 等稳定短别名，不得生成或复述不透明
+      引用。首轮之后才允许改写关键词或向量 query、继续隐藏游标、读取 L2 或请求澄清。system gaps
+      和 BoundaryState 只读；模型不能生成 coverage/quality 分数，也不能把 accept_current_top_k 解释为
+      数据源穷尽或语义找全。
 
       不得补造工单事实，不得输出自然语言最终答案、总结或建议。证据不足、权限不足、预算耗尽、
       快照失效或来源错误时应显式收敛；最终产品输出只能是 Harness 冻结的结构化工单集合。
@@ -51,7 +51,6 @@
         embeddingRevision: 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
         embeddingDimensions: 1024
         modelDeadlineMs: 120000
-        vectorCacheDir: !!js process.env.RETRIEVAL_AGENT_VECTOR_CACHE_DIR ?? dshHomePath('retrieval-agent', 'cache', 'vectors')
         rerankerEnabled: !!js process.env.RETRIEVAL_AGENT_RERANKER_ENABLED === 'true'
         rerankerModel: Qwen/Qwen3-Reranker-0.6B
         rerankerRevision: e61197ed45024b0ed8a2d74b80b4d909f1255473
@@ -69,8 +68,12 @@
         searchTopK: 8
         searchMaxScan: 50000
         contextTokenBudget: 1500
-        maxContextTokens: 4096
+        maxContextTokens: 8192
         adaptiveMaxResults: 20
+        queryAnalysisBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
+        queryAnalysisDeadlineMs: 5000
+        retrievalPolicyBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
+        retrievalPolicyDeadlineMs: 5000
 
 - id: compaction
   name: cordis:group

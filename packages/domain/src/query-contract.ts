@@ -21,7 +21,7 @@ export function fallbackQueryContract(spec: TicketRetrievalSpec): TicketQueryCon
       ? {}
       : { logic: { operator: 'and' as const, requiredConcepts: spec.requiredConcepts } }),
     ambiguities: spec.ambiguities,
-    confidence: 0.5,
+    interpretationBasis: 'clarification_required',
     compilerVersion: spec.compilerVersion,
   }
 }

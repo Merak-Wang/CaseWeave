@@ -38,15 +38,17 @@ function candidateDelta(candidate: TicketCandidate, alias: string) {
 }
 
 function boundary(state: RetrievalState) {
-  const sourceExhausted = state.lastPage?.completeness === 'exhaustive'
-    && state.lastPage.nextCursor === undefined
+  const resultPagesExhausted = state.lastPage?.boundary?.resultPagesExhausted
+    ?? (state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined)
+  const semanticRecallKnown = state.lastPage?.boundary?.semanticRecallKnown ?? false
   const nextPageAvailable = state.lastPage?.nextCursor !== undefined
   return {
-    sourceExhausted,
+    resultPagesExhausted,
+    semanticRecallKnown,
     nextPageAvailable,
     decisionFinalized: state.phase === 'stopped',
     topKAccepted: state.frozenEvidence?.topKAccepted ?? false,
-    resultMayBeIncomplete: !sourceExhausted,
+    resultMayBeIncomplete: !semanticRecallKnown,
   }
 }
 
@@ -110,6 +112,7 @@ export function compactRetrievalState(state: RetrievalState, includeCurrentCandi
       task: state.task.target,
       resultPolicy: state.query.contract?.resultPolicy
         ?? (state.task.completenessRequirement === 'exhaustive' ? 'exhaustive_current_snapshot' : 'adaptive_top_k'),
+      fastQuery: state.query.contract?.fastQuery,
     },
     candidateDelta: candidates,
     evidenceDelta,
@@ -119,6 +122,20 @@ export function compactRetrievalState(state: RetrievalState, includeCurrentCandi
     gaps: { system: systemGaps, semantic: semanticGaps },
     allowedActions: state.allowedActions.map(action => action.kind),
     boundary: boundary(state),
+    retrievalObservation: {
+      channels: state.lastPage?.trace.channels.map(channel => ({
+        channel: channel.channel,
+        resultCount: channel.resultCount,
+        querySource: channel.querySource,
+      })) ?? [],
+      authorizedCorpusSize: state.lastPage?.boundary?.authorizedCorpusSize,
+      documentsAfterStructuredFilters: state.lastPage?.boundary?.documentsAfterStructuredFilters,
+      documentsEligibleForKeywordChannel: state.lastPage?.boundary?.documentsEligibleForKeywordChannel,
+      rankedHits: state.lastPage?.boundary?.rankedHits,
+      newCandidateCount: state.progress.newCandidateRefs.length,
+      cumulativeCandidateCount: state.candidateHistory.length,
+      rankOverlap: state.progress.rankOverlap,
+    },
     budget: compactBudget(state),
     ...(state.clarification === undefined ? {} : {
       clarification: { facet: state.clarification.facet, question: state.clarification.question },
@@ -132,14 +149,15 @@ export function compactTerminalReceipt(state: RetrievalState): unknown {
   const aliases = candidateAliases(state)
   return {
     type: 'ticket_collection',
-    schemaVersion: 2,
+    schemaVersion: 3,
     retrievalId: state.retrievalId,
     packId: state.frozenEvidence?.packId,
     stoppingReason: state.termination,
     decisionFinalized: true,
     complete: state.frozenEvidence?.complete ?? false,
     topKAccepted: state.frozenEvidence?.topKAccepted ?? false,
-    sourceExhausted: state.frozenEvidence?.sourceExhausted ?? false,
+    resultPagesExhausted: state.frozenEvidence?.resultPagesExhausted ?? false,
+    semanticRecallKnown: state.frozenEvidence?.semanticRecallKnown ?? false,
     resultMayBeIncomplete: state.frozenEvidence?.resultMayBeIncomplete ?? true,
     nextPageAvailable: state.frozenEvidence?.nextPageAvailable ?? false,
     tickets: (state.frozenEvidence?.candidates ?? []).map(candidate => ({
@@ -161,7 +179,8 @@ export function compactFrozenPack(pack: FrozenEvidencePack): unknown {
     complete: pack.complete,
     decisionFinalized: pack.decisionFinalized,
     topKAccepted: pack.topKAccepted,
-    sourceExhausted: pack.sourceExhausted,
+    resultPagesExhausted: pack.resultPagesExhausted,
+    semanticRecallKnown: pack.semanticRecallKnown,
     resultMayBeIncomplete: pack.resultMayBeIncomplete,
     nextPageAvailable: pack.nextPageAvailable,
     selectedCount: pack.candidates.length,

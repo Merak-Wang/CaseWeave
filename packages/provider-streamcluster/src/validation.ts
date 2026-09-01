@@ -127,7 +127,7 @@ function assertFieldCatalog(value: unknown): readonly TicketFieldDescriptor[] {
     if (seen.has(key)) mismatch('StreamCluster 字段目录包含重复 key。')
     seen.add(key)
     if (!['keyword', 'datetime', 'text', 'string_list', 'raw_json'].includes(String(field.valueKind))
-      || !['L0', 'L2'].includes(String(field.accessLevel))
+      || !['L0', 'L2', 'L3'].includes(String(field.accessLevel))
       || !['non_sensitive', 'source_controlled'].includes(String(field.sensitivity))
       || !Array.isArray(field.filterOperators)
       || field.filterOperators.some(operator => !FILTER_OPERATORS.includes(operator as typeof FILTER_OPERATORS[number]))
@@ -256,6 +256,12 @@ function assertChannel(value: unknown): TicketSearchChannelTrace {
     ...(channel.model === undefined ? {} : { model: text(channel.model, 'ranking channel model', 1_024) }),
     ...(channel.revision === undefined ? {} : { revision: text(channel.revision, 'ranking channel revision', 1_024) }),
     ...(channel.dimensions === undefined ? {} : { dimensions: positiveInteger(channel.dimensions, 'ranking channel dimensions') }),
+    ...(channel.querySource === undefined ? {} : {
+      querySource: text(channel.querySource, 'ranking channel querySource', 64) as Exclude<TicketSearchChannelTrace['querySource'], undefined>,
+    }),
+  }
+  if (result.querySource !== undefined && !['direct_user_original', 'direct_user_keywords', 'agent_rewrite'].includes(result.querySource)) {
+    mismatch('StreamCluster 排名通道查询来源无效。')
   }
   if ((result.channel === 'vector' || result.channel === 'reranker') && (result.model === undefined || result.revision === undefined)) {
     mismatch('StreamCluster 模型排名通道缺少模型身份。')
@@ -382,6 +388,24 @@ export function assertSearchPage(
   const appliedFilters = assertAppliedFilters(page.appliedFilters, query.filters)
   const warnings = stringArray(page.warnings, 'search warnings')
   const trace = assertTrace(page.trace, query, options.stage, candidates, remote)
+  const boundaryValue = object(page.boundary, 'search boundary')
+  if (typeof boundaryValue.resultPagesExhausted !== 'boolean' || typeof boundaryValue.semanticRecallKnown !== 'boolean') {
+    mismatch('StreamCluster 搜索边界观测无效。')
+  }
+  const boundary: TicketSearchPage['boundary'] = {
+    authorizedCorpusSize: nonNegativeInteger(boundaryValue.authorizedCorpusSize, 'boundary authorizedCorpusSize'),
+    documentsAfterStructuredFilters: nonNegativeInteger(boundaryValue.documentsAfterStructuredFilters, 'boundary documentsAfterStructuredFilters'),
+    documentsEligibleForKeywordChannel: nonNegativeInteger(boundaryValue.documentsEligibleForKeywordChannel, 'boundary documentsEligibleForKeywordChannel'),
+    rankedHits: nonNegativeInteger(boundaryValue.rankedHits, 'boundary rankedHits'),
+    resultPagesExhausted: boundaryValue.resultPagesExhausted,
+    semanticRecallKnown: boundaryValue.semanticRecallKnown,
+  }
+  if (boundary.documentsAfterStructuredFilters > boundary.authorizedCorpusSize
+    || boundary.documentsEligibleForKeywordChannel > boundary.documentsAfterStructuredFilters
+    || boundary.rankedHits > boundary.documentsAfterStructuredFilters
+    || boundary.resultPagesExhausted !== (nextCursor === undefined)) {
+    mismatch('StreamCluster 搜索边界观测无效。')
+  }
   return {
     snapshotId,
     queryFingerprint: text(page.queryFingerprint, 'search queryFingerprint', 512),
@@ -394,5 +418,6 @@ export function assertSearchPage(
     appliedFilters,
     warnings,
     trace,
+    boundary,
   }
 }

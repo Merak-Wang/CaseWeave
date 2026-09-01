@@ -19,23 +19,23 @@
       "kind": "definition",
       "capability": "跨进程与跨层共享的领域类型、事件和 Provider 端口；不含实现策略。",
       "allowedInternalDependencies": [],
-      "maxSourceLines": 1050
+      "maxSourceLines": 1250
     },
     {
       "directory": "query-understanding",
       "name": "@retrieval-agent/query-understanding",
-      "kind": "query-compiler",
-      "capability": "把 direct-user 文本确定性编译为目标、检索文本、数量策略、类型化过滤和显式歧义；不调用模型或 Provider。",
+      "kind": "query-understanding",
+      "capability": "调用并校验现有 FastAPI/spaCy 查询分析协议，把原文关键词和原始向量 query 装配为零改写快查询；不拥有分词算法、业务关键词常量或检索策略。",
       "allowedInternalDependencies": ["@retrieval-agent/contracts"],
-      "maxSourceLines": 250
+      "maxSourceLines": 400
     },
     {
       "directory": "retrieval-policy",
       "name": "@retrieval-agent/retrieval-policy",
-      "kind": "domain-policy",
-      "capability": "验证结构化知识评估并导出唯一下一动作；从不可变观测重建可修订 active ranking。",
+      "kind": "policy-client",
+      "capability": "Python Retrieval FastAPI 策略的版本化 HTTP Consumer、超时取消、错误映射与状态/动作越界校验；不拥有策略实现或状态持久化。",
       "allowedInternalDependencies": ["@retrieval-agent/contracts"],
-      "maxSourceLines": 400
+      "maxSourceLines": 500
     },
     {
       "directory": "ticket-collection",
@@ -49,9 +49,9 @@
       "directory": "domain",
       "name": "@retrieval-agent/domain",
       "kind": "domain",
-      "capability": "确定性检索控制器、状态重放、查询收敛与证据上下文策略。",
+      "capability": "确定性检索控制器、远端策略 patch 最终准入、状态重放、查询收敛与证据上下文策略。",
       "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/retrieval-policy"],
-      "maxSourceLines": 1150
+      "maxSourceLines": 1250
     },
     {
       "directory": "model-service-client",
@@ -64,16 +64,16 @@
     {
       "directory": "retrieval-ranking",
       "name": "@retrieval-agent/retrieval-ranking",
-      "kind": "retrieval-algorithm",
-      "capability": "BM25F、稠密向量、加权 RRF、向量缓存和可选重排；不读取来源或执行授权。",
-      "allowedInternalDependencies": ["@retrieval-agent/model-service-client"],
-      "maxSourceLines": 1500
+      "kind": "retrieval-client",
+      "capability": "Python Retrieval FastAPI 排名的版本化 HTTP Consumer、profile 身份、超时取消、错误映射与授权候选越界校验。",
+      "allowedInternalDependencies": [],
+      "maxSourceLines": 500
     },
     {
       "directory": "provider-local",
       "name": "@retrieval-agent/provider-local",
       "kind": "provider",
-      "capability": "开发期只读 Provider、来源适配、动态字段目录、受控 raw 读取与确定性检索。",
+      "capability": "开发期只读 Provider、授权快照、来源适配、动态字段目录、受控 raw 读取与 RAG 排名装配。",
       "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/retrieval-ranking"],
       "maxSourceLines": 950
     },
@@ -141,7 +141,7 @@
         "@retrieval-agent/query-understanding",
         "@retrieval-agent/ticket-collection"
       ],
-      "maxSourceLines": 1500
+      "maxSourceLines": 1600
     },
     {
       "directory": "bundle",

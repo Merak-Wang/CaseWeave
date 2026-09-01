@@ -20,8 +20,12 @@ import {
   type ExportAuditSink,
 } from '@retrieval-agent/product-api'
 import {
+  CONTINUE_RETRIEVAL_ENDPOINT,
   EXPORT_CANDIDATES_ENDPOINT,
   READ_TICKET_DETAIL_ENDPOINT,
+  type ContinueRetrievalErrorResponse,
+  type ContinueRetrievalParams,
+  type ContinueRetrievalResponse,
   type ExportCandidatesErrorResponse,
   type ExportCandidatesParams,
   type ExportCandidatesResponse,
@@ -84,6 +88,21 @@ export function parseReadTicketDetailParams(value: unknown): ReadTicketDetailPar
   }
 }
 
+export function parseContinueRetrievalParams(value: unknown): ContinueRetrievalParams {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new RetrievalError('INVALID_REQUEST', '继续检索请求格式无效。')
+  }
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).some(key => !['sessionId', 'retrievalId'].includes(key))) {
+    throw new RetrievalError('INVALID_REQUEST', '继续检索请求包含未知字段。')
+  }
+  if (typeof record.sessionId !== 'string' || record.sessionId.trim().length === 0 || record.sessionId.length > 512
+    || typeof record.retrievalId !== 'string') {
+    throw new RetrievalError('INVALID_REQUEST', '会话或检索引用无效。')
+  }
+  return { sessionId: record.sessionId.trim(), retrievalId: RetrievalId(record.retrievalId) }
+}
+
 async function readJson(request: IncomingMessage): Promise<unknown> {
   if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
     throw new RetrievalError('INVALID_REQUEST', '产品接口只接受 JSON。')
@@ -128,7 +147,9 @@ function statusOf(error: RetrievalError): number {
 function writeJson(
   response: ServerResponse,
   status: number,
-  body: ExportCandidatesResponse | ExportCandidatesErrorResponse | ReadTicketDetailResponse | ReadTicketDetailErrorResponse,
+  body: ExportCandidatesResponse | ExportCandidatesErrorResponse
+    | ReadTicketDetailResponse | ReadTicketDetailErrorResponse
+    | ContinueRetrievalResponse | ContinueRetrievalErrorResponse,
 ): void {
   response.writeHead(status, {
     'cache-control': 'no-store',
@@ -136,6 +157,33 @@ function writeJson(
     'x-content-type-options': 'nosniff',
   })
   response.end(JSON.stringify(body))
+}
+
+/** Continue only the Provider-issued cursor belonging to this live authorized retrieval. */
+export async function continueRetrievalForAgent(
+  ctx: Context,
+  agent: Agent,
+  params: ContinueRetrievalParams,
+  signal?: AbortSignal,
+): Promise<ContinueRetrievalResponse> {
+  const retrievalAgent = ctx.agentPresets.serviceFor(agent, 'retrievalAgent')
+  if (retrievalAgent === undefined) {
+    throw new RetrievalError(
+      'PROVIDER_UNAVAILABLE',
+      '当前会话未加载工单检索能力，请重新打开会话后重试。',
+      { retryable: true },
+    )
+  }
+  const state = retrievalAgent.currentOrUndefined(agent)
+  if (state === undefined || state.retrievalId !== params.retrievalId) {
+    throw new RetrievalError('INVALID_REQUEST', '当前会话没有对应的检索结果。')
+  }
+  const continued = await retrievalAgent.continueRanking(agent, signal)
+  return {
+    retrievalId: continued.retrievalId,
+    candidateCount: continued.candidates.length,
+    nextPageAvailable: continued.lastPage?.nextCursor !== undefined,
+  }
 }
 
 /** Resolve an untrusted wire request through the live Agent's trusted services. */
@@ -291,4 +339,39 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       }
     },
   }), 'retrieval-product-host: detail route')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: CONTINUE_RETRIEVAL_ENDPOINT,
+    handler: async (request, response) => {
+      if (request.method !== 'POST') {
+        response.setHeader('allow', 'POST')
+        writeJson(response, 405, { code: 'METHOD_NOT_ALLOWED', message: '只允许 POST。', retryable: false })
+        return
+      }
+      if (!sameOrigin(request)) {
+        writeJson(response, 403, { code: 'ORIGIN_REJECTED', message: '请求来源不受信任。', retryable: false })
+        return
+      }
+      const abort = new AbortController()
+      const onAbort = (): void => { abort.abort() }
+      request.once('aborted', onAbort)
+      try {
+        const params = parseContinueRetrievalParams(await readJson(request))
+        const agent = ctx.agents.get(SessionId(params.sessionId))
+        if (agent === undefined) {
+          writeJson(response, 409, { code: 'SESSION_NOT_ACTIVE', message: '会话当前不可用，请重新打开后重试。', retryable: true })
+          return
+        }
+        writeJson(response, 200, await continueRetrievalForAgent(ctx, agent, params, abort.signal))
+      } catch (error) {
+        if (error instanceof RetrievalError) {
+          writeJson(response, statusOf(error), { code: error.code, message: error.publicMessage, retryable: error.retryable })
+        } else {
+          writeJson(response, 500, { code: 'INTERNAL', message: '继续检索失败。', retryable: false })
+        }
+      } finally {
+        request.off('aborted', onAbort)
+      }
+    },
+  }), 'retrieval-product-host: continue route')
 }

@@ -8,9 +8,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { InMemoryDetailReadAuditSink, InMemoryExportAuditSink } from '@retrieval-agent/product-api'
+import { RetrievalId } from '@retrieval-agent/contracts'
 import { describe, expect, it } from 'vitest'
 import {
+  continueRetrievalForAgent,
   exportCandidatesForAgent,
+  parseContinueRetrievalParams,
   parseExportCandidatesParams,
   parseReadTicketDetailParams,
   readTicketDetailsForAgent,
@@ -53,6 +56,11 @@ const principal = {
 }
 const retrievalAgent = {
   currentOrUndefined: () => state,
+  continueRanking: async () => ({
+    ...state,
+    candidates: [...state.candidates, { ...state.candidates[0], ref: 'candidate-isolated-2', rank: 2 }],
+    lastPage: { completeness: 'bounded', nextCursor: 'provider-cursor-2' },
+  }),
   principal: async () => principal,
   recordDetailRead: () => undefined,
   recordExport: () => undefined,
@@ -156,6 +164,15 @@ describe('DSH product Host adapter', () => {
     })).toThrow(/未知字段/u)
   })
 
+  it('accepts only the live retrieval identity for cursor continuation', () => {
+    expect(parseContinueRetrievalParams({
+      sessionId: 'session-1', retrievalId: 'retrieval-1',
+    })).toMatchObject({ sessionId: 'session-1', retrievalId: 'retrieval-1' })
+    expect(() => parseContinueRetrievalParams({
+      sessionId: 'session-1', retrievalId: 'retrieval-1', cursor: 'attacker-cursor',
+    })).toThrow(/未知字段/u)
+  })
+
   it('exports through the public preset lookup while the real isolate hides both services', async () => {
     const harness = await isolatedPresetHarness()
     try {
@@ -210,6 +227,24 @@ describe('DSH product Host adapter', () => {
         fields: ['problemDescription'],
       })
       expect(audit.records).toHaveLength(1)
+    } finally {
+      await harness.ctx.fiber.dispose()
+      await rm(harness.root, { recursive: true, force: true })
+    }
+  })
+
+  it('continues through the isolated retrieval service without accepting a browser cursor', async () => {
+    const harness = await isolatedPresetHarness()
+    try {
+      const params = parseContinueRetrievalParams({
+        sessionId: 'session-isolated-1', retrievalId: 'retrieval-isolated-1',
+      })
+      await expect(continueRetrievalForAgent(harness.ctx, harness.agent, params)).resolves.toMatchObject({
+        retrievalId: 'retrieval-isolated-1', candidateCount: 2, nextPageAvailable: true,
+      })
+      await expect(continueRetrievalForAgent(harness.ctx, harness.agent, {
+        ...params, retrievalId: RetrievalId('retrieval-wrong'),
+      })).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
     } finally {
       await harness.ctx.fiber.dispose()
       await rm(harness.root, { recursive: true, force: true })

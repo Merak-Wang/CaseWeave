@@ -9,6 +9,7 @@ import {
   loadModelDependencyManifest,
   syncModelDependencies,
 } from './model-dependencies.mjs'
+import { loadSpacyDependency, syncSpacyDependency } from './spacy-dependency.mjs'
 import { seedModelSettings } from './local-settings.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -317,7 +318,7 @@ async function modelServiceReady(baseUrl) {
   }
 }
 
-function spawnModelService(paths, environment, modelPlan) {
+function spawnModelService(paths, environment, modelPlan, spacyDependency) {
   const url = new URL(paths.modelServiceBaseUrl)
   const host = url.hostname === '[::1]' ? '::1' : url.hostname
   const port = url.port.length > 0 ? url.port : '80'
@@ -325,6 +326,9 @@ function spawnModelService(paths, environment, modelPlan) {
     'run', '--frozen', '--project', 'python/model-service', '--group', 'runtime', 'retrieval-agent-model-service',
     '--manifest', 'architecture/model-manifest.json',
     '--embedding-path', modelPlan.roles.embedding.dependency.targetPath,
+    '--spacy-path', spacyDependency.modelPath,
+    '--domain-lexicon', spacyDependency.lexiconPath,
+    '--vector-cache-dir', paths.vectorCacheDir,
     '--host', host,
     '--port', port,
     '--exit-on-stdin-close',
@@ -376,6 +380,7 @@ async function ensureModelService(paths, environment) {
   const ready = await modelServiceReady(paths.modelServiceBaseUrl)
   if (ready) return { child: undefined, owned: false }
   const modelPlan = await loadModelDependencyManifest(paths.root, environment)
+  const spacyDependency = await loadSpacyDependency(paths.root, environment)
   const action = modelServiceAction({
     ready,
     manage: enabled(environment.RETRIEVAL_AGENT_MANAGE_MODEL_SERVICE, true),
@@ -385,7 +390,8 @@ async function ensureModelService(paths, environment) {
     throw new Error(`model service is not ready at ${paths.modelServiceBaseUrl}; only an unavailable loopback HTTP service can be started automatically`)
   }
   await syncModelDependencies({ projectRoot: paths.root, environment, plan: modelPlan })
-  const child = spawnModelService(paths, environment, modelPlan)
+  await syncSpacyDependency({ projectRoot: paths.root, environment, dependency: spacyDependency })
+  const child = spawnModelService(paths, environment, modelPlan, spacyDependency)
   try {
     const deadline = Number(environment.RETRIEVAL_AGENT_MODEL_STARTUP_DEADLINE_MS ?? 300_000)
     await waitForModelService(paths, child, Number.isFinite(deadline) && deadline > 0 ? deadline : 300_000)
@@ -484,7 +490,11 @@ export async function runCli(argv, options = {}) {
       environment,
       ...selection,
     })
-    console.log(`Model dependencies ready: ${[...result.reused, ...result.downloaded].join(', ')}`)
+    const spacy = await syncSpacyDependency({
+      projectRoot: options.projectRoot ?? root,
+      environment,
+    })
+    console.log(`Model dependencies ready: ${[...result.reused, ...result.downloaded, `spacy:${spacy.reused ? 'reused' : 'materialized'}`].join(', ')}`)
     return
   }
   await runLocalWeb(parsed.forwardedArgs, options)

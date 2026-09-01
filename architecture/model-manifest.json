@@ -76,5 +76,16 @@
     "scoreKind": "yes_probability",
     "maxTokens": 512,
     "instruction": "Given a support ticket search query, determine whether the historical ticket describes the same user problem and compatible constraints."
+  },
+  "queryAnalysis": {
+    "engine": "spacy",
+    "engineVersion": "3.8.7",
+    "pipeline": "zh_core_web_sm",
+    "pipelineVersion": "3.8.0",
+    "sourceUrl": "https://github.com/explosion/spacy-models/releases/download/zh_core_web_sm-3.8.0/zh_core_web_sm-3.8.0-py3-none-any.whl",
+    "sourceSha256": "7de3bd267176b9b2a8defb6997c1cd296da16c57b5e712f72ea44a51755421c8",
+    "localPath": "models/zh_core_web_sm-3.8.0",
+    "pathEnvironment": "RETRIEVAL_AGENT_SPACY_PATH",
+    "domainLexiconPath": "config/query-domain-lexicon.json"
   }
 }

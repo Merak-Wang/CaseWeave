@@ -13,6 +13,7 @@ export interface TicketSearchChannelTrace {
   readonly model?: string
   readonly revision?: string
   readonly dimensions?: number
+  readonly querySource?: 'direct_user_original' | 'direct_user_keywords' | 'agent_rewrite'
 }
 
 export interface TicketRankSignal {

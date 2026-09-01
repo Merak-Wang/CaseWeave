@@ -11,6 +11,7 @@ import type {
 
 export const EXPORT_CANDIDATES_ENDPOINT = '/api/retrieval-agent/export' as const
 export const READ_TICKET_DETAIL_ENDPOINT = '/api/retrieval-agent/detail' as const
+export const CONTINUE_RETRIEVAL_ENDPOINT = '/api/retrieval-agent/continue' as const
 
 /** JSON payloads exposed by the trusted Product BFF. */
 export interface StartRetrievalParams {
@@ -28,6 +29,24 @@ export interface ReadRetrievalParams {
 
 export interface ReadRetrievalResponse {
   readonly node: TicketCandidateNode
+}
+
+export interface ContinueRetrievalParams {
+  /** Untrusted routing identity; the Host resolves the live Agent and trusted Principal. */
+  readonly sessionId: string
+  readonly retrievalId: RetrievalId
+}
+
+export interface ContinueRetrievalResponse {
+  readonly retrievalId: RetrievalId
+  readonly candidateCount: number
+  readonly nextPageAvailable: boolean
+}
+
+export interface ContinueRetrievalErrorResponse {
+  readonly code: string
+  readonly message: string
+  readonly retryable: boolean
 }
 
 export interface ReadTicketDetailParams {

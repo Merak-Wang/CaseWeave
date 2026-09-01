@@ -29,7 +29,7 @@ const contracted = makeRetrievalEvent({
       completenessRequirement: 'top_k',
     },
     queryContract: {
-      schemaVersion: 1,
+      schemaVersion: 3,
       original: '副卡解绑后仍共享流量',
       normalized: '副卡解绑后仍共享流量',
       task: 'ranked_cases',
@@ -40,7 +40,7 @@ const contracted = makeRetrievalEvent({
       entities: [{ type: 'business_object', surface: '副卡', canonical: '副卡' }],
       constraints: [],
       ambiguities: [],
-      confidence: 1,
+      interpretationBasis: 'deterministic_syntax',
       compilerVersion: 'test',
     },
     spec: {

@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { SpacyQueryAnalyzer } from '@retrieval-agent/query-understanding'
 import { installRetrievalRuntimeBudget } from './context-budget.js'
 import { installAutomaticRetrievalStart } from './pre-step.js'
 import { installRetrievalPresentationAnchors } from './presentation.js'
@@ -22,6 +23,10 @@ export const inject = ['agents', 'llm', 'tokenMeter', 'ticketRetrievalProvider',
 export interface Config extends RetrievalAgentServiceConfig {
   readonly adaptiveMaxResults?: number
   readonly maxFinishReminders?: number
+  readonly queryAnalysisBaseUrl?: string
+  readonly queryAnalysisDeadlineMs?: number
+  readonly retrievalPolicyBaseUrl?: string
+  readonly retrievalPolicyDeadlineMs?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -34,9 +39,13 @@ export const Config: z<Config> = z.object({
   searchTopK: z.number().step(1).min(1).max(50).default(8),
   searchMaxScan: z.number().step(1).min(1).default(50_000),
   contextTokenBudget: z.number().step(1).min(1).default(1_500),
-  maxContextTokens: z.number().step(1).min(1).default(4_096),
+  maxContextTokens: z.number().step(1).min(1).default(8_192),
   adaptiveMaxResults: z.number().step(1).min(1).max(50).default(20),
   maxFinishReminders: z.number().step(1).min(0).default(3),
+  queryAnalysisBaseUrl: z.string().default('http://127.0.0.1:8012'),
+  queryAnalysisDeadlineMs: z.number().step(1).min(100).default(5_000),
+  retrievalPolicyBaseUrl: z.string().default('http://127.0.0.1:8012'),
+  retrievalPolicyDeadlineMs: z.number().step(1).min(100).default(5_000),
 })
 
 /** Cordis plugin entry: install one application service and its DSH extensions. */
@@ -44,6 +53,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   const application = new RetrievalAgentService(ctx, config)
   installAutomaticRetrievalStart(ctx, application, {
     adaptiveMaxResults: config.adaptiveMaxResults ?? 20,
+    analyzer: new SpacyQueryAnalyzer({
+      baseUrl: config.queryAnalysisBaseUrl ?? 'http://127.0.0.1:8012',
+      deadlineMs: config.queryAnalysisDeadlineMs ?? 5_000,
+    }),
   })
   installRetrievalTools(ctx, application, { maxFinishReminders: config.maxFinishReminders ?? 3 })
   installRetrievalRuntimeBudget(ctx, application)

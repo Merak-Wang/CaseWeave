@@ -4,6 +4,7 @@ import { FixturePrincipalProviderService } from './principal.js'
 import { LocalTicketProviderService } from './provider.js'
 import { StreamClusterTicketProviderService } from './streamcluster-provider.js'
 import { bundledFixturePath } from './startup.js'
+import { testHybridRanker } from '../../../tests/support/fake-model-gateway.js'
 
 describe('Cordis service wrappers', () => {
   it('rejects an unpinned model identity for the Hybrid development provider', async () => {
@@ -34,6 +35,7 @@ describe('Cordis service wrappers', () => {
         dataPath: bundledFixturePath(),
         providerId: 'cordis-proxy-local-v1',
         retrievalMode: 'keyword',
+        ranker: testHybridRanker(),
       })
 
       const principal = await ctx.ticketPrincipalProvider.resolve({

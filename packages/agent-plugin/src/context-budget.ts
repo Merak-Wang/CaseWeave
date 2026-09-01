@@ -77,13 +77,14 @@ export function installRetrievalRuntimeBudget(
         })
       }
     })()
-  })
+  }, { global: true })
 
   ctx.on('tools/result', (exec, result) => {
     if (exec.agent === undefined || !exec.name.startsWith('ticket_')) return
+    if (!result.isError) return
     void application.recordToolCall(exec.agent, {
-      success: !result.isError,
+      success: false,
       serializationBytes: serializedBytes(result.content),
     }).catch(error => { ctx.logger.warn('retrieval tool metric failed', error) })
-  })
+  }, { global: true })
 }

@@ -228,6 +228,7 @@ try {
   const probe = join(profile, 'artifact-probe.mjs')
   await writeFile(probe, `
 import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { createServer as createHttpServer } from 'node:http'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -269,6 +270,29 @@ function fakeEmbedding(text) {
   const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0))
   return norm === 0 ? [1, ...Array.from({ length: dimensions - 1 }, () => 0)] : vector.map(value => value / norm)
 }
+function stable(value) {
+  if (Array.isArray(value)) return '[' + value.map(stable).join(',') + ']'
+  if (typeof value === 'object' && value !== null) {
+    return '{' + Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, item]) => JSON.stringify(key) + ':' + stable(item)).join(',') + '}'
+  }
+  return JSON.stringify(value)
+}
+function rankingProfileVersion(profile) {
+  const identity = {
+    version: 'quick-hybrid-v1', embeddingIdentity: profile.embeddingIdentity ?? null,
+    rerankerIdentity: profile.rerankerIdentity ?? null, embeddingInstruction: profile.embeddingInstruction,
+    rerankerInstruction: profile.rerankerInstruction, embeddingBatchSize: profile.embeddingBatchSize,
+    minimumDenseScore: profile.minimumDenseScore, fusion: profile.fusion, bm25f: profile.bm25f,
+    rerankerEnabled: profile.rerankerEnabled, rerankTopN: profile.rerankTopN,
+  }
+  return 'quick-hybrid-v1:' + createHash('sha256').update(stable(identity)).digest('hex').slice(0, 16)
+}
+async function requestBody(request) {
+  const chunks = []
+  for await (const chunk of request) chunks.push(chunk)
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
 const modelServer = createHttpServer(async (request, response) => {
   const send = (status, value) => {
     const data = JSON.stringify(value)
@@ -283,17 +307,81 @@ const modelServer = createHttpServer(async (request, response) => {
         dtype: 'float32', device: 'test', maxTokens: 12000, dimensions, pooling: 'last_token', normalization: 'l2',
       }],
       limits: { maxBatchSize: 128, maxTotalTokens: 100000, maxRerankCandidates: 20 },
+      rag: { protocolVersion: 'retrieval-agent.rag.v1', ranking: true, policy: true },
     })
     return
   }
   if (request.method === 'POST' && request.url === '/v1/embeddings') {
-    const chunks = []
-    for await (const chunk of request) chunks.push(chunk)
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    const body = await requestBody(request)
     send(200, {
       protocolVersion: MODEL_SERVICE_PROTOCOL_VERSION, requestId: body.requestId,
       model: 'clean-install-embedding', revision: 'clean-install-revision-v1', dimensions, normalization: 'l2',
       data: body.input.map((text, index) => ({ index, embedding: fakeEmbedding(text) })), elapsedMs: 0,
+    })
+    return
+  }
+  if (request.method === 'POST' && request.url === '/v1/ranking/prepare') {
+    const body = await requestBody(request)
+    const identity = body.profile.embeddingIdentity
+    send(200, {
+      protocolVersion: 'retrieval-agent.rag.v1', requestId: body.requestId,
+      documentCount: body.documents.length, model: identity.model, revision: identity.revision,
+      dimensions: identity.dimensions, elapsedMs: 0, profileVersion: rankingProfileVersion(body.profile),
+    })
+    return
+  }
+  if (request.method === 'POST' && request.url === '/v1/ranking/rank') {
+    const body = await requestBody(request)
+    const queryVector = fakeEmbedding(body.query.semanticText ?? body.query.text)
+    const ranked = body.documents.map(document => {
+      const documentVector = fakeEmbedding([document.title, document.summary, document.body, document.metadata].join(' '))
+      return { documentId: document.id, score: documentVector.reduce((sum, value, index) => sum + value * queryVector[index], 0) }
+    }).sort((left, right) => right.score - left.score || left.documentId.localeCompare(right.documentId))
+    const hits = ranked.map((item, index) => ({
+      documentId: item.documentId, rank: index + 1, score: item.score,
+      channels: [{ channel: 'vector', rank: index + 1, score: item.score }],
+    }))
+    send(200, {
+      protocolVersion: 'retrieval-agent.rag.v1', requestId: body.requestId,
+      result: {
+        hits,
+        execution: {
+          requestedMode: body.query.mode, executedMode: body.query.mode,
+          strategyVersion: rankingProfileVersion(body.profile),
+          channels: [{
+            channel: 'vector', implementation: 'clean-install-fake', version: 'v1',
+            resultCount: hits.length, elapsedMs: 0,
+          }],
+        },
+        scanned: body.documents.length, keywordEligible: 0, rankedHits: hits.length, warnings: [],
+      },
+      elapsedMs: 0,
+    })
+    return
+  }
+  if (request.method === 'POST' && request.url === '/v1/policy/candidate-ranking') {
+    const body = await requestBody(request)
+    const input = body.input
+    const history = [...new Map([...input.previousHistory, ...input.page].map(candidate => [candidate.ref, candidate])).values()]
+    const nextObservation = {
+      searchEventId: input.searchEventId, stage: input.stage, queryFingerprint: input.queryFingerprint,
+      ranking: input.page.map(candidate => ({ ref: candidate.ref, rank: candidate.rank })),
+    }
+    const observations = [...input.previousObservations, nextObservation]
+    const scores = new Map()
+    for (const observation of observations) {
+      const weight = observation.stage === 'repair_search' ? 1.25 : 1
+      for (const row of observation.ranking) scores.set(row.ref, (scores.get(row.ref) ?? 0) + weight / (60 + row.rank))
+    }
+    const excluded = new Set(input.excludedRefs)
+    const firstSeen = new Map(history.map((candidate, index) => [candidate.ref, index]))
+    const active = history.filter(candidate => !excluded.has(candidate.ref))
+      .sort((left, right) => (scores.get(right.ref) ?? 0) - (scores.get(left.ref) ?? 0)
+        || firstSeen.get(left.ref) - firstSeen.get(right.ref))
+      .map((candidate, index) => ({ ...candidate, rank: index + 1 }))
+    send(200, {
+      protocolVersion: 'retrieval-agent.rag.v1', requestId: body.requestId,
+      result: { version: 'candidate-ranking-v1', history, observations, active }, elapsedMs: 0,
     })
     return
   }
@@ -326,9 +414,8 @@ try {
     embeddingModel: 'clean-install-embedding',
     embeddingRevision: 'clean-install-revision-v1',
     embeddingDimensions: dimensions,
-    vectorCacheDir: join(fixtureRoot, '.clean-install-vector-cache'),
   })
-  await serviceCtx.plugin(RetrievalAgentService)
+  await serviceCtx.plugin(RetrievalAgentService, { retrievalPolicyBaseUrl: modelServiceBaseUrl })
   const serviceAgent = { session: Session.create(SessionId('clean-install-cordis-agent')) }
   const serviceState = await serviceCtx.retrievalAgent.start(serviceAgent, {
     target: 'ranked_cases', query: '主副卡解绑后仍共享流量', requestedCount: 5,
@@ -346,12 +433,18 @@ const gateway = new ModelServiceClient({
 })
 const provider = new LocalTicketProvider(records, {
   now: () => now,
-  ranker: new HybridRankingEngine({ gateway, minimumDenseScore: -1 }),
+  ranker: new HybridRankingEngine({
+    baseUrl: modelServiceBaseUrl,
+    embeddingIdentity: { model: 'clean-install-embedding', revision: 'clean-install-revision-v1', dimensions },
+    minimumDenseScore: -1,
+  }),
 })
 let serial = 0
 const nextId = () => 'clean-' + serial++
 const journal = new SessionRetrievalEventJournal(session, { now: () => now, eventId: nextId })
-const controller = new RetrievalController(provider, journal, undefined, { now: () => now, id: nextId })
+const controller = new RetrievalController(provider, journal, undefined, {
+  now: () => now, id: nextId, retrievalPolicyBaseUrl: modelServiceBaseUrl,
+})
 const state = await controller.start(principal, { target: 'ranked_cases', query: '主副卡解绑后仍共享流量' })
 if (!state.candidates.some(candidate => candidate.displayId === 'TKT-0029')) throw new Error('packed vertical slice missed the migrated Bronze qrel')
 if (journal.read(RetrievalId(state.retrievalId)).length === 0) throw new Error('packed event journal is empty')

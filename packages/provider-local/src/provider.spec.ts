@@ -6,6 +6,8 @@ import {
 } from '@retrieval-agent/contracts'
 import { normalizeFixtureTicket, type FixtureTicketInput } from './fixture.js'
 import { LocalTicketProvider } from './provider.js'
+import { RankingError, type RetrievalRanker } from '@retrieval-agent/retrieval-ranking'
+import { testHybridRanker } from '../../../tests/support/fake-model-gateway.js'
 
 const BASE_TIME = new Date('2026-08-27T00:00:00.000Z')
 
@@ -65,7 +67,7 @@ function fixtureRecords(): readonly NormalizedTicketRecord[] {
 
 describe('LocalTicketProvider authorization boundary', () => {
   it('filters unauthorized, cross-tenant, and unreviewed-PII records before ranking', async () => {
-    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME })
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker: testHybridRanker() })
     const user = principal()
     const snapshot = await provider.openSnapshot(user)
     const page = await provider.search(user, snapshot.snapshotId, provider.resolve({ target: 'ranked_cases', query: '登录' }), {
@@ -79,12 +81,13 @@ describe('LocalTicketProvider authorization boundary', () => {
     expect(snapshot.authorizationVersion).toBe('entitlements-v1')
   })
 
-  it('enforces every concept in an explicit AND contract before ranking', async () => {
+  it('makes every exact AND match eligible in the keyword channel', async () => {
     const provider = new LocalTicketProvider([
       ...fixtureRecords(),
       record({ ticketId: 'T-6', displayId: 'INC-6', title: '副卡新增订单失败' }),
       record({ ticketId: 'T-7', displayId: 'INC-7', title: '副卡在省外漫游无法上网' }),
-    ], { now: () => BASE_TIME })
+      record({ ticketId: 'T-8', displayId: 'INC-8', title: '副卡跨域办理失败' }),
+    ], { now: () => BASE_TIME, ranker: testHybridRanker() })
     const user = principal()
     const snapshot = await provider.openSnapshot(user)
     const spec = provider.resolve({
@@ -96,7 +99,7 @@ describe('LocalTicketProvider authorization boundary', () => {
       filters: [],
       ambiguities: [],
       queryContract: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         original: '查找副卡和跨域有关工单',
         normalized: '副卡和跨域',
         task: 'ranked_cases',
@@ -114,8 +117,22 @@ describe('LocalTicketProvider authorization boundary', () => {
           ],
         },
         ambiguities: [],
-        confidence: 1,
-        compilerVersion: 'direct-query-contract-v3',
+        fastQuery: {
+          schemaVersion: 1,
+          source: 'direct_user',
+          rewriteApplied: false,
+          keyword: { terms: ['副卡', '跨域'], operator: 'and' },
+          vector: { text: '查找副卡和跨域有关工单' },
+        },
+        interpretationBasis: 'deterministic_syntax',
+        compilerVersion: 'direct-query-contract-v4',
+      },
+      fastQuery: {
+        schemaVersion: 1,
+        source: 'direct_user',
+        rewriteApplied: false,
+        keyword: { terms: ['副卡', '跨域'], operator: 'and' },
+        vector: { text: '查找副卡和跨域有关工单' },
       },
     })
 
@@ -126,12 +143,14 @@ describe('LocalTicketProvider authorization boundary', () => {
     })
 
     expect(spec.requiredConcepts?.map(concept => concept.canonical)).toEqual(['副卡', '跨域'])
-    expect(page.candidates.map(candidate => candidate.displayId)).toEqual(['INC-7'])
+    expect(spec.fastQuery).toMatchObject({ rewriteApplied: false, keyword: { terms: ['副卡', '跨域'], operator: 'and' } })
+    expect(page.candidates.map(candidate => candidate.displayId)).toEqual(['INC-8'])
+    expect(page.boundary.documentsEligibleForKeywordChannel).toBe(1)
     expect(page.completeness).toBe('exhaustive')
   })
 
   it('binds snapshots to the exact trusted principal and rejects forged candidate refs', async () => {
-    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME })
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker: testHybridRanker() })
     const user = principal()
     const snapshot = await provider.openSnapshot(user)
     const spec = provider.resolve({ target: 'ranked_cases', query: '验证码' })
@@ -155,7 +174,7 @@ describe('LocalTicketProvider authorization boundary', () => {
 
   it('rejects tampered cursors, expired snapshots, and cancelled calls', async () => {
     let now = BASE_TIME
-    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => now, snapshotTtlMs: 1_000 })
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => now, snapshotTtlMs: 1_000, ranker: testHybridRanker() })
     const user = principal()
     const snapshot = await provider.openSnapshot(user)
     const spec = provider.resolve({ target: 'ranked_cases', query: '登录' })
@@ -179,5 +198,19 @@ describe('LocalTicketProvider authorization boundary', () => {
     await expect(provider.search(user, snapshot.snapshotId, spec, { topK: 1, maxScan: 100, stage: 'baseline' }))
       .rejects.toMatchObject({ code: 'SNAPSHOT_INVALID' })
     await expect(provider.status(user, snapshot.snapshotId)).resolves.toMatchObject({ snapshotValid: false })
+  })
+
+  it('maps RAG transport failures to stable domain errors', async () => {
+    const ranker: RetrievalRanker = {
+      profileVersion: 'failing-v1',
+      capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
+      rank: async () => { throw new RankingError('DEADLINE_EXCEEDED', 'late', true) },
+    }
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker })
+    const user = principal()
+    const snapshot = await provider.openSnapshot(user)
+    await expect(provider.search(user, snapshot.snapshotId, provider.resolve({ target: 'ranked_cases', query: '登录' }), {
+      topK: 5, maxScan: 100, stage: 'baseline',
+    })).rejects.toMatchObject({ code: 'TIMEOUT', retryable: true })
   })
 })

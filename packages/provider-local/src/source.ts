@@ -26,7 +26,7 @@ const SOURCE_FIELD_CATALOG: readonly TicketFieldDescriptor[] = Object.freeze([
   { key: 'source.tags', label: '标签', valueKind: 'string_list', accessLevel: 'L0', filterOperators: ['contains'], sensitivity: 'source_controlled' },
   { key: 'source.near_duplicate_group', label: '近重复组', valueKind: 'keyword', accessLevel: 'L0', filterOperators: ['eq', 'neq'], sensitivity: 'source_controlled' },
   { key: 'source.resolution', label: '来源解决方案', valueKind: 'text', accessLevel: 'L2', filterOperators: [], sensitivity: 'source_controlled' },
-  { key: 'source.raw', label: '原始载荷', valueKind: 'raw_json', accessLevel: 'L2', filterOperators: [], sensitivity: 'source_controlled' },
+  { key: 'source.raw', label: '原始载荷', valueKind: 'raw_json', accessLevel: 'L3', filterOperators: [], sensitivity: 'source_controlled' },
 ])
 
 function objectValue(value: unknown): Readonly<Record<string, unknown>> {

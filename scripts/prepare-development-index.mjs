@@ -2,9 +2,8 @@ import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { ModelServiceClient, ModelServiceClientError } from '@retrieval-agent/model-service-client'
 import { parseTicketDatasetJsonl, rankingDocuments } from '@retrieval-agent/provider-local'
-import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
+import { HybridRankingEngine, RankingError } from '@retrieval-agent/retrieval-ranking'
 import { loadModelDependencyManifest } from './model-dependencies.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -16,7 +15,7 @@ function enabled(value) {
 }
 
 function retryableStartupFailure(error) {
-  return error instanceof ModelServiceClientError
+  return error instanceof RankingError
     && error.retryable
     && ['UNAVAILABLE', 'DEADLINE_EXCEEDED', 'BACKPRESSURE', 'HTTP_ERROR'].includes(error.code)
 }
@@ -56,20 +55,8 @@ export async function prepareDevelopmentIndex(options = {}) {
   const cacheDir = options.cacheDir ?? developmentVectorCacheDir
   const rerankerEnabled = options.rerankerEnabled
     ?? enabled(process.env.RETRIEVAL_AGENT_RERANKER_ENABLED)
-  const gateway = new ModelServiceClient({
-    baseUrl,
-    embeddingModel: manifest.embedding.model,
-    embeddingRevision: manifest.embedding.revision,
-    embeddingDimensions: manifest.embedding.dimensions,
-    ...(rerankerEnabled ? {
-      rerankerModel: manifest.reranker.model,
-      rerankerRevision: manifest.reranker.revision,
-    } : {}),
-    defaultDeadlineMs: options.deadlineMs ?? 120_000,
-  })
   const engine = new HybridRankingEngine({
-    gateway,
-    cacheDir,
+    baseUrl,
     embeddingIdentity: {
       model: manifest.embedding.model,
       revision: manifest.embedding.revision,

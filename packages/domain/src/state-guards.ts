@@ -67,24 +67,37 @@ export function taskCompletionSatisfied(
   page: RetrievalState['lastPage'],
   assessment?: RetrievalState['lastAssessment'],
 ): boolean {
-  const providerExhausted = page?.completeness === 'exhaustive' && page.nextCursor === undefined
-  const explicitQuotaReached = task.countPolicy !== 'adaptive'
-    && page !== undefined && candidateCount >= task.requestedCount
-  const semanticAdaptiveStop = task.countPolicy === 'adaptive'
-    && assessment?.stop === true
-    && (assessment.decision === 'sufficient' || assessment.decision === 'no_result')
-  return providerExhausted
-    || (task.completenessRequirement === 'top_k' && (explicitQuotaReached || semanticAdaptiveStop))
+  void task
+  void candidateCount
+  void page
+  return assessment?.decision === 'accept_current_top_k' || assessment?.decision === 'no_result'
 }
 
 export function coverageGaps(
   candidates: readonly TicketCandidateRef[],
   page: RetrievalState['lastPage'],
 ): RetrievalState['gaps'] {
-  const resolved = page?.completeness === 'exhaustive' && page.nextCursor === undefined
-  return resolved
-    ? [{ kind: 'coverage', status: 'resolved', evidenceRefs: [...candidates], evaluator: 'system' }]
-    : [{ kind: 'coverage', status: 'open', evidenceRefs: [], evaluator: 'system' }]
+  const pagesExhausted = page?.boundary?.resultPagesExhausted
+    ?? (page?.completeness === 'exhaustive' && page.nextCursor === undefined)
+  const semanticRecallKnown = page?.boundary?.semanticRecallKnown ?? false
+  return [
+    {
+      kind: 'coverage',
+      status: semanticRecallKnown ? 'resolved' : 'unknown',
+      evidenceRefs: semanticRecallKnown ? [...candidates] : [],
+      evaluator: 'system',
+      description: semanticRecallKnown
+        ? '语义召回边界已有外部可校准证据。'
+        : 'semanticRecallKnown=false；当前结果页状态不能证明相关工单已找全。',
+    },
+    {
+      kind: 'boundary',
+      status: pagesExhausted ? 'resolved' : 'open',
+      evidenceRefs: pagesExhausted ? [...candidates] : [],
+      evaluator: 'system',
+      description: pagesExhausted ? '当前检索表达式的结果页已到底。' : '当前检索表达式仍有后续结果页。',
+    },
+  ]
 }
 
 export function candidateRankOverlap(previous: readonly TicketCandidateRef[], next: readonly TicketCandidateRef[]): number {

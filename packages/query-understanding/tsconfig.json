@@ -5,6 +5,5 @@
     "outDir": "lib",
     "tsBuildInfoFile": "lib/tsconfig.tsbuildinfo"
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.spec.ts", "src/**/*.spec.tsx"]
+  "include": ["src/index.ts", "src/protocol.ts"]
 }

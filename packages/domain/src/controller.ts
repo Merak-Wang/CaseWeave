@@ -17,7 +17,7 @@ import {
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
 import { EvidenceContextPolicy } from './context.js'
-import { planKnowledgeAssessment } from '@retrieval-agent/retrieval-policy'
+import { RetrievalPolicyClient, type RetrievalPolicyGateway } from '@retrieval-agent/retrieval-policy'
 import type { RetrievalEventJournal } from './journal.js'
 import { applyQueryDelta } from './query.js'
 import {
@@ -46,6 +46,10 @@ export interface RetrievalControllerConfig {
   readonly noProgressLimit?: number
   readonly searchTopK?: number
   readonly searchMaxScan?: number
+  readonly retrievalPolicyBaseUrl?: string
+  readonly retrievalPolicyDeadlineMs?: number
+  /** Test or alternative Provider seam; not part of serialized product configuration. */
+  readonly policy?: RetrievalPolicyGateway
   readonly now?: () => Date
   readonly id?: () => string
 }
@@ -60,6 +64,7 @@ export class RetrievalController {
   readonly #provider: TicketRetrievalProvider
   readonly #journal: RetrievalEventJournal
   readonly #contextPolicy: EvidenceContextPolicy
+  readonly #policy: RetrievalPolicyGateway
   readonly #rulesVersion: string
   readonly #promptVersion: string
   readonly #maxRounds: number
@@ -77,6 +82,10 @@ export class RetrievalController {
     this.#provider = provider
     this.#journal = journal
     this.#contextPolicy = contextPolicy
+    this.#policy = config.policy ?? new RetrievalPolicyClient({
+      baseUrl: config.retrievalPolicyBaseUrl ?? 'http://127.0.0.1:8012',
+      deadlineMs: config.retrievalPolicyDeadlineMs ?? 5_000,
+    })
     this.#rulesVersion = config.rulesVersion ?? 'retrieval-rules-v1'
     this.#promptVersion = config.promptVersion ?? 'retrieval-prompt-v1'
     this.#maxRounds = config.maxRounds ?? 8
@@ -170,11 +179,6 @@ export class RetrievalController {
     if ((input.delta === undefined) === (input.cursor === undefined)) {
       throw new RetrievalError('INVALID_REQUEST', '后续检索必须且只能提供 QueryDelta 或 Provider 游标之一。')
     }
-    const expectedAction = state.lastAssessment?.decision === 'continue' ? state.lastAssessment.nextAction : undefined
-    if (input.cursor === undefined && ((expectedAction === 'keyword_search' && input.mode !== 'keyword')
-      || (expectedAction === 'vector_search' && input.mode !== 'dense'))) {
-      throw new RetrievalError('INVALID_TRANSITION', '检索通道与已接受的知识状态下一动作不一致。')
-    }
     return this.#executeSearch(principal, state, input.cursor === undefined ? 'repair_search' : 'next_page', input, signal)
   }
   /** Continue the current provider ranking without exposing its cursor to the model. */
@@ -188,10 +192,12 @@ export class RetrievalController {
     }, signal)
   }
 
-  assess(state: RetrievalState, assessment: RetrievalKnowledgeAssessment): RetrievalState {
+  async assess(state: RetrievalState, assessment: RetrievalKnowledgeAssessment, signal?: AbortSignal): Promise<RetrievalState> {
     hasAction(state, 'assess')
     const assessed = this.#journal.append(state.retrievalId, 'retrieval/knowledge-assessed', { assessment })
-    const patch = planKnowledgeAssessment(state, assessment, { noProgressLimit: this.#noProgressLimit })
+    const patch = await this.#policy.planKnowledgeAssessment(
+      state, assessment, { noProgressLimit: this.#noProgressLimit }, signal,
+    )
     const next = this.#next(state, {
       ...patch,
       provenance: {
@@ -204,16 +210,17 @@ export class RetrievalController {
     return next
   }
   /** Only an exhausted empty Provider result is semantically safe to finish without a model assessment. */
-  finalizeExhaustedEmptyResult(state: RetrievalState): RetrievalState {
-    const providerExhausted = state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined
-    if (state.phase === 'stopped' || state.candidates.length > 0 || !providerExhausted) return state
+  async finalizeExhaustedEmptyResult(state: RetrievalState, signal?: AbortSignal): Promise<RetrievalState> {
+    const pagesExhausted = state.lastPage?.boundary?.resultPagesExhausted
+      ?? (state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined)
+    if (state.phase === 'stopped' || state.candidates.length > 0 || !pagesExhausted) return state
     const assessAction = state.allowedActions.find(candidate => candidate.kind === 'assess')
     if (assessAction === undefined) return state
-    const assessed = this.assess(state, {
-      decision: 'no_result', coverage: 1, candidateQuality: 1,
+    const assessed = await this.assess(state, {
+      decision: 'no_result', evaluator: 'system',
       selectedCandidateRefs: [], excludedCandidateRefs: [], gaps: [],
-      nextAction: 'finish', stop: true,
-    })
+      nextAction: 'finish_no_result',
+    }, signal)
     return this.freeze(assessed, [])
   }
 
@@ -365,19 +372,21 @@ export class RetrievalController {
     const taskSatisfied = taskCompletionSatisfied(
       state.task, state.candidates.length, state.lastPage, state.lastAssessment,
     )
-    const sourceExhausted = state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined
+    const resultPagesExhausted = state.lastPage?.boundary?.resultPagesExhausted
+      ?? (state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined)
+    const semanticRecallKnown = state.lastPage?.boundary?.semanticRecallKnown ?? false
     const nextPageAvailable = state.lastPage?.nextCursor !== undefined
     const searchBudgetExhausted = state.budget.searchesUsed >= state.budget.maxSearches
       || (state.budget.modelStepsUsed ?? state.budget.roundsUsed) >= state.budget.maxRounds
       || (state.budget.wallClockElapsedMs ?? state.budget.latencyMs) >= state.budget.maxLatencyMs
     const hasBlockingGap = state.gaps.some(gap => (gap.status === 'open' || gap.status === 'unknown')
-      && (gap.kind !== 'coverage' || state.task.completenessRequirement === 'exhaustive'))
+      && gap.kind !== 'coverage' && gap.kind !== 'boundary')
     const stoppingReason = reason ?? (!taskSatisfied
       ? searchBudgetExhausted ? 'budget_exhausted' : 'partial'
       : selected.length === 0
         ? 'no_result'
-        : hasBlockingGap ? 'partial' : 'sufficient')
-    if ((stoppingReason === 'sufficient' || stoppingReason === 'no_result') && !taskSatisfied) {
+        : hasBlockingGap ? 'partial' : 'top_k_accepted')
+    if ((stoppingReason === 'top_k_accepted' || stoppingReason === 'no_result') && !taskSatisfied) {
       throw new RetrievalError('INVALID_TRANSITION', '当前检索尚未满足任务停止条件，不能冻结为充分结果。')
     }
     if (stoppingReason === 'no_result' && state.candidates.length > 0) throw new RetrievalError('INVALID_TRANSITION', '存在候选时不能冻结为无结果。')
@@ -404,11 +413,13 @@ export class RetrievalController {
       stoppingReason,
       remainingGaps: state.gaps.filter(gap => gap.status === 'open' || gap.status === 'unknown'),
       budget: state.budget,
-      complete: sourceExhausted && (stoppingReason === 'sufficient' || stoppingReason === 'no_result'),
+      complete: semanticRecallKnown && resultPagesExhausted
+        && (stoppingReason === 'top_k_accepted' || stoppingReason === 'no_result'),
       decisionFinalized: true,
-      topKAccepted: state.task.completenessRequirement === 'top_k' && stoppingReason === 'sufficient',
-      sourceExhausted,
-      resultMayBeIncomplete: !sourceExhausted,
+      topKAccepted: state.task.completenessRequirement === 'top_k' && stoppingReason === 'top_k_accepted',
+      resultPagesExhausted,
+      semanticRecallKnown,
+      resultMayBeIncomplete: !semanticRecallKnown,
       nextPageAvailable,
       providerId: state.snapshot.providerId,
       promptVersion: state.provenance.promptVersion,
@@ -454,6 +465,7 @@ export class RetrievalController {
     const result = await executeSearchTransition({
       provider: this.#provider,
       journal: this.#journal,
+      policy: this.#policy,
       principal,
       state,
       stage,

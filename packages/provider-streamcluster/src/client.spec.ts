@@ -99,6 +99,23 @@ async function listen(handler: (request: IncomingMessage, response: ServerRespon
 }
 
 describe('StreamClusterTicketProvider HTTP contract', () => {
+  it('preserves NLP-selected surface terms and the original vector text in the remote spec', () => {
+    const provider = new StreamClusterTicketProvider({ baseUrl: 'http://127.0.0.1:1' })
+    const spec = provider.resolve({
+      target: 'ranked_cases',
+      query: '帮我找光猫和桥接有关工单',
+      fastQuery: {
+        schemaVersion: 1, source: 'direct_user', rewriteApplied: false,
+        keyword: { terms: ['光猫', '桥接'], operator: 'and' },
+        vector: { text: '帮我找光猫和桥接有关工单' },
+      },
+    })
+    expect(spec).toMatchObject({
+      keywordQuery: { terms: ['光猫', '桥接'], operator: 'and' },
+      semanticQuery: '帮我找光猫和桥接有关工单',
+    })
+  })
+
   it('handshakes once and re-sends the trusted principal on every bounded read', async () => {
     const calls: Array<{ method: string | undefined; url: string | undefined; authorization: string | undefined; body?: unknown }> = []
     const baseUrl = await listen(async (request, response) => {
@@ -129,6 +146,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
             snapshotId: 'snapshot-1', queryFingerprint: 'query-1', candidates: [], completeness: 'exhaustive',
             scanned: 0, returned: 0, elapsedMs: 2, appliedFilters: [], warnings: [],
             trace: searchTrace(),
+            boundary: { authorizedCorpusSize: 0, documentsAfterStructuredFilters: 0, documentsEligibleForKeywordChannel: 0, rankedHits: 0, resultPagesExhausted: true, semanticRecallKnown: false },
           },
         }))
       } else if (request.url === '/v1/ticket-retrieval/evidence') {
@@ -207,6 +225,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
             snapshotId: 'changed', queryFingerprint: 'q', candidates: [], completeness: 'exhaustive',
             scanned: 0, returned: 0, elapsedMs: 0, appliedFilters: [], warnings: [],
             trace: searchTrace(),
+            boundary: { authorizedCorpusSize: 0, documentsAfterStructuredFilters: 0, documentsEligibleForKeywordChannel: 0, rankedHits: 0, resultPagesExhausted: true, semanticRecallKnown: false },
           },
         }))
       } else {
@@ -271,6 +290,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
             snapshotId: 'snapshot-1', queryFingerprint: 'query-1', candidates: [], completeness: 'exhaustive',
             scanned: 0, returned: 0, elapsedMs: 1, appliedFilters: [], warnings: [],
             trace: { ...searchTrace(), stage: 'repair_search' },
+            boundary: { authorizedCorpusSize: 0, documentsAfterStructuredFilters: 0, documentsEligibleForKeywordChannel: 0, rankedHits: 0, resultPagesExhausted: true, semanticRecallKnown: false },
           },
         }))
       }
@@ -312,6 +332,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
                 channels: [{ channel: 'keyword', rank: 1, score: 1 }],
               }],
             },
+            boundary: { authorizedCorpusSize: 0, documentsAfterStructuredFilters: 0, documentsEligibleForKeywordChannel: 0, rankedHits: 0, resultPagesExhausted: true, semanticRecallKnown: false },
           },
         }))
       }

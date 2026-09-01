@@ -24,12 +24,41 @@ import {
 } from '@retrieval-agent/contracts'
 import { createTicketResultCollection } from '@retrieval-agent/ticket-collection'
 import { readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
+import type { QueryAnalysisResponse, TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
 import { installRetrievalRuntimeBudget } from './context-budget.js'
 import { installAutomaticRetrievalStart } from './pre-step.js'
 import { RetrievalAgentService } from './service.js'
 import { installRetrievalTools } from './tools.js'
+import { testRetrievalPolicy } from '../../../tests/support/retrieval-policy.js'
 
 const SIGNAL = new AbortController().signal
+const POLICY = testRetrievalPolicy()
+
+const QUERY_ANALYZER: TicketQueryAnalyzer = {
+  async analyze(query: string): Promise<QueryAnalysisResponse> {
+    const keyword = query.includes('副卡解绑后流量仍然共享') ? '副卡解绑后流量仍然共享'
+      : query.includes('副卡解绑后流量共享') ? '副卡解绑后流量共享'
+        : query.trim()
+    const start = query.indexOf(keyword)
+    return {
+      protocolVersion: 'retrieval-agent.models.v1', requestId: 'fixture',
+      analyzer: {
+        engine: 'spacy', engineVersion: '3.8.7', pipeline: 'zh_core_web_sm-3.8.0',
+        pipelineVersion: '3.8.0', lexiconVersion: 'telecom-query-phrases-v1', loaded: true,
+        components: ['tagger', 'parser'],
+      },
+      language: 'zh', keywords: [keyword],
+      candidates: [{ text: keyword, start, end: start + keyword.length, source: 'pos', pos: ['NOUN'] }],
+      tokens: [{
+        text: keyword, start, end: start + keyword.length, lemma: keyword, pos: 'NOUN', tag: 'NN',
+        dep: 'ROOT', head: 0, isStop: false, entityType: '',
+      }],
+      entities: [], triples: [],
+      ...(query.includes('两条') ? { requestedCount: 2 } : {}),
+      elapsedMs: 1,
+    }
+  },
+}
 
 function sessionAgent(session: Session): Agent {
   return {
@@ -143,6 +172,14 @@ class StubTicketProvider extends Service {
         },
         signals: [],
       },
+      boundary: {
+        authorizedCorpusSize: 0,
+        documentsAfterStructuredFilters: 0,
+        documentsEligibleForKeywordChannel: 0,
+        rankedHits: 0,
+        resultPagesExhausted: true,
+        semanticRecallKnown: false,
+      },
     })
   }
 }
@@ -190,6 +227,14 @@ class UnionTicketProvider extends StubTicketProvider {
           channels: [],
         }],
       },
+      boundary: {
+        authorizedCorpusSize: 3,
+        documentsAfterStructuredFilters: 3,
+        documentsEligibleForKeywordChannel: 1,
+        rankedHits: 1,
+        resultPagesExhausted: true,
+        semanticRecallKnown: false,
+      },
     }
   }
 }
@@ -200,7 +245,7 @@ class FirstRequestAssessmentAdapter extends LlmAdapter {
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
     const id = CallId('first-request-assessment')
-    const argumentsText = JSON.stringify({ outcome: { verdict: 'sufficient' } })
+    const argumentsText = JSON.stringify({ outcome: { verdict: 'accept_current_top_k' } })
     yield { type: 'block-start', index: 0, blockType: 'tool-call' }
     yield { type: 'tool-call-delta', index: 0, id, name: 'ticket_assess_state', argumentsDelta: argumentsText }
     yield {
@@ -225,8 +270,8 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(TokenMeter)
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
-      await ctx.plugin(RetrievalAgentService, { maxContextTokens: 4_096 })
-      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20 })
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY, maxContextTokens: 4_096 })
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20, analyzer: QUERY_ANALYZER })
       installRetrievalTools(ctx, ctx.retrievalAgent)
       installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
       await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
@@ -246,12 +291,14 @@ describe('RetrievalAgentService Cordis binding', () => {
 
       expect(adapter.requests).toHaveLength(1)
       const request = adapter.requests[0]!
-      expect(request.tools?.map(tool => tool.name)).toEqual(['ticket_assess_state'])
+      expect(request.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining([
+        'ticket_assess_state', 'ticket_keyword_search', 'ticket_vector_search', 'ticket_state',
+      ]))
       expect(request.messages.flatMap(message => message.content)
         .some(block => block.type === 'text' && block.text.includes('<retrieval_state>'))).toBe(true)
       expect(ctx.retrievalAgent.current(handle.agent)).toMatchObject({
-        phase: 'stopped', termination: 'sufficient',
-        frozenEvidence: { complete: false, topKAccepted: true, sourceExhausted: false },
+        phase: 'stopped', termination: 'top_k_accepted',
+        frozenEvidence: { complete: false, topKAccepted: true, resultPagesExhausted: true },
         budget: { modelStepsUsed: 1, successfulToolCalls: 1, failedToolCalls: 0 },
       })
       const requests = readRetrievalSessionEvents(handle.agent.session)
@@ -271,7 +318,7 @@ describe('RetrievalAgentService Cordis binding', () => {
     try {
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(StubTicketProvider)
-      await ctx.plugin(RetrievalAgentService)
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY })
       const agent = {
         session: Session.create(SessionId('cordis-proxy-agent')),
       } as Agent
@@ -297,7 +344,7 @@ describe('RetrievalAgentService Cordis binding', () => {
     try {
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
-      await ctx.plugin(RetrievalAgentService, { maxContextTokens: 4_096 })
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY, maxContextTokens: 4_096 })
       const session = Session.create(SessionId('context-admission-agent'))
       const agent = sessionAgent(session)
       await ctx.retrievalAgent.start(agent, { target: 'ranked_cases', query: '副卡' })
@@ -327,8 +374,8 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(AgentRegistry)
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(StubTicketProvider)
-      await ctx.plugin(RetrievalAgentService)
-      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20 })
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY })
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20, analyzer: QUERY_ANALYZER })
 
       const session = Session.create(SessionId('automatic-pre-step'))
       const agent = sessionAgent(session)
@@ -408,8 +455,8 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(AgentRegistry)
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(StubTicketProvider)
-      await ctx.plugin(RetrievalAgentService)
-      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20 })
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY })
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20, analyzer: QUERY_ANALYZER })
       const session = Session.create(SessionId('rejected-pre-step'))
       const agent = sessionAgent(session)
       const direct = createUserMessage({ content: [{ type: 'text', text: '不应启动' }], source: { kind: 'user' } })
@@ -434,8 +481,8 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(AgentRegistry)
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
-      await ctx.plugin(RetrievalAgentService)
-      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20 })
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY })
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20, analyzer: QUERY_ANALYZER })
       const session = Session.create(SessionId('natural-product-path'))
       const agent = sessionAgent(session)
       const direct = createUserMessage({
@@ -454,24 +501,29 @@ describe('RetrievalAgentService Cordis binding', () => {
 
       let state = ctx.retrievalAgent.current(agent)
       expect(state.task).toMatchObject({ target: 'ranked_cases', requestedCount: 2, countPolicy: 'explicit' })
-      expect(state.query.spec.normalizedQuery).toBe('副卡解绑后流量共享')
+      expect(state.query.spec.normalizedQuery).toBe('帮我找两条副卡解绑后流量共享的工单')
+      expect(state.query.contract?.fastQuery).toMatchObject({
+        rewriteApplied: false,
+        keyword: { terms: ['副卡解绑后流量共享'], operator: 'and' },
+        vector: { text: '帮我找两条副卡解绑后流量共享的工单' },
+      })
       expect(state.lastPage?.trace.stage).toBe('initial_hybrid')
       state = await ctx.retrievalAgent.assess(agent, {
-        decision: 'continue', coverage: 0.5, candidateQuality: 0.7,
+        decision: 'continue', evaluator: 'model',
         selectedCandidateRefs: state.candidates.map(candidate => candidate.ref), excludedCandidateRefs: [],
-        gaps: [], nextAction: 'vector_search', stop: false,
+        gaps: [], nextAction: 'vector_search',
       })
       state = await ctx.retrievalAgent.search(agent, {
         mode: 'dense', delta: { kind: 'semantic_hint', text: '解绑后仍共享' },
       })
       state = await ctx.retrievalAgent.assess(agent, {
-        decision: 'sufficient', coverage: 0.9, candidateQuality: 0.9,
+        decision: 'accept_current_top_k', evaluator: 'model',
         selectedCandidateRefs: state.candidates.map(candidate => candidate.ref), excludedCandidateRefs: [],
-        gaps: [], nextAction: 'finish', stop: true,
+        gaps: [], nextAction: 'accept_current_top_k',
       })
 
       expect(createTicketResultCollection(state)).toMatchObject({
-        type: 'ticket_collection', complete: false, topKAccepted: true, stoppingReason: 'sufficient',
+        type: 'ticket_collection', complete: false, topKAccepted: true, stoppingReason: 'top_k_accepted',
         tickets: [{ displayId: 'TKT-3' }, { displayId: 'TKT-1' }],
       })
       expect(readRetrievalSessionEvents(session).map(event => event.type)).toContain('retrieval/knowledge-assessed')
@@ -486,10 +538,10 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(AgentRegistry)
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
-      await ctx.plugin(RetrievalAgentService)
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY })
       await ctx.plugin(SystemPrompt)
       await ctx.plugin(ToolRuntime)
-      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20 })
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20, analyzer: QUERY_ANALYZER })
       installRetrievalTools(ctx, ctx.retrievalAgent, { maxFinishReminders: 3 })
 
       const session = Session.create(SessionId('registered-tool-product-path'))
@@ -525,7 +577,7 @@ describe('RetrievalAgentService Cordis binding', () => {
         signal: SIGNAL,
         callId: CallId('vector-repair'),
         name: 'ticket_vector_search',
-        arguments: { semantic_hint: '解绑后仍共享' },
+        arguments: { query: '解绑后仍共享' },
         agent,
       })
       expect(repaired).toMatchObject({ isError: false, value: { phase: 'assessed' } })
@@ -536,7 +588,7 @@ describe('RetrievalAgentService Cordis binding', () => {
         signal: SIGNAL,
         callId: CallId('assess-finish'),
         name: 'ticket_assess_state',
-        arguments: { outcome: { verdict: 'sufficient' } },
+        arguments: { outcome: { verdict: 'accept_current_top_k' } },
         agent,
       })
 
@@ -544,7 +596,7 @@ describe('RetrievalAgentService Cordis binding', () => {
         isError: false,
         concludesTurn: true,
         value: {
-          type: 'ticket_collection', complete: false, topKAccepted: true, stoppingReason: 'sufficient',
+          type: 'ticket_collection', complete: false, topKAccepted: true, stoppingReason: 'top_k_accepted',
           tickets: [{ displayId: 'TKT-3' }, { displayId: 'TKT-1' }],
         },
       })
@@ -559,7 +611,7 @@ describe('RetrievalAgentService Cordis binding', () => {
     try {
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
-      await ctx.plugin(RetrievalAgentService)
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY })
       const agent = {
         session: Session.create(SessionId('parallel-search-agent')),
       } as Agent
@@ -570,31 +622,31 @@ describe('RetrievalAgentService Cordis binding', () => {
       })
 
       state = await ctx.retrievalAgent.assess(agent, {
-        decision: 'continue', coverage: 0.4, candidateQuality: 0.5,
+        decision: 'continue', evaluator: 'model',
         selectedCandidateRefs: state.candidates.map(candidate => candidate.ref), excludedCandidateRefs: [],
-        gaps: [], nextAction: 'keyword_search', stop: false,
+        gaps: [], nextAction: 'keyword_search',
       })
       state = await ctx.retrievalAgent.search(agent, {
         mode: 'keyword', delta: { kind: 'add_terms', terms: ['解绑'] },
       })
       state = await ctx.retrievalAgent.assess(agent, {
-        decision: 'continue', coverage: 0.6, candidateQuality: 0.7,
+        decision: 'continue', evaluator: 'model',
         selectedCandidateRefs: state.candidates.map(candidate => candidate.ref), excludedCandidateRefs: [],
-        gaps: [], nextAction: 'vector_search', stop: false,
+        gaps: [], nextAction: 'vector_search',
       })
       state = await ctx.retrievalAgent.search(agent, {
         mode: 'dense', delta: { kind: 'semantic_hint', text: '解绑后仍共享' },
       })
       state = await ctx.retrievalAgent.assess(agent, {
-        decision: 'sufficient', coverage: 1, candidateQuality: 0.9,
+        decision: 'accept_current_top_k', evaluator: 'model',
         selectedCandidateRefs: state.candidates.map(candidate => candidate.ref), excludedCandidateRefs: [],
-        gaps: [], nextAction: 'finish', stop: true,
+        gaps: [], nextAction: 'accept_current_top_k',
       })
 
       expect(state.candidateHistory.map(candidate => candidate.displayId)).toEqual(['TKT-1', 'TKT-2', 'TKT-3'])
       expect(state).toMatchObject({
-        phase: 'stopped', termination: 'sufficient',
-        frozenEvidence: { complete: false, topKAccepted: true, sourceExhausted: false },
+        phase: 'stopped', termination: 'top_k_accepted',
+        frozenEvidence: { complete: false, topKAccepted: true, resultPagesExhausted: true },
       })
       expect(ctx.ticketRetrievalProvider).toMatchObject({ modes: ['hybrid', 'keyword', 'dense'] })
     } finally {

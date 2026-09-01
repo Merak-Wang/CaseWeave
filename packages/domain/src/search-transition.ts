@@ -9,7 +9,7 @@ import {
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
 import type { RetrievalEventJournal } from './journal.js'
-import { updateCandidateRanking } from '@retrieval-agent/retrieval-policy'
+import type { RetrievalPolicyGateway } from '@retrieval-agent/retrieval-policy'
 import { applyQueryDelta } from './query.js'
 import {
   allowedAction as action,
@@ -21,6 +21,7 @@ import {
 export interface SearchTransitionInput {
   readonly provider: TicketRetrievalProvider
   readonly journal: RetrievalEventJournal
+  readonly policy: RetrievalPolicyGateway
   readonly principal: TrustedPrincipalContext
   readonly state: RetrievalState
   readonly stage: TicketSearchStage
@@ -84,7 +85,7 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
   const searched = input.journal.append(state.retrievalId, 'retrieval/search-completed', { stage: input.stage, spec, page })
   const previousRefs = state.candidates.map(candidate => candidate.ref)
   const pageRefs = page.candidates.map(candidate => candidate.ref)
-  const ranking = updateCandidateRanking({
+  const ranking = await input.policy.updateCandidateRanking({
     previousHistory: state.candidateHistory,
     previousObservations: state.rankingHistory,
     page: page.candidates,
@@ -92,7 +93,7 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
     stage: input.stage,
     queryFingerprint: page.queryFingerprint,
     excludedRefs: state.excludedCandidateRefs,
-  })
+  }, input.signal)
   const candidates = ranking.active
   const newRefs = pageRefs.filter(ref => !previousRefs.includes(ref))
   const overlap = rankOverlap(previousRefs, candidates.map(candidate => candidate.ref))
@@ -103,10 +104,27 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
     providerLatencyMs: (state.budget.providerLatencyMs ?? 0) + page.elapsedMs,
   }
   const candidateRefs = candidates.map(candidate => candidate.ref)
-  const allowedActions: RetrievalAllowedAction[] = [action('assess', candidateRefs), action('read_state')]
+  const searchOpen = budget.searchesUsed < budget.maxSearches
+    && (budget.modelStepsUsed ?? budget.roundsUsed) < budget.maxRounds
+    && (budget.wallClockElapsedMs ?? budget.latencyMs) < budget.maxLatencyMs
+  const promotionOpen = budget.promotionsUsed < budget.maxPromotions
+    && budget.evidenceTokensUsed < budget.maxEvidenceTokens
+  const evidenceFields = state.snapshot.fieldCatalog
+    .filter(field => field.accessLevel === 'L2')
+    .map(field => field.key)
+  const allowedActions: RetrievalAllowedAction[] = [
+    action('assess', candidateRefs),
+    ...(searchOpen && page.nextCursor !== undefined ? [action('search_next')] : []),
+    ...(searchOpen ? [action('repair_search')] : []),
+    ...(promotionOpen && candidateRefs.length > 0 && evidenceFields.length > 0
+      ? [action('promote', candidateRefs, evidenceFields, budget.maxEvidenceTokens - budget.evidenceTokensUsed)]
+      : []),
+    ...(candidateRefs.length >= 2 ? [action('request_clarification', candidateRefs)] : []),
+    action('read_state'),
+  ]
   const gaps = [
     ...systemGaps(candidateRefs, page),
-    ...state.gaps.filter(gap => gap.kind !== 'coverage'),
+    ...state.gaps.filter(gap => gap.evaluator !== 'system' || !['coverage', 'boundary'].includes(gap.kind)),
   ]
   const coverageResolved = gaps.some(gap => gap.kind === 'coverage' && gap.status === 'resolved')
   return {

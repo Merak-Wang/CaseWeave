@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { testRetrievalPolicy } from '../../../tests/support/retrieval-policy.js'
 import {
   RetrievalError,
   TicketCandidateRef,
@@ -23,19 +24,18 @@ const CANDIDATE_REF = TicketCandidateRef('cand-1')
 const SECOND_CANDIDATE_REF = TicketCandidateRef('cand-2')
 const THIRD_CANDIDATE_REF = TicketCandidateRef('cand-3')
 const EVIDENCE_ID = TicketEvidenceId('evidence-1')
+const POLICY = testRetrievalPolicy()
 
 function assessment(
   patch: Partial<RetrievalKnowledgeAssessment> = {},
 ): RetrievalKnowledgeAssessment {
   return {
     decision: 'continue',
-    coverage: 0.5,
-    candidateQuality: 0.7,
     selectedCandidateRefs: [CANDIDATE_REF],
     excludedCandidateRefs: [],
     gaps: [],
     nextAction: 'promote',
-    stop: false,
+    evaluator: 'model',
     ...patch,
   }
 }
@@ -155,6 +155,14 @@ function provider(): TicketRetrievalProvider {
         appliedFilters: query.filters,
         warnings: [],
         trace: searchTrace(options.stage, query.mode, [CANDIDATE_REF]),
+        boundary: {
+          authorizedCorpusSize: 1,
+          documentsAfterStructuredFilters: 1,
+          documentsEligibleForKeywordChannel: 1,
+          rankedHits: 1,
+          resultPagesExhausted: true,
+          semanticRecallKnown: false,
+        },
       }
     },
     async readEvidence(_principal, request) {
@@ -225,6 +233,14 @@ function dynamicFacetProvider(completeness: 'bounded' | 'exhaustive' = 'exhausti
         scanned: 2,
         returned: 2,
         trace: searchTrace(options.stage, query.mode, [CANDIDATE_REF, SECOND_CANDIDATE_REF]),
+        boundary: {
+          authorizedCorpusSize: 2,
+          documentsAfterStructuredFilters: 2,
+          documentsEligibleForKeywordChannel: 2,
+          rankedHits: 2,
+          resultPagesExhausted: true,
+          semanticRecallKnown: false,
+        },
       }
     },
   }
@@ -248,6 +264,7 @@ function paginatedProvider(firstPage: {
           ...page,
           completeness: firstPage.completeness,
           ...(firstPage.nextCursor === undefined ? {} : { nextCursor: firstPage.nextCursor }),
+          boundary: { ...page.boundary, resultPagesExhausted: firstPage.nextCursor === undefined },
         }
       }
       return {
@@ -256,6 +273,7 @@ function paginatedProvider(firstPage: {
         completeness: 'exhaustive',
         returned: 0,
         trace: searchTrace(options.stage, query.mode, []),
+        boundary: { ...page.boundary, resultPagesExhausted: true },
       }
     },
   }
@@ -293,7 +311,7 @@ describe('RetrievalController', () => {
   it('runs a bounded search, evidence promotion, freeze, and exact event replay', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(provider(), journal, new EvidenceContextPolicy({ estimateTokens: () => 1 }), {
+    const controller = new RetrievalController(provider(), journal, new EvidenceContextPolicy({ estimateTokens: () => 1 }), { policy: POLICY,
       now: () => NOW,
       id: ids,
       maxRounds: 4,
@@ -306,10 +324,10 @@ describe('RetrievalController', () => {
     expect(state.phase).toBe('assessed')
     expect(state.lastPage?.trace.stage).toBe('initial_hybrid')
     expect(state.budget).toMatchObject({ roundsUsed: 0, searchesUsed: 1, providerLatencyMs: 7, latencyMs: 0 })
-    expect(state.allowedActions.map(item => item.kind)).toEqual(['assess', 'read_state'])
+    expect(state.allowedActions.map(item => item.kind)).toEqual(['assess', 'repair_search', 'promote', 'read_state'])
     expect(() => controller.freeze(state, [])).toThrowError(RetrievalError)
 
-    state = controller.assess(state, assessment({
+    state = await controller.assess(state, assessment({
       gaps: [{ kind: 'depth', status: 'open', evidenceRefs: [CANDIDATE_REF], evaluator: 'model' }],
       model: 'fixture-model',
     }))
@@ -322,17 +340,14 @@ describe('RetrievalController', () => {
     expect(context.includedEvidenceIds).toEqual([EVIDENCE_ID])
     expect(context.rendered).toContain('<untrusted_ticket_evidence>')
 
-    state = controller.assess(state, assessment({
-      decision: 'sufficient',
-      coverage: 1,
-      candidateQuality: 1,
+    state = await controller.assess(state, assessment({
+      decision: 'accept_current_top_k',
       gaps: [{ kind: 'depth', status: 'resolved', evidenceRefs: [EVIDENCE_ID], evaluator: 'model' }],
-      nextAction: 'finish',
-      stop: true,
+      nextAction: 'accept_current_top_k',
     }))
     state = controller.freeze(state, [CANDIDATE_REF])
 
-    expect(state.termination).toBe('sufficient')
+    expect(state.termination).toBe('top_k_accepted')
     expect(state.frozenEvidence?.candidates[0]).toMatchObject({ displayId: 'INC-1', evidenceLevel: 'L2' })
 
     const events = journal.read(state.retrievalId)
@@ -343,7 +358,7 @@ describe('RetrievalController', () => {
   it('rejects broken replay chains instead of accepting a partial state history', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(provider(), journal, undefined, { now: () => NOW, id: ids })
+    const controller = new RetrievalController(provider(), journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
     let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
     const events = [...journal.read(state.retrievalId)]
     const broken = events.map((event, index) => index === 1 ? { ...event, sequence: 4 } : event)
@@ -353,7 +368,7 @@ describe('RetrievalController', () => {
   it('rejects pre-v5 event streams instead of silently treating missing runtime metrics as zero', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(provider(), journal, undefined, { now: () => NOW, id: ids })
+    const controller = new RetrievalController(provider(), journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
     const state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
     const legacy = journal.read(state.retrievalId).map(event => ({ ...event, schemaVersion: 4 }))
     expect(() => foldRetrievalEvents(
@@ -372,7 +387,7 @@ describe('RetrievalController', () => {
       },
     }
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(wrongSnapshotProvider, journal, undefined, { now: () => NOW, id: ids })
+    const controller = new RetrievalController(wrongSnapshotProvider, journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
     const started = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
     expect(started).toMatchObject({ phase: 'stopped', termination: 'backend_error', candidates: [] })
 
@@ -392,9 +407,9 @@ describe('RetrievalController', () => {
     }
     const secondIds = deterministicIds()
     const secondJournal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: secondIds })
-    const second = new RetrievalController(rejectedProvider, secondJournal, undefined, { now: () => NOW, id: secondIds })
+    const second = new RetrievalController(rejectedProvider, secondJournal, undefined, { policy: POLICY, now: () => NOW, id: secondIds })
     let state = await second.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
-    state = second.assess(state, assessment({ nextAction: 'promote' }))
+    state = await second.assess(state, assessment({ nextAction: 'promote' }))
     await expect(second.promote(PRINCIPAL, state, [CANDIDATE_REF], ['problemDescription'], 20))
       .rejects.toMatchObject({ code: 'UNAUTHORIZED' })
   })
@@ -402,7 +417,7 @@ describe('RetrievalController', () => {
   it('requires an honest partial assessment when round or latency budgets are exhausted', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(provider(), journal, undefined, {
+    const controller = new RetrievalController(provider(), journal, undefined, { policy: POLICY,
       now: () => NOW,
       id: ids,
       maxRounds: 1,
@@ -417,34 +432,33 @@ describe('RetrievalController', () => {
     state = controller.recordModelResponse(state, { modelLatencyMs: 7, outputTokens: 10, wallClockElapsedMs: 7 })
     expect(state.budget.latencyMs).toBe(7)
     expect(state.budget).toMatchObject({ modelStepsUsed: 1, modelLatencyMs: 7, providerLatencyMs: 7 })
-    expect(state.allowedActions.map(item => item.kind)).toEqual(['assess', 'read_state'])
+    expect(state.allowedActions.map(item => item.kind)).toEqual(['assess', 'repair_search', 'promote', 'read_state'])
 
-    expect(() => controller.assess(state, assessment({
+    await expect(controller.assess(state, assessment({
       nextAction: 'promote',
       gaps: [{ kind: 'depth', status: 'open', evidenceRefs: [CANDIDATE_REF], evaluator: 'model' }],
-    }))).toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
-    state = controller.assess(state, assessment({
-      decision: 'partial',
-      nextAction: 'finish',
-      stop: true,
+    }))).rejects.toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
+    state = await controller.assess(state, assessment({
+      decision: 'return_partial',
+      nextAction: 'finish_partial',
+      evaluator: 'system',
       gaps: [{ kind: 'depth', status: 'open', evidenceRefs: [CANDIDATE_REF], evaluator: 'model' }],
     }))
     expect(state.allowedActions.map(item => item.kind)).toEqual(['freeze', 'read_state'])
     state = controller.freeze(state, [CANDIDATE_REF])
-    expect(state.termination).toBe('partial')
+    expect(state.termination).toBe('budget_exhausted')
   })
 
   it('uses snapshot-declared dynamic L0 fields for candidate-difference clarification', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(dynamicFacetProvider(), journal, undefined, { now: () => NOW, id: ids })
+    const controller = new RetrievalController(dynamicFacetProvider(), journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
     let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '账号问题' })
-    state = controller.assess(state, assessment({
+    state = await controller.assess(state, assessment({
       decision: 'needs_clarification',
       selectedCandidateRefs: [CANDIDATE_REF],
       gaps: [{ kind: 'ambiguity', status: 'open', evidenceRefs: [CANDIDATE_REF, SECOND_CANDIDATE_REF], evaluator: 'model' }],
       nextAction: 'clarify',
-      stop: false,
     }))
 
     expect(() => controller.requestClarification(
@@ -470,7 +484,7 @@ describe('RetrievalController', () => {
   it('requires exactly one typed delta or cursor for every search after the automatic first round', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(provider(), journal, undefined, {
+    const controller = new RetrievalController(provider(), journal, undefined, { policy: POLICY,
       now: () => NOW,
       id: ids,
       maxSearches: 3,
@@ -488,7 +502,7 @@ describe('RetrievalController', () => {
       delta: { kind: 'add_terms', terms: ['验证码'] },
     } as unknown as RetrievalSearchInput)).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
 
-    state = controller.assess(state, assessment({ nextAction: 'keyword_search' }))
+    state = await controller.assess(state, assessment({ nextAction: 'keyword_search' }))
     const repaired = await controller.search(PRINCIPAL, state, {
       mode: 'keyword',
       delta: { kind: 'add_terms', terms: ['验证码'] },
@@ -498,7 +512,7 @@ describe('RetrievalController', () => {
     expect(repaired.lastPage?.trace.stage).toBe('repair_search')
     expect(repaired.budget.searchesUsed).toBe(2)
 
-    state = controller.assess(repaired, assessment({ nextAction: 'vector_search' }))
+    state = await controller.assess(repaired, assessment({ nextAction: 'vector_search' }))
     const dense = await controller.search(PRINCIPAL, state, {
       mode: 'dense',
       delta: { kind: 'semantic_hint', text: '缓存失效' },
@@ -511,7 +525,7 @@ describe('RetrievalController', () => {
   it('keeps immutable candidate history while later repair evidence can revise the active ranking', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(accumulatingProvider(), journal, undefined, {
+    const controller = new RetrievalController(accumulatingProvider(), journal, undefined, { policy: POLICY,
       now: () => NOW,
       id: ids,
       maxSearches: 3,
@@ -522,7 +536,7 @@ describe('RetrievalController', () => {
       requestedCount: 3,
     })
 
-    state = controller.assess(state, assessment({ nextAction: 'keyword_search' }))
+    state = await controller.assess(state, assessment({ nextAction: 'keyword_search' }))
     state = await controller.search(PRINCIPAL, state, {
       mode: 'keyword',
       delta: { kind: 'add_terms', terms: ['验证码'] },
@@ -530,7 +544,7 @@ describe('RetrievalController', () => {
     expect(state.candidateHistory.map(candidate => candidate.ref)).toEqual([CANDIDATE_REF, SECOND_CANDIDATE_REF])
     expect(state.candidates.map(candidate => candidate.ref)).toEqual([SECOND_CANDIDATE_REF, CANDIDATE_REF])
 
-    state = controller.assess(state, assessment({
+    state = await controller.assess(state, assessment({
       selectedCandidateRefs: [SECOND_CANDIDATE_REF],
       nextAction: 'vector_search',
     }))
@@ -545,28 +559,25 @@ describe('RetrievalController', () => {
       SECOND_CANDIDATE_REF, THIRD_CANDIDATE_REF, CANDIDATE_REF,
     ])
     expect(state.candidates.map(candidate => candidate.rank)).toEqual([1, 2, 3])
-    expect(controller.finalizeExhaustedEmptyResult(state)).toBe(state)
+    expect(await controller.finalizeExhaustedEmptyResult(state)).toBe(state)
 
-    state = controller.assess(state, assessment({
-      decision: 'sufficient',
-      coverage: 1,
-      candidateQuality: 0.9,
+    state = await controller.assess(state, assessment({
+      decision: 'accept_current_top_k',
       selectedCandidateRefs: [SECOND_CANDIDATE_REF, THIRD_CANDIDATE_REF, CANDIDATE_REF],
-      nextAction: 'finish',
-      stop: true,
+      nextAction: 'accept_current_top_k',
     }))
     state = controller.freeze(state, state.selectedCandidateRefs)
     expect(state).toMatchObject({
       phase: 'stopped',
-      termination: 'sufficient',
-      frozenEvidence: { complete: false, topKAccepted: true, sourceExhausted: false },
+      termination: 'top_k_accepted',
+      frozenEvidence: { complete: false, topKAccepted: true, resultPagesExhausted: true },
     })
   })
 
   it('returns the model-selected partial collection when repair search makes no progress', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(dynamicFacetProvider('bounded'), journal, undefined, {
+    const controller = new RetrievalController(dynamicFacetProvider('bounded'), journal, undefined, { policy: POLICY,
       now: () => NOW,
       id: ids,
       maxSearches: 4,
@@ -577,17 +588,17 @@ describe('RetrievalController', () => {
       query: '登录',
       requestedCount: 20,
     })
-    state = controller.assess(state, assessment({ nextAction: 'keyword_search' }))
+    state = await controller.assess(state, assessment({ nextAction: 'keyword_search' }))
     state = await controller.search(PRINCIPAL, state, {
       mode: 'keyword',
       delta: { kind: 'add_terms', terms: ['验证码'] },
     })
 
-    state = controller.assess(state, assessment({
-      decision: 'partial',
+    state = await controller.assess(state, assessment({
+      decision: 'return_partial',
       selectedCandidateRefs: [CANDIDATE_REF, SECOND_CANDIDATE_REF],
-      nextAction: 'finish',
-      stop: true,
+      nextAction: 'finish_partial',
+      evaluator: 'system',
     }))
     state = controller.freeze(state, state.selectedCandidateRefs)
     expect(state).toMatchObject({
@@ -604,7 +615,7 @@ describe('RetrievalController', () => {
   it('keeps exhaustive coverage open and rejects complete assessment or freeze while a cursor remains', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(paginatedProvider(), journal, undefined, {
+    const controller = new RetrievalController(paginatedProvider(), journal, undefined, { policy: POLICY,
       now: () => NOW,
       id: ids,
       maxSearches: 3,
@@ -616,29 +627,26 @@ describe('RetrievalController', () => {
     })
 
     expect(state.lastPage).toMatchObject({ completeness: 'bounded', nextCursor: 'cursor-page-2' })
-    expect(state.allowedActions.map(action => action.kind)).not.toContain('search_next')
-    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'open', evaluator: 'system' }))
+    expect(state.allowedActions.map(action => action.kind)).toContain('search_next')
+    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'unknown', evaluator: 'system' }))
     expect(state.progress.resolvedGaps).not.toContain('coverage')
-    expect(() => controller.assess(state, assessment({
-      decision: 'sufficient',
-      coverage: 1,
-      candidateQuality: 1,
-      selectedCandidateRefs: [CANDIDATE_REF],
-      gaps: state.gaps,
-      nextAction: 'finish',
-      stop: true,
-    }))).toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
-    expect(controller.finalizeExhaustedEmptyResult(state)).toBe(state)
-
-    state = controller.assess(state, assessment({
-      decision: 'partial',
+    await expect(controller.assess(state, assessment({
+      decision: 'accept_current_top_k',
       selectedCandidateRefs: [CANDIDATE_REF],
       gaps: [],
-      nextAction: 'finish',
-      stop: true,
+      nextAction: 'accept_current_top_k',
+    }))).rejects.toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
+    expect(await controller.finalizeExhaustedEmptyResult(state)).toBe(state)
+
+    state = await controller.assess(state, assessment({
+      decision: 'return_partial',
+      selectedCandidateRefs: [CANDIDATE_REF],
+      gaps: [],
+      nextAction: 'finish_partial',
+      evaluator: 'system',
     }))
-    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'open', evaluator: 'system' }))
-    expect(() => controller.freeze(state, [CANDIDATE_REF], 'sufficient'))
+    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'unknown', evaluator: 'system' }))
+    expect(() => controller.freeze(state, [CANDIDATE_REF], 'top_k_accepted'))
       .toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
 
     state = controller.freeze(state, [CANDIDATE_REF])
@@ -654,56 +662,79 @@ describe('RetrievalController', () => {
     const controller = new RetrievalController(paginatedProvider({
       completeness,
       ...(nextCursor === undefined ? {} : { nextCursor }),
-    }), journal, undefined, { now: () => NOW, id: ids })
+    }), journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
     const state = await controller.start(PRINCIPAL, { target: 'cohort_collection', query: '登录' })
 
-    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'open', evaluator: 'system' }))
-    expect(() => controller.assess(state, assessment({
-      decision: 'sufficient',
-      coverage: 1,
-      candidateQuality: 1,
+    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'unknown', evaluator: 'system' }))
+    await expect(controller.assess(state, assessment({
+      decision: 'accept_current_top_k',
       selectedCandidateRefs: [CANDIDATE_REF],
-      gaps: state.gaps,
-      nextAction: 'finish',
-      stop: true,
-    }))).toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
+      gaps: [],
+      nextAction: 'accept_current_top_k',
+    }))).rejects.toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
   })
 
-  it('allows an exhaustive collection to become complete only after the terminal page removes the cursor', async () => {
+  it('keeps semantic recall unknown even after the exact result pages are exhausted', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(paginatedProvider(), journal, undefined, {
+    const controller = new RetrievalController(paginatedProvider(), journal, undefined, { policy: POLICY,
       now: () => NOW,
       id: ids,
       maxSearches: 3,
     })
     let state = await controller.start(PRINCIPAL, { target: 'cohort_collection', query: '登录' })
-    expect(state.allowedActions.map(action => action.kind)).toEqual(['assess', 'read_state'])
-    state = controller.assess(state, assessment({ nextAction: 'continue_ranking' }))
+    expect(state.allowedActions.map(action => action.kind)).toEqual(['assess', 'search_next', 'repair_search', 'promote', 'read_state'])
+    state = await controller.assess(state, assessment({ nextAction: 'continue_ranking' }))
     expect(state.allowedActions.map(action => action.kind)).toContain('search_next')
     state = await controller.continueRanking(PRINCIPAL, state)
 
     expect(state.lastPage).toMatchObject({ completeness: 'exhaustive' })
     expect(state.lastPage?.nextCursor).toBeUndefined()
-    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'resolved', evaluator: 'system' }))
-    expect(state.progress.resolvedGaps).toContain('coverage')
+    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'unknown', evaluator: 'system' }))
+    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'boundary', status: 'resolved', evaluator: 'system' }))
 
-    expect(controller.finalizeExhaustedEmptyResult(state)).toBe(state)
-    state = controller.assess(state, assessment({
-      decision: 'sufficient',
-      coverage: 1,
-      candidateQuality: 1,
-      nextAction: 'finish',
-      stop: true,
+    expect(await controller.finalizeExhaustedEmptyResult(state)).toBe(state)
+    state = await controller.assess(state, assessment({
+      decision: 'return_partial',
+      nextAction: 'finish_partial',
+      evaluator: 'system',
     }))
     state = controller.freeze(state, state.selectedCandidateRefs)
-    expect(state).toMatchObject({ termination: 'sufficient', frozenEvidence: { complete: true, stoppingReason: 'sufficient' } })
+    expect(state).toMatchObject({ termination: 'partial', frozenEvidence: { complete: false, stoppingReason: 'partial', resultPagesExhausted: true, semanticRecallKnown: false } })
+  })
+
+  it('presents a useful current Top-K without freezing the retrieval or discarding the Provider cursor', async () => {
+    const ids = deterministicIds()
+    const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
+    const controller = new RetrievalController(paginatedProvider(), journal, undefined, { policy: POLICY,
+      now: () => NOW, id: ids, maxSearches: 3,
+    })
+    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡 跨域' })
+    state = await controller.assess(state, assessment({
+      decision: 'present_current_top_k',
+      nextAction: 'present_current_top_k',
+    }))
+
+    expect(state).toMatchObject({
+      phase: 'assessed', termination: 'active',
+      lastAssessment: { decision: 'present_current_top_k' },
+      lastPage: { nextCursor: 'cursor-page-2' },
+    })
+    expect(state.allowedActions.map(action => action.kind)).toEqual([
+      'assess', 'search_next', 'repair_search', 'promote', 'read_state',
+    ])
+    expect(() => controller.freeze(state, state.selectedCandidateRefs))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
+
+    state = await controller.continueRanking(PRINCIPAL, state)
+    expect(state.lastPage?.nextCursor).toBeUndefined()
+    expect(state.lastPage?.boundary?.resultPagesExhausted).toBe(true)
   })
 
   it('does not equate a nonempty count prefix with knowledge sufficiency and freezes the assessed selection', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(dynamicFacetProvider('bounded'), journal, undefined, { now: () => NOW, id: ids })
+    const controller = new RetrievalController(dynamicFacetProvider('bounded'), journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
     let state = await controller.start(PRINCIPAL, {
       target: 'ranked_cases',
       query: '账号问题',
@@ -711,60 +742,57 @@ describe('RetrievalController', () => {
     })
 
     expect(state.candidates.map(candidate => candidate.ref)).toEqual([CANDIDATE_REF, SECOND_CANDIDATE_REF])
-    expect(controller.finalizeExhaustedEmptyResult(state)).toBe(state)
-    state = controller.assess(state, assessment({
-      decision: 'sufficient',
-      coverage: 1,
-      candidateQuality: 0.9,
+    expect(await controller.finalizeExhaustedEmptyResult(state)).toBe(state)
+    state = await controller.assess(state, assessment({
+      decision: 'accept_current_top_k',
       selectedCandidateRefs: [SECOND_CANDIDATE_REF],
-      nextAction: 'finish',
-      stop: true,
+      nextAction: 'accept_current_top_k',
     }))
     const finalized = controller.freeze(state, state.selectedCandidateRefs)
     expect(finalized).toMatchObject({
       phase: 'stopped',
-      termination: 'sufficient',
-      gaps: [expect.objectContaining({ kind: 'coverage', status: 'open', evaluator: 'system' })],
+      termination: 'top_k_accepted',
+      gaps: expect.arrayContaining([expect.objectContaining({ kind: 'coverage', status: 'unknown', evaluator: 'system' })]),
       frozenEvidence: {
         complete: false,
         topKAccepted: true,
-        sourceExhausted: false,
+        resultPagesExhausted: true,
         resultMayBeIncomplete: true,
         candidates: [{ ref: SECOND_CANDIDATE_REF }],
-        remainingGaps: [expect.objectContaining({ kind: 'coverage', status: 'open' })],
+        remainingGaps: [expect.objectContaining({ kind: 'coverage', status: 'unknown' })],
       },
     })
     expect(createTicketResultCollection(finalized)).toMatchObject({
       complete: false,
       decisionFinalized: true,
       topKAccepted: true,
-      sourceExhausted: false,
+      resultPagesExhausted: true,
       resultMayBeIncomplete: true,
       nextPageAvailable: false,
       remainingGapKinds: ['coverage'],
     })
     expect(finalized.provenance).not.toHaveProperty('model')
-    expect(controller.finalizeExhaustedEmptyResult(finalized)).toBe(finalized)
+    expect(await controller.finalizeExhaustedEmptyResult(finalized)).toBe(finalized)
 
     const incompleteIds = deterministicIds()
     const incomplete = new RetrievalController(paginatedProvider({ completeness: 'bounded' }), new InMemoryRetrievalEventJournal({
       now: () => NOW,
       eventId: incompleteIds,
-    }), undefined, { now: () => NOW, id: incompleteIds })
+    }), undefined, { policy: POLICY, now: () => NOW, id: incompleteIds })
     const incompleteState = await incomplete.start(PRINCIPAL, {
       target: 'ranked_cases',
       query: '登录',
       requestedCount: 2,
     })
     expect(incompleteState.candidates).toHaveLength(1)
-    expect(incompleteState.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'open' }))
-    expect(incomplete.finalizeExhaustedEmptyResult(incompleteState)).toBe(incompleteState)
+    expect(incompleteState.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'unknown' }))
+    expect(await incomplete.finalizeExhaustedEmptyResult(incompleteState)).toBe(incompleteState)
   })
 
   it('returns an incomplete budget-exhausted collection when exhaustive paging cannot continue', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
-    const controller = new RetrievalController(paginatedProvider(), journal, undefined, {
+    const controller = new RetrievalController(paginatedProvider(), journal, undefined, { policy: POLICY,
       now: () => NOW,
       id: ids,
       maxRounds: 1,
@@ -774,20 +802,20 @@ describe('RetrievalController', () => {
     state = controller.recordModelRequest(state, {
       estimatedInputTokens: 100, serializationBytes: 400, wallClockElapsedMs: 0, accepted: true,
     })
-    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'open' }))
-    expect(state.allowedActions.map(action => action.kind)).toEqual(['assess', 'read_state'])
+    expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'unknown' }))
+    expect(state.allowedActions.map(action => action.kind)).toEqual(['assess', 'search_next', 'repair_search', 'promote', 'read_state'])
 
-    expect(() => controller.assess(state, assessment({
+    await expect(controller.assess(state, assessment({
       nextAction: 'continue_ranking',
       selectedCandidateRefs: [CANDIDATE_REF],
-      gaps: state.gaps,
-    }))).toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
-    state = controller.assess(state, assessment({
-      decision: 'partial',
-      nextAction: 'finish',
-      stop: true,
+      gaps: [],
+    }))).rejects.toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
+    state = await controller.assess(state, assessment({
+      decision: 'return_partial',
+      nextAction: 'finish_partial',
+      evaluator: 'system',
       selectedCandidateRefs: [CANDIDATE_REF],
-      gaps: state.gaps,
+      gaps: [],
     }))
     expect(state.allowedActions.map(action => action.kind)).toEqual(['freeze', 'read_state'])
     state = controller.freeze(state, [CANDIDATE_REF])
@@ -802,7 +830,7 @@ describe('RetrievalController', () => {
       stoppingReason: 'budget_exhausted',
       complete: false,
       tickets: [{ ref: CANDIDATE_REF }],
-      remainingGapKinds: ['coverage'],
+      remainingGapKinds: ['coverage', 'boundary'],
     })
   })
 })

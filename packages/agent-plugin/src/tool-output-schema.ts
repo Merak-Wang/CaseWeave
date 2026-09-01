@@ -40,6 +40,25 @@ const DELTA = {
         normalized: { type: 'string', required: true },
         task: { type: 'string', required: true },
         resultPolicy: { type: 'string', required: true },
+        fastQuery: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            schemaVersion: { type: 'integer', const: 1, required: true },
+            source: { type: 'string', const: 'direct_user', required: true },
+            rewriteApplied: { type: 'boolean', const: false, required: true },
+            keyword: {
+              type: 'object', additionalProperties: false, required: true,
+              properties: {
+                terms: { ...STRING_ARRAY, required: true },
+                operator: { type: 'string', required: true },
+              },
+            },
+            vector: {
+              type: 'object', additionalProperties: false, required: true,
+              properties: { text: { type: 'string', required: true } },
+            },
+          },
+        },
       },
     },
     candidateDelta: {
@@ -90,11 +109,35 @@ const DELTA = {
     boundary: {
       type: 'object', additionalProperties: false, required: true,
       properties: {
-        sourceExhausted: { type: 'boolean', required: true },
+        resultPagesExhausted: { type: 'boolean', required: true },
+        semanticRecallKnown: { type: 'boolean', required: true },
         nextPageAvailable: { type: 'boolean', required: true },
         decisionFinalized: { type: 'boolean', required: true },
         topKAccepted: { type: 'boolean', required: true },
         resultMayBeIncomplete: { type: 'boolean', required: true },
+      },
+    },
+    retrievalObservation: {
+      type: 'object', additionalProperties: false, required: true,
+      properties: {
+        channels: {
+          type: 'array', required: true,
+          items: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              channel: { type: 'string', required: true },
+              resultCount: { type: 'integer', required: true },
+              querySource: { type: 'string' },
+            },
+          },
+        },
+        authorizedCorpusSize: { type: 'integer' },
+        documentsAfterStructuredFilters: { type: 'integer' },
+        documentsEligibleForKeywordChannel: { type: 'integer' },
+        rankedHits: { type: 'integer' },
+        newCandidateCount: { type: 'integer', required: true },
+        cumulativeCandidateCount: { type: 'integer', required: true },
+        rankOverlap: { type: 'number', required: true },
       },
     },
     budget: { ...BUDGET, required: true },
@@ -108,14 +151,15 @@ const TERMINAL_RECEIPT = {
   type: 'object', additionalProperties: false,
   properties: {
     type: { type: 'string', const: 'ticket_collection', required: true },
-    schemaVersion: { type: 'integer', const: 2, required: true },
+    schemaVersion: { type: 'integer', const: 3, required: true },
     retrievalId: { type: 'string', required: true },
     packId: { type: 'string' },
     stoppingReason: { type: 'string', required: true },
     decisionFinalized: { type: 'boolean', const: true, required: true },
     complete: { type: 'boolean', required: true },
     topKAccepted: { type: 'boolean', required: true },
-    sourceExhausted: { type: 'boolean', required: true },
+    resultPagesExhausted: { type: 'boolean', required: true },
+    semanticRecallKnown: { type: 'boolean', required: true },
     resultMayBeIncomplete: { type: 'boolean', required: true },
     nextPageAvailable: { type: 'boolean', required: true },
     tickets: {
