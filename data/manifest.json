@@ -1,0 +1,154 @@
+{
+  "schemaVersion": "retrieval-agent.data.v1",
+  "defaultTicketProfile": "esft-summary-train-v1",
+  "transformationVersion": "retrieval-agent.esft-summary.v1",
+  "sourcePolicy": {
+    "authoritativeSource": "deepseek-ai/ESFT",
+    "pinnedRevision": "3746ca74410c92163cc521571dbd17579bfdc962",
+    "datasetLicenseReview": "dataset-specific-license-not-identified",
+    "redistribution": "disabled-pending-review",
+    "rawDataMayContainPii": true,
+    "providerMayReadOnlyRedactedNormalizedData": true,
+    "runtimeTicketSources": [
+      "deepseek-ai/ESFT"
+    ],
+    "fallbackSources": []
+  },
+  "layerPolicy": {
+    "L0": [
+      "ticket_id",
+      "source_dataset",
+      "source_version",
+      "source_split",
+      "domain",
+      "language",
+      "category",
+      "type",
+      "product",
+      "priority"
+    ],
+    "L1": [
+      "title"
+    ],
+    "L2": [
+      "summary",
+      "problem_description"
+    ],
+    "L3": [
+      "raw_dialogue",
+      "source_metadata",
+      "transformation"
+    ],
+    "note": "L3 is the redacted source payload, not the downloaded upstream row. Unverifiable time, region, and status fields remain null."
+  },
+  "generatedFieldPolicy": {
+    "ticket_id": "deterministic split plus upstream id",
+    "title": "first factual clause of the redacted official summary, capped at 40 Unicode code points",
+    "problem_description": "ordered concatenation of redacted customer turns",
+    "category": "deterministic telecom keyword rules",
+    "type": "constant 客服通话摘要",
+    "product": "deterministic broadband, fixed-line, or mobile keyword rule",
+    "tags": "deterministic multi-label telecom keyword rules",
+    "priority": "高 only when the official summary explicitly contains 加急 or 紧急; otherwise null"
+  },
+  "normalizationPolicy": {
+    "taskPromptRemoved": [
+      "请总结下面这段客服对话：",
+      "总结："
+    ],
+    "answerMapping": "train messages[assistant].content and eval answers[0] are normalized to summary; raw_answers[0] is a fallback only",
+    "answerFieldsRetained": false,
+    "dialogueMapping": "坐席 becomes agent; 客户 becomes customer; unresolvable speaker labels become unknown"
+  },
+  "rawSources": {
+    "train": {
+      "path": "raw/deepseek-esft/summary-train.jsonl",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/ESFT/3746ca74410c92163cc521571dbd17579bfdc962/datasets/train/summary.jsonl",
+      "bytes": 62785585,
+      "sha256": "313fe43f7d96fa79ea3828f4df3d4a7af28caa4e8360842f885107d57f21f92e"
+    },
+    "eval": {
+      "path": "raw/deepseek-esft/summary-eval.jsonl",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/ESFT/3746ca74410c92163cc521571dbd17579bfdc962/datasets/eval/summary.jsonl",
+      "bytes": 664823,
+      "sha256": "c03812f89e9154c8395b85aadb858b573319088b44ef1083c789981bb4ffd7bb"
+    }
+  },
+  "ticketProfiles": {
+    "esft-summary-train-v1": {
+      "purpose": "default-telecom-development-corpus",
+      "recordCount": 19587,
+      "paths": [
+        "tickets/esft/summary-train.jsonl"
+      ],
+      "sha256": [
+        "3675f33cf097fcf709bc9129a71d54b31019a1827f0eabe90a87e8d99bc93aef"
+      ]
+    }
+  },
+  "evaluations": {
+    "esft-summary-eval-v1": {
+      "recordCount": 100,
+      "path": "evals/esft-summary-v1/tickets.jsonl",
+      "sha256": "c89dbc61a96675e166329b3a1e7824dd0bded60550497866a18a24913b003248",
+      "indexedByDefault": false
+    }
+  },
+  "quality": {
+    "train": {
+      "categoryCounts": {
+        "费用与账单": 1313,
+        "号码与安全": 2146,
+        "宽带业务": 2137,
+        "流量与上网": 8711,
+        "其他通信客服": 320,
+        "渠道与应用": 153,
+        "套餐与合约": 985,
+        "投诉与服务": 256,
+        "网络与信号": 1212,
+        "销户与停复机": 2233,
+        "主副卡业务": 121
+      },
+      "turnCounts": {
+        "customer": 271566,
+        "agent": 284612,
+        "unknown": 19
+      },
+      "incompleteSegmentationCount": 19,
+      "piiRedactionCounts": {
+        "existing_mask": 18213,
+        "long_number": 5860,
+        "person_name": 19,
+        "context_number": 46,
+        "case_identifier": 20,
+        "bank_or_long_number": 187,
+        "address": 41,
+        "email": 16
+      }
+    },
+    "eval": {
+      "categoryCounts": {
+        "费用与账单": 10,
+        "号码与安全": 11,
+        "宽带业务": 13,
+        "流量与上网": 39,
+        "其他通信客服": 4,
+        "套餐与合约": 4,
+        "网络与信号": 5,
+        "销户与停复机": 14
+      },
+      "turnCounts": {
+        "customer": 1437,
+        "agent": 1495,
+        "unknown": 0
+      },
+      "incompleteSegmentationCount": 0,
+      "piiRedactionCounts": {
+        "context_number": 1,
+        "long_number": 27,
+        "existing_mask": 100,
+        "bank_or_long_number": 2
+      }
+    }
+  }
+}

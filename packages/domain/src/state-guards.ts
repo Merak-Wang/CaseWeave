@@ -40,12 +40,6 @@ export function emptyBudget(config: Pick<RetrievalBudgetState, 'maxRounds' | 'ma
   }
 }
 
-export function snapshotEvidenceFields(state: RetrievalState): readonly TicketEvidenceField[] {
-  return state.snapshot?.fieldCatalog
-    .filter(field => field.accessLevel === 'L2')
-    .map(field => field.key) ?? []
-}
-
 export function allowedAction(
   kind: RetrievalActionKind,
   candidateAllowlist: readonly TicketCandidateRef[] = [],

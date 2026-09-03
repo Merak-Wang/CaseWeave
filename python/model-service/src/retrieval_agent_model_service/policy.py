@@ -9,7 +9,7 @@ from .errors import ServiceError
 CANDIDATE_RANKING_VERSION = "candidate-ranking-v1"
 KNOWLEDGE_ASSESSMENT_VERSION = "knowledge-assessment-v1"
 _ACTION_KINDS = {
-    "search", "search_next", "repair_search", "assess", "promote", "request_clarification",
+    "search", "search_next", "repair_search", "assess", "read_l3_details", "request_clarification",
     "freeze", "read_state",
 }
 
@@ -181,16 +181,6 @@ def _can_search(state: dict[str, Any], no_progress_limit: int) -> bool:
     )
 
 
-def _can_promote(state: dict[str, Any]) -> bool:
-    budget = _object(state.get("budget"), "retrieval budget")
-    return (
-        _budget_number(budget, "promotionsUsed") < _budget_number(budget, "maxPromotions")
-        and _budget_number(budget, "modelStepsUsed", "roundsUsed") < _budget_number(budget, "maxRounds")
-        and _budget_number(budget, "wallClockElapsedMs", "latencyMs") < _budget_number(budget, "maxLatencyMs")
-        and _budget_number(budget, "evidenceTokensUsed") < _budget_number(budget, "maxEvidenceTokens")
-    )
-
-
 def _pages_exhausted(state: dict[str, Any]) -> bool:
     page = state.get("lastPage")
     if not isinstance(page, dict):
@@ -201,14 +191,31 @@ def _pages_exhausted(state: dict[str, Any]) -> bool:
     return page.get("completeness") == "exhaustive" and page.get("nextCursor") is None
 
 
-def _evidence_fields(state: dict[str, Any]) -> list[str]:
+def _l3_fields(state: dict[str, Any]) -> list[str]:
     snapshot = state.get("snapshot")
     if not isinstance(snapshot, dict):
+        return []
+    capabilities = snapshot.get("capabilities")
+    if not isinstance(capabilities, dict) or capabilities.get("l3DetailsRead") is not True:
         return []
     catalog = snapshot.get("fieldCatalog", [])
     if not isinstance(catalog, list):
         raise _invalid("snapshot field catalog is invalid.")
-    return [item["key"] for item in catalog if isinstance(item, dict) and item.get("accessLevel") == "L2" and isinstance(item.get("key"), str)]
+    return [
+        item["key"] for item in catalog
+        if isinstance(item, dict) and item.get("accessLevel") == "L3"
+        and item.get("valueKind") == "raw_json" and isinstance(item.get("key"), str)
+    ]
+
+
+def _depth_gap_candidate_refs(model_gaps: list[dict[str, Any]], candidate_refs: list[str]) -> list[str]:
+    requested = {
+        ref
+        for gap in model_gaps
+        if gap.get("kind") == "depth" and gap.get("status") in {"open", "unknown"}
+        for ref in gap.get("evidenceRefs", [])
+    }
+    return [ref for ref in candidate_refs if ref in requested]
 
 
 def _require_shape(assessment: dict[str, Any], evaluator: str, next_action: str) -> None:
@@ -261,7 +268,6 @@ def plan_knowledge_assessment(raw_state: Any, raw_assessment: Any, raw_config: A
         actions = [
             _action("assess", candidate_refs),
             *([_action("search_next"), _action("repair_search")] if search_open else []),
-            *([_action("promote", candidate_refs, _evidence_fields(state), int(_budget_number(budget, "maxEvidenceTokens") - _budget_number(budget, "evidenceTokensUsed")))] if _can_promote(state) else []),
             *([_action("request_clarification", candidate_refs)] if len(candidates) >= 2 else []),
             *actions,
         ]
@@ -295,6 +301,7 @@ def plan_knowledge_assessment(raw_state: Any, raw_assessment: Any, raw_config: A
         next_action = assessment.get("nextAction")
         _require_shape(assessment, "model", next_action)
         search_open = _can_search(state, no_progress_limit)
+        actions.insert(0, _action("assess", candidate_refs))
         if next_action == "continue_ranking":
             if not search_open or last_page is None or last_page.get("nextCursor") is None:
                 raise _invalid("Current Provider ranking cannot continue.", "INVALID_TRANSITION")
@@ -303,13 +310,15 @@ def plan_knowledge_assessment(raw_state: Any, raw_assessment: Any, raw_config: A
             if not search_open:
                 raise _invalid("Search budget is exhausted.", "INVALID_TRANSITION")
             actions.insert(0, _action("repair_search"))
-        elif next_action == "promote":
-            if not _can_promote(state) or not candidates:
-                raise _invalid("Current state cannot read more evidence.", "INVALID_TRANSITION")
-            actions.insert(0, _action(
-                "promote", candidate_refs, _evidence_fields(state),
-                int(_budget_number(budget, "maxEvidenceTokens") - _budget_number(budget, "evidenceTokensUsed")),
-            ))
+        elif next_action == "read_l3_details":
+            fields = _l3_fields(state)
+            depth_refs = _depth_gap_candidate_refs(model_gaps, candidate_refs)
+            if not fields or not depth_refs:
+                raise _invalid(
+                    "L3 detail requires an unresolved depth gap that cites current candidates.",
+                    "INVALID_TRANSITION",
+                )
+            actions.insert(0, _action("read_l3_details", depth_refs, fields))
         elif next_action == "clarify":
             if len(candidates) < 2:
                 raise _invalid("Current ranking cannot support differential clarification.", "INVALID_TRANSITION")

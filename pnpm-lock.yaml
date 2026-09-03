@@ -41,6 +41,9 @@ importers:
       '@retrieval-agent/retrieval-ranking':
         specifier: workspace:*
         version: link:packages/retrieval-ranking
+      '@retrieval-agent/retrieval-replay':
+        specifier: workspace:*
+        version: link:packages/retrieval-replay
       '@retrieval-agent/ticket-collection':
         specifier: workspace:*
         version: link:packages/ticket-collection
@@ -195,6 +198,9 @@ importers:
       '@retrieval-agent/retrieval-policy':
         specifier: workspace:*
         version: link:../retrieval-policy
+      '@retrieval-agent/retrieval-replay':
+        specifier: workspace:*
+        version: link:../retrieval-replay
 
   packages/dsh-compat:
     dependencies:
@@ -278,11 +284,13 @@ importers:
         specifier: workspace:*
         version: link:../contracts
 
-  packages/retrieval-ranking:
+  packages/retrieval-ranking: {}
+
+  packages/retrieval-replay:
     dependencies:
-      '@retrieval-agent/model-service-client':
+      '@retrieval-agent/contracts':
         specifier: workspace:*
-        version: link:../model-service-client
+        version: link:../contracts
 
   packages/ticket-collection:
     dependencies:
@@ -329,6 +337,9 @@ importers:
       '@retrieval-agent/product-api':
         specifier: workspace:*
         version: link:../product-api
+      '@retrieval-agent/retrieval-replay':
+        specifier: workspace:*
+        version: link:../retrieval-replay
       '@retrieval-agent/ticket-collection':
         specifier: workspace:*
         version: link:../ticket-collection

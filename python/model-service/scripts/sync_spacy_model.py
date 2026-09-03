@@ -39,7 +39,9 @@ def main() -> None:
 
         if zh_core_web_sm.__version__ != args.expected_version:
             raise SystemExit("uv-locked spaCy pipeline package has an unexpected version")
+        print(f"Loading spaCy pipeline {args.expected_version}...", flush=True)
         zh_core_web_sm.load().to_disk(temporary)
+        print(f"Validating serialized spaCy pipeline in {temporary}...", flush=True)
         if pipeline_version(temporary) != args.expected_version:
             raise SystemExit("serialized spaCy pipeline metadata is invalid")
         os.replace(temporary, destination)

@@ -176,8 +176,20 @@ def create_app(backend: Any, ranking_backend: RetrievalRankingBackend | None = N
         max_scan = options.get("maxScan")
         if isinstance(max_scan, bool) or not isinstance(max_scan, int) or max_scan < 1:
             raise ServiceError(400, "INVALID_REQUEST", "Ranking preparation maxScan is invalid.")
-        result = ranking_backend.prepare(value.get("documents"), value.get("profile"), max_scan)
+        result = ranking_backend.prepare(value.get("documents"), value.get("profile"), max_scan, request_id)
         return {"protocolVersion": RAG_PROTOCOL_VERSION, "requestId": request_id, **result}
+
+    @app.get("/v1/ranking/prepare/{request_id}")
+    def prepare_progress(request_id: str, request: Request) -> dict[str, Any]:
+        request.state.request_id = request_id
+        request.state.response_protocol = RAG_PROTOCOL_VERSION
+        if not request_id.strip() or len(request_id) > 200:
+            raise ServiceError(400, "INVALID_REQUEST", "Ranking preparation requestId is invalid.")
+        return {
+            "protocolVersion": RAG_PROTOCOL_VERSION,
+            "requestId": request_id,
+            "progress": ranking_backend.preparation_status(request_id),
+        }
 
     @app.post("/v1/ranking/rank")
     def rank(value: dict[str, Any], request: Request) -> dict[str, Any]:
@@ -220,8 +232,14 @@ def create_app(backend: Any, ranking_backend: RetrievalRankingBackend | None = N
     return app
 
 
-def serve(backend: Any, host: str, port: int, vector_cache_dir: Path | None = None) -> None:
+def serve(
+    backend: Any,
+    host: str,
+    port: int,
+    vector_cache_dir: Path | None = None,
+    checkpoint_every_batches: int = 8,
+) -> None:
     uvicorn.run(
-        create_app(backend, RetrievalRankingBackend(backend, vector_cache_dir)),
-        host=host, port=port, log_level="info",
+        create_app(backend, RetrievalRankingBackend(backend, vector_cache_dir, checkpoint_every_batches)),
+        host=host, port=port, log_level="info", access_log=False,
     )

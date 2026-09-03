@@ -4,6 +4,7 @@ import argparse
 import hashlib
 from pathlib import Path
 import re
+import sys
 
 from huggingface_hub import snapshot_download
 
@@ -35,9 +36,28 @@ def verify_files(destination: Path, files: list[tuple[Path, str | None]]) -> Non
         if expected_checksum is None:
             continue
         digest = hashlib.sha256()
+        total = path.stat().st_size
+        completed = 0
+        last_bucket = -1
         with path.open("rb") as stream:
             for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
                 digest.update(chunk)
+                completed += len(chunk)
+                percent = 100 if total == 0 else min(100, int(completed * 100 / total))
+                bucket = percent // 5
+                if sys.stderr.isatty():
+                    width = 24
+                    filled = min(width, round(percent / 100 * width))
+                    sys.stderr.write(
+                        f"\r\x1b[2KVerifying {relative_path} "
+                        f"[{'#' * filled}{'-' * (width - filled)}] {percent}%"
+                    )
+                    sys.stderr.flush()
+                elif bucket != last_bucket:
+                    print(f"Verifying {relative_path}: {percent}%", file=sys.stderr, flush=True)
+                    last_bucket = bucket
+        if sys.stderr.isatty():
+            sys.stderr.write("\n")
         if digest.hexdigest() != expected_checksum:
             raise SystemExit(f"downloaded file does not match the manifest checksum: {path}")
 
@@ -45,12 +65,19 @@ def verify_files(destination: Path, files: list[tuple[Path, str | None]]) -> Non
 def main() -> None:
     args = parser().parse_args()
     args.destination.parent.mkdir(parents=True, exist_ok=True)
+    print(
+        f"Downloading {args.repo_id}@{args.revision} to {args.destination} "
+        "(Hugging Face reports per-file progress below)...",
+        flush=True,
+    )
     snapshot_download(
         repo_id=args.repo_id,
         revision=args.revision,
         local_dir=args.destination,
     )
+    print("Download complete; verifying pinned files...", flush=True)
     verify_files(args.destination, args.file)
+    print("Pinned model dependency ready.", flush=True)
 
 
 if __name__ == "__main__":

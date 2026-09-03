@@ -64,11 +64,13 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
   if (request.mode !== undefined && !['keyword', 'dense', 'hybrid'].includes(request.mode)) {
     throw new RetrievalError('INVALID_REQUEST', '检索模式无效。')
   }
-  if (request.countPolicy !== undefined && !['explicit', 'adaptive'].includes(request.countPolicy)) {
+  if (request.countPolicy !== undefined && !['explicit', 'adaptive', 'exhaustive'].includes(request.countPolicy)) {
     throw new RetrievalError('INVALID_REQUEST', '候选数量策略无效。')
   }
-  if (request.countPolicy === 'explicit' && request.requestedCount === undefined) {
-    throw new RetrievalError('INVALID_REQUEST', '显式数量策略必须包含候选数量。')
+  const legacyAdaptiveLimit = request.queryContract !== undefined && request.queryContract.schemaVersion <= 5
+    && request.countPolicy === 'adaptive' && request.requestedCount !== undefined
+  if (!legacyAdaptiveLimit && ((request.countPolicy === 'explicit') !== (request.requestedCount !== undefined))) {
+    throw new RetrievalError('INVALID_REQUEST', '只有显式 Top-K 可以且必须声明用户级结果数量。')
   }
   for (const ambiguity of request.ambiguities ?? []) {
     if (!['reference', 'quantity', 'boundary', 'constraint', 'boolean_logic', 'task_type'].includes(ambiguity.kind)
@@ -79,12 +81,30 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
   for (const filter of request.filters ?? []) assertTicketFilter(filter)
   const contract = request.queryContract
   if (contract !== undefined) {
-    if (![1, 2, 3, 4, 5].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
+    const resultPolicyValid = ['explicit_top_k', 'adaptive_top_k', 'exhaustive_current_snapshot'].includes(contract.resultPolicy)
+    const legacyBoundedResultPolicy = contract.resultPolicy === 'explicit_top_k' || contract.resultPolicy === 'adaptive_top_k'
+    const effectiveCountPolicy = request.countPolicy ?? (request.requestedCount === undefined ? 'adaptive' : 'explicit')
+    const expectedResultPolicy = effectiveCountPolicy === 'explicit'
+      ? 'explicit_top_k'
+      : effectiveCountPolicy === 'exhaustive' ? 'exhaustive_current_snapshot' : 'adaptive_top_k'
+    const legacyLimitValid = contract.schemaVersion <= 5
+      && contract.resultLimit === undefined
+      && (contract.maxResults === undefined
+        ? !legacyBoundedResultPolicy
+        : legacyBoundedResultPolicy && contract.maxResults === request.requestedCount
+          && Number.isSafeInteger(contract.maxResults) && contract.maxResults >= 1 && contract.maxResults <= 100)
+    const currentLimitValid = (contract.schemaVersion === 6 || contract.schemaVersion === 7)
+      && contract.maxResults === undefined
+      && (contract.resultLimit === undefined
+        ? effectiveCountPolicy !== 'explicit' && request.requestedCount === undefined
+        : effectiveCountPolicy === 'explicit' && contract.resultLimit === request.requestedCount
+          && Number.isSafeInteger(contract.resultLimit) && contract.resultLimit >= 1 && contract.resultLimit <= 100)
+    if (![1, 2, 3, 4, 5, 6, 7].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
       || contract.normalized !== (request.retrievalQuery ?? request.query).normalize('NFKC').trim().replace(/\s+/gu, ' ')
-      || !['explicit_top_k', 'adaptive_top_k', 'exhaustive_current_snapshot'].includes(contract.resultPolicy)
+      || !resultPolicyValid || contract.resultPolicy !== expectedResultPolicy
       || !['telecom_ticket', 'general_ticket'].includes(contract.domain)
       || !['zh', 'en', 'und'].includes(contract.language)
-      || !Number.isSafeInteger(contract.maxResults) || contract.maxResults < 1 || contract.maxResults > 100
+      || (!legacyLimitValid && !currentLimitValid)
       || contract.compilerVersion.trim().length === 0) {
       throw new RetrievalError('INVALID_REQUEST', 'Query Contract 与检索请求不一致或包含无效字段。')
     }
@@ -116,13 +136,18 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
     }
     if (contract.fastQuery !== undefined) {
       const fast = contract.fastQuery
+      const keyword = fast.keyword
+      const keywordInvalid = keyword !== undefined && (
+        !['and', 'or'].includes(keyword.operator)
+        || keyword.terms.length < 1 || keyword.terms.length > 8
+        || keyword.terms.some(term => term.trim().length === 0 || term.length > 200)
+      )
       if (contract.schemaVersion < 3 || request.fastQuery === undefined
         || JSON.stringify(fast) !== JSON.stringify(request.fastQuery)
-        || fast.schemaVersion !== 1 || fast.source !== 'direct_user' || fast.rewriteApplied !== false
+        || ![1, 2].includes(fast.schemaVersion) || fast.source !== 'direct_user' || fast.rewriteApplied !== false
         || fast.vector.text !== request.query
-        || !['and', 'or'].includes(fast.keyword.operator)
-        || fast.keyword.terms.length < 1 || fast.keyword.terms.length > 8
-        || fast.keyword.terms.some(term => term.trim().length === 0 || term.length > 200)) {
+        || (fast.schemaVersion === 1 && keyword === undefined)
+        || keywordInvalid) {
         throw new RetrievalError('INVALID_REQUEST', '首轮快查询计划无效或已发生改写。')
       }
     }
@@ -131,8 +156,9 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
     }
     if (contract.nlp !== undefined) {
       const nlp = contract.nlp
-      const commonInvalid = nlp.keywordTerms.length < 1 || nlp.keywordTerms.length > 8
-        || JSON.stringify(nlp.keywordTerms) !== JSON.stringify(contract.fastQuery?.keyword.terms)
+      const commonInvalid = nlp.keywordTerms.length > 8
+        || (contract.fastQuery?.schemaVersion === 1 && nlp.keywordTerms.length < 1)
+        || JSON.stringify(nlp.keywordTerms) !== JSON.stringify(contract.fastQuery?.keyword?.terms ?? [])
         || nlp.tokens.length > 64 || nlp.triples.length > 8
       const legacyInvalid = nlp.schemaVersion === 1 && (
         contract.schemaVersion !== 4 || nlp.analyzerVersion.trim().length === 0 || nlp.analyzerVersion.length > 200
@@ -144,7 +170,7 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
           || triple.object.trim().length === 0 || triple.object.length > 200)
       )
       const spacyInvalid = nlp.schemaVersion === 2 && (
-        contract.schemaVersion !== 5 || nlp.engine !== 'spacy'
+        ![5, 6, 7].includes(contract.schemaVersion) || nlp.engine !== 'spacy'
         || [nlp.engineVersion, nlp.pipeline, nlp.pipelineVersion, nlp.lexiconVersion].some(value => value.trim().length === 0 || value.length > 200)
         || nlp.tokens.some((token, index) => token.surface.trim().length === 0 || token.surface.length > 200
           || !Number.isSafeInteger(token.start) || !Number.isSafeInteger(token.end) || token.start < 0 || token.end <= token.start

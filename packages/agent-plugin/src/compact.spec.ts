@@ -4,15 +4,15 @@ import {
   TicketEvidenceId,
   type RetrievalState,
 } from '@retrieval-agent/contracts'
-import { compactRetrievalState } from './compact.js'
+import { compactRetrievalState, compactTerminalReceipt } from './compact.js'
 
 describe('compact retrieval projection', () => {
   it('returns newly promoted evidence with stable aliases without leaking opaque refs', () => {
     const candidateRef = TicketCandidateRef('opaque-candidate-1')
     const evidenceId = TicketEvidenceId('opaque-evidence-1')
     const candidate = {
-      ref: candidateRef, rank: 1, displayId: 'TKT-1', title: '副卡无法使用', summary: '副卡无法使用',
-      sourceVersion: 'source-v1', snapshotId: 'snapshot-1', contentHash: 'hash-1', evidenceLevel: 'L1',
+      ref: candidateRef, rank: 1, displayId: 'TKT-1', title: '副卡无法使用', summary: '副卡解绑后仍共享流量。',
+      sourceVersion: 'source-v1', snapshotId: 'snapshot-1', contentHash: 'hash-1', evidenceLevel: 'L2',
       l0: {}, matchFragments: [],
     }
     const state = {
@@ -39,6 +39,7 @@ describe('compact retrieval projection', () => {
     const compact = compactRetrievalState(state)
     expect(compact).toMatchObject({
       candidateDelta: [],
+      activeCandidateCount: 1,
       evidenceDelta: [{
         alias: 'e1', candidateAlias: 'c1', field: 'problemDescription',
         text: '副卡解绑后仍共享流量。', trust: 'untrusted_ticket_evidence', truncated: false,
@@ -46,5 +47,30 @@ describe('compact retrieval projection', () => {
     })
     expect(JSON.stringify(compact)).not.toContain(String(candidateRef))
     expect(JSON.stringify(compact)).not.toContain(String(evidenceId))
+    expect(JSON.stringify(compact)).not.toContain('activeAliases')
+    expect(JSON.stringify(compact)).not.toContain('selectedAliases')
+  })
+
+  it('returns only the frozen count instead of replaying every terminal alias to the model', () => {
+    const state = {
+      retrievalId: 'retrieval-terminal', phase: 'stopped', termination: 'partial', gaps: [],
+      candidateHistory: [], candidates: [], promotedEvidence: [],
+      frozenEvidence: {
+        packId: 'pack-1', complete: false, topKAccepted: false, resultPagesExhausted: true,
+        semanticRecallKnown: false, resultMayBeIncomplete: true, nextPageAvailable: false,
+        candidates: [
+          { ref: 'opaque-1', displayId: 'TKT-1' },
+          { ref: 'opaque-2', displayId: 'TKT-2' },
+        ],
+      },
+      budget: {
+        roundsUsed: 1, searchesUsed: 2, promotionsUsed: 0, evidenceTokensUsed: 0, latencyMs: 10,
+      },
+    } as unknown as RetrievalState
+
+    const receipt = compactTerminalReceipt(state)
+    expect(receipt).toMatchObject({ schemaVersion: 4, selectedCount: 2 })
+    expect(JSON.stringify(receipt)).not.toContain('TKT-1')
+    expect(JSON.stringify(receipt)).not.toContain('opaque-1')
   })
 })

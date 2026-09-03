@@ -47,8 +47,13 @@ export async function syncSpacyDependency(options = {}) {
   const projectRoot = options.projectRoot ?? process.cwd()
   const environment = options.environment ?? process.env
   const dependency = options.dependency ?? await loadSpacyDependency(projectRoot, environment)
-  if (await ready(dependency)) return { dependency, reused: true }
+  options.onProgress?.({ phase: 'checking', detail: dependency.modelPath })
+  if (await ready(dependency)) {
+    options.onProgress?.({ phase: 'reused', detail: dependency.modelPath })
+    return { dependency, reused: true }
+  }
   const command = environment.RETRIEVAL_AGENT_UV_COMMAND?.trim() || (process.platform === 'win32' ? 'uv.exe' : 'uv')
+  options.onProgress?.({ phase: 'materializing', detail: `zh_core_web_sm ${dependency.pipelineVersion}` })
   execFileSync(command, [
     'run', '--frozen', '--project', 'python/model-service', '--group', 'runtime',
     'python', 'python/model-service/scripts/sync_spacy_model.py',
@@ -56,5 +61,6 @@ export async function syncSpacyDependency(options = {}) {
     '--expected-version', dependency.pipelineVersion,
   ], { cwd: projectRoot, env: environment, stdio: 'inherit' })
   if (!await ready(dependency)) throw new Error('spaCy pipeline synchronization did not produce the pinned model')
+  options.onProgress?.({ phase: 'ready', detail: dependency.modelPath })
   return { dependency, reused: false }
 }

@@ -15,10 +15,10 @@ function candidate(ref: string, displayId: string): TicketCandidate {
     sourceVersion: 'source-v1',
     snapshotId: TicketSnapshotId('snapshot-v1'),
     contentHash: `hash-${ref}`,
-    evidenceLevel: 'L1',
+    evidenceLevel: 'L2',
     rank: 1,
     title: displayId,
-    summary: displayId,
+    summary: `${displayId} 摘要`,
     l0: {},
     matchFragments: [],
   }

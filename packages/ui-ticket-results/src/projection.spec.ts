@@ -61,7 +61,7 @@ describe('candidate node projection', () => {
       },
     }
     const event = makeRetrievalEvent({
-      eventId: 'event-clarification', retrievalId, sequence: 1, occurredAt: '2026-08-27T00:00:01.000Z',
+      eventId: 'event-clarification', retrievalId, sequence: 0, occurredAt: '2026-08-27T00:00:01.000Z',
       type: 'retrieval/state-recorded', data: { state: awaiting },
     })
 

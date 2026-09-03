@@ -148,13 +148,19 @@ function receiptMatchesDependency(receipt, dependency) {
     && record(receipt.files) !== undefined
 }
 
-async function sha256(path) {
+async function sha256(path, onProgress) {
   const digest = createHash('sha256')
-  for await (const chunk of createReadStream(path)) digest.update(chunk)
+  const totalBytes = (await stat(path)).size
+  let completedBytes = 0
+  for await (const chunk of createReadStream(path)) {
+    digest.update(chunk)
+    completedBytes += chunk.length
+    onProgress?.({ completedBytes, totalBytes })
+  }
   return digest.digest('hex')
 }
 
-export async function validateModelDependency(dependency) {
+export async function validateModelDependency(dependency, options = {}) {
   const missing = missingModelDependencyFiles(dependency)
   if (missing.length > 0) {
     return { ready: false, missing, receiptReused: false }
@@ -171,7 +177,19 @@ export async function validateModelDependency(dependency) {
       && cached?.size === metadata.size
       && cached?.mtimeMs === metadata.mtimeMs
     if (file.sha256 !== undefined && !cachedIdentityMatches) {
-      const actual = await sha256(file.absolutePath)
+      options.onProgress?.({
+        dependency: dependency.id,
+        phase: 'verifying',
+        detail: file.path,
+        completedBytes: 0,
+        totalBytes: metadata.size,
+      })
+      const actual = await sha256(file.absolutePath, value => options.onProgress?.({
+        dependency: dependency.id,
+        phase: 'verifying',
+        detail: file.path,
+        ...value,
+      }))
       if (actual !== file.sha256) {
         throw new Error(`${dependency.id} has an invalid SHA-256 for ${file.path}; remove the invalid file and synchronize the pinned dependency again`)
       }
@@ -237,22 +255,30 @@ export async function syncModelDependencies(options = {}) {
   const downloaded = []
   const reused = []
   for (const dependency of activeDependencies) {
-    const initial = await validateModelDependency(dependency)
+    options.onProgress?.({ dependency: dependency.id, phase: 'checking', detail: dependency.targetPath })
+    const initial = await validateModelDependency(dependency, { onProgress: options.onProgress })
     if (initial.ready) {
       reused.push(dependency.id)
+      options.onProgress?.({ dependency: dependency.id, phase: 'reused', detail: dependency.targetPath })
       continue
     }
     if (!enabled(environment.RETRIEVAL_AGENT_AUTO_DOWNLOAD_MODEL, true)) {
       throw new Error(`${dependency.id} is missing ${initial.missing.map(file => file.path).join(', ')} under ${dependency.targetPath}; enable automatic model downloads or provide the pinned files`)
     }
     console.log(`Synchronizing model dependency ${dependency.id} from ${dependency.source.repoId}@${dependency.source.revision}...`)
+    options.onProgress?.({
+      dependency: dependency.id,
+      phase: 'downloading',
+      detail: `${dependency.source.repoId}@${dependency.source.revision}`,
+    })
     const synchronize = options.synchronize ?? syncOne
     await synchronize(dependency, projectRoot, environment)
-    const completed = await validateModelDependency(dependency)
+    const completed = await validateModelDependency(dependency, { onProgress: options.onProgress })
     if (!completed.ready) {
       throw new Error(`${dependency.id} synchronization completed without ${completed.missing.map(file => file.path).join(', ')}`)
     }
     downloaded.push(dependency.id)
+    options.onProgress?.({ dependency: dependency.id, phase: 'ready', detail: dependency.targetPath })
   }
   return { plan, downloaded, reused }
 }

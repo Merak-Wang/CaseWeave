@@ -20,13 +20,12 @@ export function candidateRefForAlias(state: RetrievalState, alias: string): Tick
 }
 
 function candidateDelta(candidate: TicketCandidate, alias: string) {
-  const summary = candidate.summary.trim() === candidate.title.trim() ? undefined : candidate.summary
   return {
     alias,
     rank: candidate.rank,
     displayId: candidate.displayId,
     title: candidate.title,
-    ...(summary === undefined ? {} : { summary }),
+    summary: candidate.summary,
     l0: {
       ...(candidate.l0.createdAt === undefined ? {} : { createdAt: candidate.l0.createdAt }),
       ...(candidate.l0.status === undefined ? {} : { status: candidate.l0.status }),
@@ -116,9 +115,7 @@ export function compactRetrievalState(state: RetrievalState, includeCurrentCandi
     },
     candidateDelta: candidates,
     evidenceDelta,
-    activeAliases: state.candidates.map(candidate => aliases.get(candidate.ref)!),
-    selectedAliases: state.selectedCandidateRefs.map(ref => aliases.get(ref)).filter((alias): alias is string => alias !== undefined),
-    excludedAliasCount: state.excludedCandidateRefs.length,
+    activeCandidateCount: state.candidates.length,
     gaps: { system: systemGaps, semantic: semanticGaps },
     allowedActions: state.allowedActions.map(action => action.kind),
     boundary: boundary(state),
@@ -146,10 +143,9 @@ export function compactRetrievalState(state: RetrievalState, includeCurrentCandi
 /** Compact terminal receipt; full collection is projected from durable state for UI/export. */
 export function compactTerminalReceipt(state: RetrievalState): unknown {
   if (state.phase !== 'stopped') return compactRetrievalState(state)
-  const aliases = candidateAliases(state)
   return {
     type: 'ticket_collection',
-    schemaVersion: 3,
+    schemaVersion: 4,
     retrievalId: state.retrievalId,
     packId: state.frozenEvidence?.packId,
     stoppingReason: state.termination,
@@ -160,10 +156,7 @@ export function compactTerminalReceipt(state: RetrievalState): unknown {
     semanticRecallKnown: state.frozenEvidence?.semanticRecallKnown ?? false,
     resultMayBeIncomplete: state.frozenEvidence?.resultMayBeIncomplete ?? true,
     nextPageAvailable: state.frozenEvidence?.nextPageAvailable ?? false,
-    tickets: (state.frozenEvidence?.candidates ?? []).map(candidate => ({
-      alias: aliases.get(candidate.ref)!,
-      displayId: candidate.displayId,
-    })),
+    selectedCount: state.frozenEvidence?.candidates.length ?? 0,
     remainingGapKinds: state.gaps
       .filter(gap => gap.status === 'open' || gap.status === 'unknown')
       .map(gap => gap.kind),

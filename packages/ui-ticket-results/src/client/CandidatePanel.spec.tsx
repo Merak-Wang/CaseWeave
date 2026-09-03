@@ -26,10 +26,10 @@ function data(): TicketCandidateNode {
     sourceVersion: 'source-version-with-a-long-identifier',
     snapshotId,
     contentHash: `hash-${index + 1}`,
-    evidenceLevel: 'L1' as const,
+    evidenceLevel: 'L2' as const,
     rank: index + 1,
     title: `工单标题 ${index + 1}`,
-    summary: `工单标题 ${index + 1}`,
+    summary: `工单摘要 ${index + 1}`,
     l0: { status: '已解决', priority: '高', region: '广东', createdAt: '2026-08-20T00:00:00.000Z' },
     matchFragments: [],
   }))
@@ -96,28 +96,32 @@ function data(): TicketCandidateNode {
 }
 
 describe('CandidatePanel density', () => {
-  it('shows the first five rows, a continuation control, and the zero-rewrite AND interpretation', () => {
+  it('starts collapsed and shows only the user query plus extracted keywords', () => {
     const html = renderToStaticMarkup(<CandidatePanel {...({ node: { data: data() }, sessionId: 'session-ui' } as CandidatePanelProps)} />)
-    expect(html).toContain('候选工单（集合） · 6 条')
+    expect(html).toContain('候选工单 · 6 条')
     expect(html).toContain('aria-expanded="false"')
     expect(html).toContain('原始查询')
-    expect(html).toContain('关键词同时包含')
+    expect(html).toContain('提取关键词')
     expect(html).toContain('副卡')
     expect(html).toContain('跨域')
-    expect(html).toContain('工单编号 TKT-1')
+    expect(html).not.toContain('系统理解')
+    expect(html).not.toContain('规范化理解')
+    expect(html).not.toContain('向量使用原始问题，不改写')
+    expect(html).not.toContain('融合候选')
+    expect(html).not.toContain('匹配：向量通道')
+    expect(html).not.toContain('工单编号 TKT-1')
     expect(html).not.toContain('工单编号 TKT-6')
-    expect(html).toContain('继续显示 1 条')
     expect(html).toContain('当前 Top-K 已接受；语义召回范围仍未知。')
     expect(html).not.toContain('继续检索下一批')
   })
 
-  it('offers Provider-cursor continuation while the current Top-K is presented but not frozen', () => {
+  it('labels an active page as loaded candidates rather than a fixed first batch', () => {
     const current = data()
     const html = renderToStaticMarkup(<CandidatePanel {...({
       node: { data: { ...current, result: undefined } }, sessionId: 'session-ui',
     } as CandidatePanelProps)} />)
-    expect(html).toContain('首批候选 · 6 条')
-    expect(html).toContain('继续检索下一批')
-    expect(html).toContain('当前检索表达式仍有后续候选')
+    expect(html).toContain('候选工单 · 已加载 6 条')
+    expect(html).toContain('当前检索表达式仍有后续候选，检索尚未完成。')
+    expect(html).not.toContain('首批候选')
   })
 })

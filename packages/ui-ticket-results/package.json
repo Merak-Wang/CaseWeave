@@ -27,6 +27,7 @@
   "dependencies": {
     "@retrieval-agent/contracts": "workspace:*",
     "@retrieval-agent/product-api": "workspace:*",
+    "@retrieval-agent/retrieval-replay": "workspace:*",
     "@retrieval-agent/ticket-collection": "workspace:*"
   },
   "peerDependencies": {

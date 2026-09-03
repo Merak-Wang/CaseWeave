@@ -21,3 +21,9 @@ artifacts/private/
 models/
 .playwright-cli/
 .vscode/
+data/raw/deepseek-esft/*.jsonl
+data/raw/deepseek-esft/*.part
+data/tickets/esft/*.jsonl
+data/tickets/esft/*.part
+data/evals/esft-summary-v1/tickets.jsonl
+data/evals/esft-summary-v1/*.part

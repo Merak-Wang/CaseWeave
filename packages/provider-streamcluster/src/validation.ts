@@ -96,7 +96,7 @@ export function assertCapabilities(value: unknown, providerId: string): Validate
     mismatch('StreamCluster 只读 Provider 握手失败。')
   }
   const capabilities = object(envelope.capabilities, 'capabilities')
-  for (const name of ['snapshot', 'search', 'evidenceRead', 'detailRead', 'status'] as const) {
+  for (const name of ['snapshot', 'search', 'evidenceRead', 'detailRead', 'l3DetailsRead', 'status'] as const) {
     if (capabilities[name] !== true) mismatch('StreamCluster 缺少必需的只读能力。')
   }
   if (capabilities.keywordSearch !== true || capabilities.rankingTrace !== true
@@ -158,7 +158,7 @@ export function assertSnapshot(
   const expiresAt = snapshot.expiresAt === undefined ? undefined : canonicalInstant(snapshot.expiresAt, 'snapshot.expiresAt')
   if (expiresAt !== undefined && Date.parse(expiresAt) <= Date.parse(createdAt)) mismatch('StreamCluster 快照过期时间无效。')
   const capabilities = object(snapshot.capabilities, 'snapshot capabilities')
-  for (const name of ['exhaustive', 'pagination', 'evidencePromotion', 'detailRead', 'exportRead', 'denseSearch', 'hybridFusion', 'reranking'] as const) {
+  for (const name of ['exhaustive', 'pagination', 'evidencePromotion', 'detailRead', 'l3DetailsRead', 'exportRead', 'denseSearch', 'hybridFusion', 'reranking'] as const) {
     if (typeof capabilities[name] !== 'boolean') mismatch('StreamCluster 快照能力声明无效。')
   }
   if (capabilities.keywordSearch !== true || (capabilities.hybridFusion && !capabilities.denseSearch)) {
@@ -185,6 +185,7 @@ export function assertSnapshot(
       pagination: capabilities.pagination as boolean,
       evidencePromotion: capabilities.evidencePromotion as boolean,
       detailRead: capabilities.detailRead as boolean,
+      l3DetailsRead: capabilities.l3DetailsRead as boolean,
       exportRead: capabilities.exportRead as boolean,
       keywordSearch: true,
       denseSearch: capabilities.denseSearch as boolean,
@@ -196,7 +197,7 @@ export function assertSnapshot(
 
 function assertCandidate(value: unknown, snapshotId: TicketSnapshotId): TicketCandidate {
   const candidate = object(value, 'candidate')
-  if (candidate.snapshotId !== snapshotId || candidate.evidenceLevel !== 'L1') mismatch('StreamCluster 候选身份无效。')
+  if (candidate.snapshotId !== snapshotId || candidate.evidenceLevel !== 'L2') mismatch('StreamCluster 候选身份无效。')
   const l0 = object(candidate.l0, 'candidate.l0')
   for (const name of ['createdAt', 'updatedAt', 'resolvedAt', 'type', 'category', 'product', 'component', 'region', 'status', 'priority', 'language'] as const) {
     optionalText(l0[name], `candidate.l0.${name}`, 2_048)
@@ -282,7 +283,7 @@ function assertTrace(
   if (!['keyword', 'dense', 'hybrid', 'keyword_fallback'].includes(String(trace.executedMode))) mismatch('StreamCluster 执行检索模式无效。')
   if ((query.mode === 'keyword' && trace.executedMode !== 'keyword')
     || (query.mode === 'dense' && trace.executedMode !== 'dense')
-    || (query.mode === 'hybrid' && trace.executedMode !== 'hybrid' && trace.executedMode !== 'keyword_fallback')) {
+    || (query.mode === 'hybrid' && !['hybrid', 'keyword_fallback', 'dense'].includes(String(trace.executedMode)))) {
     mismatch('StreamCluster 执行检索模式与请求不一致。')
   }
   text(trace.strategyVersion, 'ranking strategy version', 512)
@@ -292,7 +293,11 @@ function assertTrace(
   if (channelNames.size !== channels.length) mismatch('StreamCluster 排名 trace 通道声明无效。')
   if ((trace.executedMode === 'keyword' || trace.executedMode === 'keyword_fallback' || trace.executedMode === 'hybrid')
     && !channelNames.has('keyword')) mismatch('StreamCluster 词面或 Hybrid trace 缺少关键词通道。')
-  if (trace.executedMode === 'dense' && channelNames.has('keyword')) mismatch('StreamCluster Dense trace 包含关键词通道。')
+  const attemptedKeyword = channels.find(channel => channel.channel === 'keyword')
+  if (trace.executedMode === 'dense' && channelNames.has('keyword')
+    && (query.mode !== 'hybrid' || attemptedKeyword?.resultCount !== 0)) {
+    mismatch('StreamCluster Dense trace 包含产生候选的关键词通道。')
+  }
   if (trace.executedMode === 'hybrid' && !channelNames.has('vector')) mismatch('StreamCluster Hybrid trace 缺少向量通道。')
   if (trace.executedMode === 'dense' && !channelNames.has('vector')) mismatch('StreamCluster Dense trace 缺少向量通道。')
   if (trace.executedMode === 'keyword' && channelNames.has('vector')) mismatch('StreamCluster Keyword trace 包含向量通道。')
@@ -385,6 +390,11 @@ export function assertSearchPage(
   }
   if (!['exhaustive', 'bounded', 'unknown'].includes(String(page.completeness))) mismatch('StreamCluster 搜索完整性无效。')
   const nextCursor = optionalText(page.nextCursor, 'search nextCursor', 8_192)
+  if (query.countPolicy === 'explicit' && (query.requestedCount === undefined
+    || candidates.some(candidate => candidate.rank > query.requestedCount!)
+    || (nextCursor !== undefined && candidates.at(-1)?.rank === query.requestedCount))) {
+    mismatch('StreamCluster 搜索响应越过了用户显式 Top-K 结果边界。')
+  }
   const appliedFilters = assertAppliedFilters(page.appliedFilters, query.filters)
   const warnings = stringArray(page.warnings, 'search warnings')
   const trace = assertTrace(page.trace, query, options.stage, candidates, remote)

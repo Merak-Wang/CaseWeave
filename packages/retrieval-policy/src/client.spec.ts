@@ -3,7 +3,7 @@ import type { TicketCandidate, TicketCandidateRef } from '@retrieval-agent/contr
 import { RetrievalPolicyClient } from './client.js'
 import { RAG_POLICY_PROTOCOL_VERSION } from './protocol.js'
 
-const CANDIDATE = { ref: 'c1' as TicketCandidateRef, rank: 1, displayId: 'INC-1', title: 'title', summary: 'summary' } as TicketCandidate
+const CANDIDATE = { ref: 'c1' as TicketCandidateRef, rank: 1, displayId: 'INC-1', title: 'title' } as TicketCandidate
 
 describe('RetrievalPolicyClient', () => {
   it('validates immutable history and rejects a forged active candidate', async () => {

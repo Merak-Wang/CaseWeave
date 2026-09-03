@@ -20,7 +20,7 @@ export interface TrustedPrincipalContext {
 export type TicketTaskTarget = 'ranked_cases' | 'constrained_list' | 'cohort_collection' | 'resolution_path'
 /** Ranked retrieval intent, independent from the target set semantics. */
 export type TicketRetrievalIntent = 'known_item' | 'analogous_case'
-export type TicketCountPolicy = 'explicit' | 'adaptive' | 'provider_default'
+export type TicketCountPolicy = 'explicit' | 'adaptive' | 'exhaustive'
 export interface TicketQueryAmbiguity {
   readonly kind: 'reference' | 'quantity' | 'boundary' | 'constraint' | 'boolean_logic' | 'task_type'
   readonly text: string
@@ -48,7 +48,7 @@ export interface TicketQueryNlpTraceV4 {
   }[]
 }
 
-/** Replayable spaCy POS/dependency provenance used by Query Contract v5. */
+/** Replayable spaCy POS/dependency provenance used by Query Contract v5-v6. */
 export interface TicketQueryNlpTraceV5 {
   readonly schemaVersion: 2
   readonly engine: 'spacy'
@@ -105,35 +105,44 @@ export interface TicketQueryLogic {
  * Immutable zero-rewrite plan for the first low-cost search. The keyword and
  * vector channels consume direct-user material and run against one snapshot.
  */
-export interface TicketFastQueryPlan {
-  readonly schemaVersion: 1
+interface TicketFastQueryPlanBase {
   readonly source: 'direct_user'
   readonly rewriteApplied: false
-  readonly keyword: {
-    readonly terms: readonly string[]
-    readonly operator: 'and' | 'or'
-  }
   readonly vector: {
     /** Exact direct-user query; normalization and Agent repairs are later stages. */
     readonly text: string
   }
 }
+
+interface TicketFastKeywordQuery {
+  readonly terms: readonly string[]
+  readonly operator: 'and' | 'or'
+}
+
+/** v1 always has a keyword channel; v2 may skip it when no usable surface term exists. */
+export type TicketFastQueryPlan =
+  | TicketFastQueryPlanBase & { readonly schemaVersion: 1; readonly keyword: TicketFastKeywordQuery }
+  | TicketFastQueryPlanBase & { readonly schemaVersion: 2; readonly keyword?: TicketFastKeywordQuery }
 /**
  * Harness-owned interpretation of one direct-user query. This is persisted
  * before Provider access so a retrieval can explain exactly which task,
  * language, domain, entities, constraints, and result-set policy it used.
  */
 export interface TicketQueryContract {
-  /** Versions 1-4 remain readable; version 5 records spaCy POS/dependency provenance. */
-  readonly schemaVersion: 1 | 2 | 3 | 4 | 5
+  /** Versions 1-6 remain readable; version 7 makes task and result policy orthogonal. */
+  readonly schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7
   readonly original: string
   readonly normalized: string
   readonly task: TicketTaskTarget
   readonly resultPolicy: 'explicit_top_k' | 'adaptive_top_k' | 'exhaustive_current_snapshot'
-  readonly maxResults: number
+  /** Legacy v1-v5 result bound. Version 6+ writers must not emit this field. */
+  readonly maxResults?: number
+  /** Version 6+ user-level explicit Top-K limit. Adaptive and exhaustive contracts omit it. */
+  readonly resultLimit?: number
   readonly domain: 'telecom_ticket' | 'general_ticket'
   readonly language: 'zh' | 'en' | 'und'
   readonly entities: readonly TicketQueryEntity[]
+  /** Empty on the direct-user fast path; accepted adaptive repairs are copied here for replay. */
   readonly constraints: readonly TicketFilter[]
   readonly logic?: TicketQueryLogic
   readonly fastQuery?: TicketFastQueryPlan
@@ -152,8 +161,8 @@ export interface TicketFilter {
   readonly value: string
 }
 
-/** A controller-admitted modification to an existing query. */
-export type TicketQueryDelta =
+/** One controller-admitted modification to an existing query. */
+export type TicketQueryChange =
   | { readonly kind: 'add_terms'; readonly terms: readonly string[] }
   | { readonly kind: 'replace_terms'; readonly terms: readonly string[]; readonly operator: 'and' | 'or' }
   | { readonly kind: 'exclude_terms'; readonly terms: readonly string[] }
@@ -162,16 +171,23 @@ export type TicketQueryDelta =
   | { readonly kind: 'semantic_hint'; readonly text: string }
   | { readonly kind: 'rewrite_semantic_query'; readonly text: string }
 
+/** One atomic query repair, or several changes validated before a single Provider search. */
+export type TicketQueryDelta = TicketQueryChange | {
+  readonly kind: 'batch'
+  readonly changes: readonly TicketQueryChange[]
+}
+
 /** Initial consumer request before provider defaults are applied. */
 export interface TicketRetrievalRequest {
   readonly target: TicketTaskTarget
   /** Exact direct-user text retained for provenance. */
   readonly query: string
-  /** Retrieval-only text after deterministic directive/constraint extraction. */
+  /** Retrieval-only text after deterministic task/count directives; business filters are adaptive repairs. */
   readonly retrievalQuery?: string
   readonly retrievalIntent?: TicketRetrievalIntent
+  /** User-level result policy. Omission means adaptive; it is independent from task target. */
   readonly requestedCount?: number
-  readonly countPolicy?: Extract<TicketCountPolicy, 'explicit' | 'adaptive'>
+  readonly countPolicy?: TicketCountPolicy
   readonly mode?: TicketRetrievalMode
   readonly filters?: readonly TicketFilter[]
   readonly ambiguities?: readonly TicketQueryAmbiguity[]
@@ -187,7 +203,8 @@ export interface TicketRetrievalSpec {
   readonly originalQuery: string
   readonly normalizedQuery: string
   readonly retrievalIntent?: TicketRetrievalIntent
-  readonly requestedCount: number
+  /** User-level explicit Top-K limit. Adaptive and exhaustive specifications omit it. */
+  readonly requestedCount?: number
   readonly countPolicy: TicketCountPolicy
   readonly mode: TicketRetrievalMode
   readonly filters: readonly TicketFilter[]
@@ -222,7 +239,10 @@ export interface TicketSnapshot {
     readonly exhaustive: boolean
     readonly pagination: boolean
     readonly evidencePromotion: boolean
+    /** Host-facing L2 detail projection. */
     readonly detailRead: boolean
+    /** Dedicated, reauthorized single-ticket L3 source read. */
+    readonly l3DetailsRead: boolean
     readonly exportRead: boolean
     readonly keywordSearch: true
     readonly denseSearch: boolean
@@ -264,14 +284,14 @@ export interface TicketL0 {
   readonly additionalFields?: readonly TicketDisplayField[]
 }
 
-/** L1 result returned after authorization filtering. */
+/** Authorized L1 title plus L2 summary projection returned as one candidate. */
 export interface TicketCandidate {
   readonly ref: TicketCandidateRef
   readonly displayId: string
   readonly sourceVersion: string
   readonly snapshotId: TicketSnapshotId
   readonly contentHash: string
-  readonly evidenceLevel: 'L1'
+  readonly evidenceLevel: 'L2'
   readonly rank: number
   readonly title: string
   readonly summary: string
@@ -359,6 +379,32 @@ export interface TicketDetailResult {
   readonly warnings: readonly string[]
 }
 
+/**
+ * Reauthorized L3 source value for exactly one current candidate. The source
+ * envelope and payload stay out of L1 candidates and L2 evidence segments.
+ */
+export interface TicketL3Detail {
+  readonly candidateRef: TicketCandidateRef
+  readonly displayId: string
+  readonly sourceVersion: string
+  readonly contentHash: string
+  readonly source: {
+    readonly datasetId: string
+    readonly datasetVersion: string
+    readonly schemaVersion: string
+    readonly recordId: string
+  }
+  readonly rawPayload: Readonly<Record<string, unknown>>
+  readonly trust: 'untrusted_ticket_evidence'
+}
+
+export interface TicketL3DetailsResult {
+  readonly snapshotId: TicketSnapshotId
+  readonly requestedCandidateRefs: readonly TicketCandidateRef[]
+  readonly details: readonly TicketL3Detail[]
+  readonly warnings: readonly string[]
+}
+
 export interface TicketProviderStatus {
   readonly providerId: string
   readonly ready: boolean
@@ -412,7 +458,7 @@ export interface NormalizedTicketRecord {
   readonly additionalFields?: readonly TicketDisplayField[]
   /** Provider-side values for source-specific filters. */
   readonly filterValues?: Readonly<Record<string, string | readonly string[]>>
-  /** Source-specific L2 values, including an explicitly requested raw view when policy allows it. */
+  /** Source-specific L2 values. L3 raw payloads are read only from `rawSource`. */
   readonly additionalEvidence?: Readonly<Record<string, readonly string[]>>
   /** Descriptors contributed by the source adapter. */
   readonly fieldCatalog?: readonly TicketFieldDescriptor[]

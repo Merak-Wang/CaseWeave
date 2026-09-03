@@ -4,7 +4,6 @@ import { performance } from 'node:perf_hooks'
 import { ModelServiceClient } from '@retrieval-agent/model-service-client'
 import { LocalTicketProvider, parseTicketDatasetJsonl } from '@retrieval-agent/provider-local'
 import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
-import { bundledFixtureRoot } from '@retrieval-agent/bundle/startup'
 import { loadModelDependencyManifest } from './model-dependencies.mjs'
 
 const baseUrlArgument = process.argv.find(argument => argument.startsWith('--base-url='))
@@ -30,15 +29,10 @@ const gateway = new ModelServiceClient({
 })
 await gateway.ready()
 
-const fixtureRoot = bundledFixtureRoot()
-const records = (await Promise.all([
-  'tickets.jsonl',
-  'public/fcc-1000-seed-20260825.jsonl',
-  'public/bitext-1000-seed-20260825.jsonl',
-].map(async path => parseTicketDatasetJsonl(await readFile(join(fixtureRoot, path), 'utf8'))))).flat()
-const cases = (await readFile(join(process.cwd(), 'python', 'evals', 'data', 'legacy-bronze-v1', 'cases.jsonl'), 'utf8'))
+const records = parseTicketDatasetJsonl(await readFile(join(process.cwd(), 'data', 'tickets', 'synthetic', 'legacy-bronze-v1.jsonl'), 'utf8'))
+const cases = (await readFile(join(process.cwd(), 'data', 'evals', 'legacy-bronze-v1', 'cases.jsonl'), 'utf8'))
   .split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line))
-if (records.length !== 2_040 || cases.length !== 162) throw new Error('development corpus or Bronze diagnostic set is incomplete')
+if (records.length !== 40 || cases.length !== 162) throw new Error('legacy synthetic corpus or Bronze diagnostic set is incomplete')
 
 const now = new Date()
 const principal = {

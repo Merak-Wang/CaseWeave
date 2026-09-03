@@ -15,7 +15,7 @@ export type CandidatePanelProps = PropsRuntime<'conversation.chat.node', 'ticket
 
 const STATUS_LABELS: Record<TicketCandidateNode['status'], string> = {
   searching: '检索中',
-  results: '候选已返回',
+  results: '已加载候选',
   empty: '无结果',
   partial: '部分结果',
   snapshot_invalid: '快照失效',
@@ -61,17 +61,9 @@ function boundaryText(data: TicketCandidateNode): string {
     ? '当前检索表达式已到底，并且有外部证据证明语义召回边界。'
     : '当前检索表达式没有更多结果；这不证明相关工单已全部找出。'
   if (data.result?.topKAccepted === true) return '当前 Top-K 已接受；语义召回范围仍未知。'
-  if (data.nextPageAvailable) return '当前检索表达式仍有后续候选，Agent 可继续加载。'
+  if (data.nextPageAvailable) return '当前检索表达式仍有后续候选，检索尚未完成。'
   if (data.completeness === 'bounded') return '结果来自限定检索范围，可能不完整。'
   return data.completeness === 'unknown' ? '数据源未声明完整范围。' : '正在确认检索范围。'
-}
-
-function matchReason(candidate: TicketCandidate): string | undefined {
-  const channels = candidate.matchSignals?.channels ?? []
-  if (channels.includes('keyword') && channels.includes('vector')) return '关键词 + 向量双通道'
-  if (channels.includes('keyword')) return '关键词通道'
-  if (channels.includes('vector')) return '向量通道'
-  return undefined
 }
 
 function candidateMetadata(candidate: TicketCandidate): readonly { readonly label: string; readonly value: string }[] {
@@ -138,7 +130,7 @@ function DetailBody({
 /** Deterministic collection renderer. Detail clicks always go through the trusted Product Host. */
 export function CandidatePanel({ node, sessionId }: CandidatePanelProps) {
   const data = node.data
-  const [collectionExpanded, setCollectionExpanded] = useState(true)
+  const [collectionExpanded, setCollectionExpanded] = useState(false)
   const [visibleCount, setVisibleCount] = useState(5)
   const [expanded, setExpanded] = useState<ReadonlySet<TicketCandidateRef>>(() => new Set())
   const [detailStates, setDetailStates] = useState<ReadonlyMap<TicketCandidateRef, DetailLoadState>>(() => new Map())
@@ -151,8 +143,8 @@ export function CandidatePanel({ node, sessionId }: CandidatePanelProps) {
     ? '当前结果已就绪'
     : STATUS_LABELS[data.status]
   const heading = terminal
-    ? `候选工单（集合） · ${data.candidates.length} 条`
-    : `首批候选 · ${data.candidates.length} 条`
+    ? `候选工单 · ${data.candidates.length} 条`
+    : `候选工单 · 已加载 ${data.candidates.length} 条`
 
   useEffect(() => {
     continueInFlight.current = false
@@ -215,30 +207,23 @@ export function CandidatePanel({ node, sessionId }: CandidatePanelProps) {
           </div>
           <span className={css.headingActions}>
             <span className={terminal ? css.statusFinal : css.status}>{statusLabel}</span>
-            {terminal ? collectionExpanded ? <IconChevronUpOutline14 /> : <IconChevronDownOutline14 /> : null}
+            {data.candidates.length === 0
+              ? null
+              : collectionExpanded ? <IconChevronUpOutline14 /> : <IconChevronDownOutline14 />}
           </span>
         </div>
         <p className={css.query}><span>原始查询</span>{data.querySummary || '—'}</p>
         <p className={css.logic}>
-          <span>系统理解</span>
-          <b>{data.queryLogic?.operator === 'and'
-            ? '关键词同时包含'
-            : data.queryLogic?.operator === 'or' ? '关键词任一命中' : '按主题检索'}</b>
-          {(data.fastQuery?.keyword.terms ?? []).map(term => <em key={term}>{term}</em>)}
-          <span>向量使用原始问题，不改写</span>
+          <span>提取关键词</span>
+          {(data.fastQuery?.keyword?.terms ?? []).length === 0
+            ? <em>—</em>
+            : data.fastQuery!.keyword!.terms.map(term => <em key={term}>{term}</em>)}
         </p>
-        {data.normalizedQuery === undefined ? null : (
-          <p className={css.query}><span>规范化理解</span>{data.normalizedQuery}</p>
-        )}
         {data.queryAmbiguities === undefined || data.queryAmbiguities.length === 0 ? null : (
           <p className={css.noticeInline}>待确认：{data.queryAmbiguities.map(item => item.text).join('；')}</p>
         )}
         <div className={css.context} aria-label="检索上下文">
           <span>{boundaryText(data)}</span>
-          {data.boundary === undefined ? null : <span>
-            授权 {data.boundary.authorizedCorpusSize} · 结构过滤后 {data.boundary.documentsAfterStructuredFilters}
-            {' · '}关键词候选 {data.boundary.documentsEligibleForKeywordChannel} · 融合候选 {data.boundary.rankedHits}
-          </span>}
         </div>
       </button>
 
@@ -272,16 +257,13 @@ export function CandidatePanel({ node, sessionId }: CandidatePanelProps) {
                       : isExpanded ? '收起详细信息' : '查询详细信息'}</span>
                   </span>
                   <strong className={css.title}>{candidate.title}</strong>
-                  {candidate.summary.trim() === candidate.title.trim() || candidate.summary.trim().length === 0
+                  {candidate.summary.trim().length === 0 || candidate.summary.trim() === candidate.title.trim()
                     ? null
                     : <span className={css.summary}>{candidate.summary}</span>}
                   {metadata.length === 0 ? null : <span className={css.metadata}>
                     {metadata.map(item => <span key={`${item.label}-${item.value}`}><b>{item.label}</b>{item.value}</span>)}
                   </span>}
                   <span className={css.source} title={candidate.sourceVersion}>来源 {compactVersion(candidate.sourceVersion)}</span>
-                  {matchReason(candidate) === undefined ? null : (
-                    <span className={css.matchReason}>匹配：{matchReason(candidate)}</span>
-                  )}
                 </span>
                 <span className={css.rowChevron}>{isExpanded ? <IconChevronUpOutline14 /> : <IconChevronDownOutline14 />}</span>
               </button>

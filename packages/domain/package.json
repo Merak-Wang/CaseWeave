@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@retrieval-agent/contracts": "workspace:*",
+    "@retrieval-agent/retrieval-replay": "workspace:*",
     "@retrieval-agent/retrieval-policy": "workspace:*"
   },
   "publishConfig": { "access": "public" },

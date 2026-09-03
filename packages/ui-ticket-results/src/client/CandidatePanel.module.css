@@ -254,11 +254,6 @@
   font: var(--dsw-font-xs-13);
 }
 
-.matchReason {
-  color: var(--dsw-alias-state-business-primary);
-  font: var(--dsw-font-xs-13);
-}
-
 .moreButton {
   width: 100%;
   padding: 11px 16px;

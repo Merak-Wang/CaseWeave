@@ -204,7 +204,7 @@ try {
 
   const installer = join(profile, 'node_modules', '@retrieval-agent', 'bundle', 'lib', 'install-cli.js')
   const uninstaller = join(profile, 'node_modules', '@retrieval-agent', 'bundle', 'lib', 'uninstall-cli.js')
-  run(process.execPath, [installer, '--home', home], { cwd: profile })
+  run(process.execPath, [installer, '--home', home, '--data-root', join(root, 'data')], { cwd: profile })
   await seedBrowserReviewModelSettings(home)
 
   const dshBin = join(runner, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -241,7 +241,6 @@ import { MODEL_SERVICE_PROTOCOL_VERSION, ModelServiceClient } from '@retrieval-a
 import { LocalTicketProvider, parseTicketDatasetJsonl } from '@retrieval-agent/provider-local'
 import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
 import { FixturePrincipalProviderService, LocalTicketProviderService } from '@retrieval-agent/bundle'
-import { bundledFixtureRoot } from '@retrieval-agent/bundle/startup'
 
 installDshSessionCompatibility()
 const session = Session.create(SessionId('clean-install-session'))
@@ -252,13 +251,12 @@ const principal = {
   purpose: 'ticket_retrieval', attributes: { group: ['admin'], region: ['cn'], role: ['administrator'], environment: ['development'] },
   issuedAt: '2026-08-27T00:00:00.000Z', expiresAt: '2026-08-28T00:00:00.000Z',
 }
-const fixtureRoot = bundledFixtureRoot()
-const records = (await Promise.all([
-  'tickets.jsonl',
-  'public/fcc-1000-seed-20260825.jsonl',
-  'public/bitext-1000-seed-20260825.jsonl',
-].map(async path => parseTicketDatasetJsonl(await readFile(join(fixtureRoot, path), 'utf8'))))).flat()
-if (records.length !== 2040) throw new Error('packed development corpus is incomplete')
+const installedDataPath = join(process.env.DSH_HOME, 'retrieval-agent', 'data', 'default.jsonl')
+const records = parseTicketDatasetJsonl(await readFile(installedDataPath, 'utf8'))
+if (records.length !== 19587) throw new Error('installed ESFT development corpus is incomplete')
+if (records.some(record => record.rawSource?.datasetId !== 'deepseek-ai/ESFT')) {
+  throw new Error('installed corpus contains a non-ESFT source')
+}
 
 const dimensions = 32
 function fakeEmbedding(text) {
@@ -283,7 +281,8 @@ function rankingProfileVersion(profile) {
     version: 'quick-hybrid-v1', embeddingIdentity: profile.embeddingIdentity ?? null,
     rerankerIdentity: profile.rerankerIdentity ?? null, embeddingInstruction: profile.embeddingInstruction,
     rerankerInstruction: profile.rerankerInstruction, embeddingBatchSize: profile.embeddingBatchSize,
-    minimumDenseScore: profile.minimumDenseScore, fusion: profile.fusion, bm25f: profile.bm25f,
+    minimumDenseScore: profile.minimumDenseScore, denseTopK: profile.denseTopK,
+    fusion: profile.fusion, bm25f: profile.bm25f,
     rerankerEnabled: profile.rerankerEnabled, rerankTopN: profile.rerankTopN,
   }
   return 'quick-hybrid-v1:' + createHash('sha256').update(stable(identity)).digest('hex').slice(0, 16)
@@ -337,23 +336,67 @@ const modelServer = createHttpServer(async (request, response) => {
       const documentVector = fakeEmbedding([document.title, document.summary, document.body, document.metadata].join(' '))
       return { documentId: document.id, score: documentVector.reduce((sum, value, index) => sum + value * queryVector[index], 0) }
     }).sort((left, right) => right.score - left.score || left.documentId.localeCompare(right.documentId))
-    const hits = ranked.map((item, index) => ({
+    const dense = ranked
+      .filter(item => item.score >= body.profile.minimumDenseScore)
+      .slice(0, body.profile.denseTopK)
+    const denseHits = dense.map((item, index) => ({
       documentId: item.documentId, rank: index + 1, score: item.score,
       channels: [{ channel: 'vector', rank: index + 1, score: item.score }],
     }))
+    const keywordQuery = body.query.keywordQuery
+    const keywordEligible = keywordQuery === undefined ? [] : body.documents.filter(document => {
+      const searchable = [document.title, document.summary, document.body, document.metadata]
+        .join('\\n').normalize('NFKC').toLowerCase()
+      const matches = keywordQuery.terms.map(term => searchable.includes(term.normalize('NFKC').trim().toLowerCase()))
+      return keywordQuery.operator === 'and' ? matches.every(Boolean) : matches.some(Boolean)
+    }).sort((left, right) => left.id.localeCompare(right.id))
+    const keywordHits = keywordEligible.map((document, index) => ({
+      documentId: document.id, rank: index + 1, score: 1,
+      channels: [{ channel: 'keyword', rank: index + 1, score: 1 }],
+    }))
+    const hybridUsesKeyword = body.query.mode === 'hybrid' && keywordHits.length > 0
+    const fused = new Map()
+    if (hybridUsesKeyword) {
+      for (const [channel, channelHits, weight] of [
+        ['keyword', keywordHits, body.profile.fusion.keywordWeight],
+        ['vector', denseHits, body.profile.fusion.vectorWeight],
+      ]) {
+        for (const hit of channelHits) {
+          const row = fused.get(hit.documentId) ?? { documentId: hit.documentId, score: 0, channels: [] }
+          row.score += weight / (body.profile.fusion.rankConstant + hit.rank)
+          row.channels.push({ channel, rank: hit.rank, score: hit.score })
+          fused.set(hit.documentId, row)
+        }
+      }
+    }
+    const hits = body.query.mode === 'keyword' ? keywordHits
+      : body.query.mode === 'dense' || !hybridUsesKeyword ? denseHits
+        : [...fused.values()].sort((left, right) => right.score - left.score || left.documentId.localeCompare(right.documentId))
+          .map((hit, index) => ({ ...hit, rank: index + 1 }))
+    const executedMode = body.query.mode === 'hybrid' && !hybridUsesKeyword ? 'dense' : body.query.mode
+    const channels = [
+      ...(body.query.mode === 'dense' || keywordQuery === undefined ? [] : [{
+        channel: 'keyword', implementation: 'clean-install-keyword', version: 'v1',
+        resultCount: keywordHits.length, elapsedMs: 0,
+      }]),
+      ...(body.query.mode === 'keyword' ? [] : [{
+        channel: 'vector', implementation: 'clean-install-dense', version: 'v1',
+        resultCount: denseHits.length, elapsedMs: 0,
+      }]),
+    ]
     send(200, {
       protocolVersion: 'retrieval-agent.rag.v1', requestId: body.requestId,
       result: {
         hits,
         execution: {
-          requestedMode: body.query.mode, executedMode: body.query.mode,
+          requestedMode: body.query.mode, executedMode,
           strategyVersion: rankingProfileVersion(body.profile),
-          channels: [{
-            channel: 'vector', implementation: 'clean-install-fake', version: 'v1',
-            resultCount: hits.length, elapsedMs: 0,
-          }],
+          channels,
+          ...(hybridUsesKeyword ? { fusion: { method: 'weighted_rrf', version: 'clean-install-rrf-v1', ...body.profile.fusion } } : {}),
         },
-        scanned: body.documents.length, keywordEligible: 0, rankedHits: hits.length, warnings: [],
+        scanned: body.documents.length, keywordEligible: keywordEligible.length, rankedHits: hits.length,
+        warnings: body.query.mode !== 'hybrid' || hybridUsesKeyword ? []
+          : [keywordQuery === undefined ? 'keyword_unavailable_dense_only' : 'keyword_no_hits_dense_only'],
       },
       elapsedMs: 0,
     })
@@ -404,11 +447,7 @@ try {
     groups: ['admin'], regions: ['cn'], developmentAdmin: true,
   })
   await serviceCtx.plugin(LocalTicketProviderService, {
-    dataPath: join(fixtureRoot, 'tickets.jsonl'),
-    additionalDataPaths: [
-      join(fixtureRoot, 'public/fcc-1000-seed-20260825.jsonl'),
-      join(fixtureRoot, 'public/bitext-1000-seed-20260825.jsonl'),
-    ],
+    dataPath: installedDataPath,
     providerId: 'clean-install-cordis-v1',
     modelServiceBaseUrl,
     embeddingModel: 'clean-install-embedding',
@@ -418,10 +457,11 @@ try {
   await serviceCtx.plugin(RetrievalAgentService, { retrievalPolicyBaseUrl: modelServiceBaseUrl })
   const serviceAgent = { session: Session.create(SessionId('clean-install-cordis-agent')) }
   const serviceState = await serviceCtx.retrievalAgent.start(serviceAgent, {
-    target: 'ranked_cases', query: '主副卡解绑后仍共享流量', requestedCount: 5,
+    target: 'ranked_cases', query: '主副卡解绑后仍共享流量', requestedCount: 5, countPolicy: 'explicit',
   })
-  if (!serviceState.candidates.some(candidate => candidate.displayId === 'TKT-0029')) {
-    throw new Error('packed Cordis service path missed the migrated Bronze qrel')
+  if (serviceState.candidates.length === 0
+    || serviceState.candidates.some(candidate => !candidate.displayId.startsWith('ESFT-SUMMARY-TRAIN-'))) {
+    throw new Error('packed Cordis service path did not return ESFT development candidates')
   }
 } finally {
   await serviceCtx.fiber.dispose()
@@ -446,7 +486,10 @@ const controller = new RetrievalController(provider, journal, undefined, {
   now: () => now, id: nextId, retrievalPolicyBaseUrl: modelServiceBaseUrl,
 })
 const state = await controller.start(principal, { target: 'ranked_cases', query: '主副卡解绑后仍共享流量' })
-if (!state.candidates.some(candidate => candidate.displayId === 'TKT-0029')) throw new Error('packed vertical slice missed the migrated Bronze qrel')
+if (state.candidates.length === 0
+  || state.candidates.some(candidate => !candidate.displayId.startsWith('ESFT-SUMMARY-TRAIN-'))) {
+  throw new Error('packed vertical slice did not return ESFT development candidates')
+}
 if (journal.read(RetrievalId(state.retrievalId)).length === 0) throw new Error('packed event journal is empty')
 const replayedSession = Session.create(SessionId('clean-install-replayed'), session.events)
 const replayedEvents = new SessionRetrievalEventJournal(replayedSession).read(RetrievalId(state.retrievalId))
@@ -458,12 +501,18 @@ if (replayedState === undefined || JSON.stringify(replayedState) !== JSON.string
   await new Promise(resolvePromise => modelServer.close(resolvePromise))
 }
 `, 'utf8')
-  run(process.execPath, [probe], { cwd: profile })
+  run(process.execPath, [probe], { cwd: profile, env: { ...process.env, DSH_HOME: home } })
 
   const installedPreset = await readFile(join(home, '.agent-presets', 'retrieval-agent', 'agent.cordis.yml'), 'utf8')
   if (!installedPreset.includes('@retrieval-agent/bundle/agent')) throw new Error('installed preset is incomplete')
   const installedCorpus = JSON.parse(await readFile(join(home, 'retrieval-agent', 'data', 'manifest.json'), 'utf8'))
-  if (installedCorpus.recordCount !== 2040) throw new Error('installed development corpus is incomplete')
+  if (
+    installedCorpus.ticketProfiles[installedCorpus.defaultTicketProfile].recordCount !== 19587
+    || installedCorpus.sourcePolicy.authoritativeSource !== 'deepseek-ai/ESFT'
+    || installedCorpus.sourcePolicy.fallbackSources.length !== 0
+  ) {
+    throw new Error('installed ESFT-only development corpus is incomplete')
+  }
 
   await verifyWebStartup(dshBin, home, root)
 
@@ -478,7 +527,7 @@ if (replayedState === undefined || JSON.stringify(replayedState) !== JSON.string
   const afterRemove = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8'))
   if (afterRemove.dsh.profile.bundles.includes('@retrieval-agent/bundle')) throw new Error('bundle remained active after plugin removal')
 
-  console.log(`clean install verified against published @deepseek-ai/dsh ${pinnedDshVersion}: pack, install, compose, Web startup, Host route, 2,040-record corpus search, Session replay, assets, remove`)
+  console.log(`clean install verified against published @deepseek-ai/dsh ${pinnedDshVersion}: pack, install, compose, Web startup, Host route, 19,587-record ESFT corpus search, Session replay, assets, remove`)
 } finally {
   const resolvedTemp = resolve(tempRoot)
   const resolvedOsTemp = resolve(tmpdir())

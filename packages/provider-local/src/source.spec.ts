@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import { LocalTicketProvider } from './provider.js'
+import { rankingDocuments } from './search-projection.js'
 import { normalizePublicSnapshotTicket } from './source.js'
 import { testHybridRanker } from '../../../tests/support/fake-model-gateway.js'
 
@@ -21,19 +22,24 @@ describe('source-native public snapshot adapter', () => {
     const snapshot = await provider.openSnapshot(PRINCIPAL)
     expect(snapshot.fieldCatalog).toContainEqual(expect.objectContaining({ key: 'source.raw', accessLevel: 'L3' }))
     const spec = provider.resolve({
-      target: 'ranked_cases', query: 'unmapped photon',
+      target: 'ranked_cases', query: 'unmapped photon', requestedCount: 5, countPolicy: 'explicit',
       filters: [{ field: 'source.dataset', op: 'eq', value: 'example/full' }],
     })
     const page = await provider.search(PRINCIPAL, snapshot.snapshotId, spec, { topK: 5, maxScan: 10, stage: 'baseline' })
     expect(page.candidates).toHaveLength(1)
     expect(JSON.stringify(page.candidates[0])).not.toContain('unmapped-photon-extension')
-    const raw = await provider.readDetails(PRINCIPAL, {
+    await expect(provider.readDetails(PRINCIPAL, {
       snapshotId: snapshot.snapshotId,
       candidateRefs: [page.candidates[0]!.ref],
       fields: ['source.raw'],
       purpose: 'inline_detail',
+    })).rejects.toThrow(/不允许的详情字段/u)
+    const raw = await provider.readL3Details(PRINCIPAL, {
+      snapshotId: snapshot.snapshotId,
+      candidateRefs: [page.candidates[0]!.ref],
+      purpose: 'model_ticket_load',
     })
-    expect(raw.details[0]?.fields['source.raw']?.join('\n')).toContain('unmapped-photon-extension')
+    expect(JSON.stringify(raw.details[0]!.rawPayload)).toContain('unmapped-photon-extension')
   })
 
   it('rejects dynamic filters that the source catalog did not declare', () => {
@@ -42,7 +48,29 @@ describe('source-native public snapshot adapter', () => {
       title: 'Example', summary: 'Example record', custom_filter: 'hidden',
     })])
     expect(() => provider.resolve({
-      target: 'ranked_cases', query: 'Example', filters: [{ field: 'source.custom_filter', op: 'eq', value: 'hidden' }],
+      target: 'ranked_cases', query: 'Example', requestedCount: 5, countPolicy: 'explicit', filters: [{ field: 'source.custom_filter', op: 'eq', value: 'hidden' }],
     })).toThrow(/不支持筛选字段/u)
+  })
+
+  it('maps redacted ESFT fields to L0-L3 without indexing transformation metadata', () => {
+    const record = normalizePublicSnapshotTicket({
+      ticket_id: 'ESFT-SUMMARY-TRAIN-000001', source_dataset: 'deepseek-ai/ESFT', source_version: 'commit-1',
+      source_kind: 'public_research_corpus', source_split: 'train', domain: 'telecom_customer_service',
+      title: '副卡流量费用争议', summary: '用户反映副卡流量费用有疑义。', problem_description: '副卡产生了额外流量费用。',
+      product: '移动通信', category: '流量与上网', type: '客服通话摘要', language: 'zh-CN',
+      pii_redaction_status: 'redacted', raw_dialogue: [{ speaker: 'customer', text: '请核实副卡流量。' }],
+      transformation: { internal_marker: 'must-not-enter-search-projection' },
+    })
+
+    expect(record.piiRedactionStatus).toBe('redacted')
+    expect(record.product).toBe('移动通信')
+    expect(record.additionalFields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'source.split', value: 'train' }),
+      expect.objectContaining({ key: 'source.domain', value: 'telecom_customer_service' }),
+    ]))
+    const document = rankingDocuments([record])[0]!
+    expect(document.body).toContain('请核实副卡流量')
+    expect(document.body).not.toContain('must-not-enter-search-projection')
+    expect(record.rawSource?.payload).toHaveProperty('transformation')
   })
 })

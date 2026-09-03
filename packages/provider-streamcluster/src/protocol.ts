@@ -1,9 +1,11 @@
 import type {
   DetailReadRequest,
   EvidenceReadRequest,
+  L3DetailsReadRequest,
   RetrievalErrorCode,
   TicketDetailResult,
   TicketEvidenceResult,
+  TicketL3DetailsResult,
   TicketProviderStatus,
   TicketRetrievalSpec,
   TicketSearchOptions,
@@ -13,7 +15,7 @@ import type {
   TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
 
-export const STREAMCLUSTER_PROTOCOL_VERSION = 'retrieval-agent.streamcluster.v3' as const
+export const STREAMCLUSTER_PROTOCOL_VERSION = 'retrieval-agent.streamcluster.v5' as const
 
 export interface StreamClusterCapabilitiesResponse {
   readonly protocolVersion: typeof STREAMCLUSTER_PROTOCOL_VERSION
@@ -24,6 +26,7 @@ export interface StreamClusterCapabilitiesResponse {
     readonly search: true
     readonly evidenceRead: true
     readonly detailRead: true
+    readonly l3DetailsRead: true
     readonly status: true
     readonly keywordSearch: true
     readonly denseSearch: boolean
@@ -76,6 +79,17 @@ export interface ReadTicketDetailsParams {
 export interface ReadTicketDetailsResponse {
   readonly protocolVersion: typeof STREAMCLUSTER_PROTOCOL_VERSION
   readonly result: TicketDetailResult
+}
+
+export interface ReadTicketL3DetailsParams {
+  readonly protocolVersion: typeof STREAMCLUSTER_PROTOCOL_VERSION
+  readonly principal: TrustedPrincipalContext
+  readonly request: L3DetailsReadRequest
+  readonly traceId?: string
+}
+export interface ReadTicketL3DetailsResponse {
+  readonly protocolVersion: typeof STREAMCLUSTER_PROTOCOL_VERSION
+  readonly result: TicketL3DetailsResult
 }
 
 export interface ReadProviderStatusParams {

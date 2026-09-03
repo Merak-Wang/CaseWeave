@@ -86,8 +86,9 @@ class TestHybridRanker implements RetrievalRanker {
   rank(documents: readonly RankingDocument[], query: RankingQuery, options: { readonly maxScan: number; readonly signal?: AbortSignal }) {
     if (documents.length > options.maxScan) return Promise.reject(new Error('scan limit'))
     const allowed = documents.filter(document => !query.excludedTerms.some(term => text(document).includes(term.toLocaleLowerCase())))
-    const keywordDocuments = allowed.filter(document => keywordEligible(document, query))
-    let keyword = channelHits(keywordDocuments, query, 'keyword')
+    const keywordEnabled = query.mode !== 'dense' && !(query.fastPath === true && query.keywordQuery === undefined)
+    const keywordDocuments = keywordEnabled ? allowed.filter(document => keywordEligible(document, query)) : []
+    let keyword = keywordEnabled ? channelHits(keywordDocuments, query, 'keyword') : []
     if (query.keywordQuery !== undefined) {
       const known = new Set(keyword.map(hit => hit.documentId))
       keyword = [...keyword, ...keywordDocuments.filter(document => !known.has(document.id)).map((document, index) => ({
@@ -95,25 +96,28 @@ class TestHybridRanker implements RetrievalRanker {
         channels: [{ channel: 'keyword' as const, rank: keyword.length + index + 1, score: 0 }],
       }))]
     }
-    const vector = channelHits(allowed, query, 'vector')
-    const hits = query.mode === 'keyword' ? keyword : query.mode === 'dense' ? vector : fuse(keyword, vector)
+    const vector = channelHits(allowed, query, 'vector').slice(0, 15)
+    const hybridUsesKeyword = query.mode === 'hybrid' && keyword.length > 0
+    const hits = query.mode === 'keyword' ? keyword : query.mode === 'dense' || !hybridUsesKeyword ? vector : fuse(keyword, vector)
     const channels = [
-      ...(query.mode === 'dense' ? [] : [{ channel: 'keyword' as const, implementation: 'test_keyword', version: 'v1', resultCount: keyword.length, elapsedMs: 0, querySource: query.fastPath ? 'direct_user_keywords' as const : 'agent_rewrite' as const }]),
+      ...(!keywordEnabled ? [] : [{ channel: 'keyword' as const, implementation: 'test_keyword', version: 'v1', resultCount: keyword.length, elapsedMs: 0, querySource: query.fastPath ? 'direct_user_keywords' as const : 'agent_rewrite' as const }]),
       ...(query.mode === 'keyword' ? [] : [{ channel: 'vector' as const, implementation: 'test_vector', version: 'v1', resultCount: vector.length, elapsedMs: 0, model: 'test-character-vector', revision: 'v1', dimensions: DIMENSIONS, querySource: query.fastPath ? 'direct_user_original' as const : 'agent_rewrite' as const }]),
     ]
     return Promise.resolve({
       hits,
       execution: {
         requestedMode: query.mode,
-        executedMode: query.mode,
+        executedMode: query.mode === 'hybrid' && !hybridUsesKeyword ? 'dense' : query.mode,
         strategyVersion: this.profileVersion,
         channels,
-        ...(query.mode !== 'hybrid' ? {} : { fusion: { method: 'weighted_rrf' as const, version: 'test-v1', rankConstant: 60, keywordWeight: 0.55, vectorWeight: 0.45 } }),
+        ...(!hybridUsesKeyword ? {} : { fusion: { method: 'weighted_rrf' as const, version: 'test-v1', rankConstant: 60, keywordWeight: 0.55, vectorWeight: 0.45 } }),
       },
       scanned: allowed.length,
       keywordEligible: keywordDocuments.length,
       rankedHits: hits.length,
-      warnings: [],
+      warnings: query.mode !== 'hybrid' || hybridUsesKeyword
+        ? []
+        : [keywordEnabled ? 'keyword_no_hits_dense_only' : 'keyword_unavailable_dense_only'],
     })
   }
 }

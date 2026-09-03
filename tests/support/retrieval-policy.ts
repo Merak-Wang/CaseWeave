@@ -86,21 +86,27 @@ function canSearch(state: RetrievalState, limit: number): boolean {
     && state.progress.noProgressStreak < limit
 }
 
-function canPromote(state: RetrievalState): boolean {
-  return state.budget.promotionsUsed < state.budget.maxPromotions
-    && (state.budget.modelStepsUsed ?? state.budget.roundsUsed) < state.budget.maxRounds
-    && (state.budget.wallClockElapsedMs ?? state.budget.latencyMs) < state.budget.maxLatencyMs
-    && state.budget.evidenceTokensUsed < state.budget.maxEvidenceTokens
-}
-
 function exhausted(state: RetrievalState): boolean {
   return state.lastPage?.boundary?.resultPagesExhausted
     ?? (state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined)
     ?? false
 }
 
-function fields(state: RetrievalState): readonly TicketEvidenceField[] {
-  return state.snapshot?.fieldCatalog.filter(field => field.accessLevel === 'L2').map(field => field.key) ?? []
+function l3Fields(state: RetrievalState): readonly TicketEvidenceField[] {
+  if (state.snapshot?.capabilities.l3DetailsRead !== true) return []
+  return state.snapshot.fieldCatalog
+    .filter(field => field.accessLevel === 'L3' && field.valueKind === 'raw_json')
+    .map(field => field.key)
+}
+
+function depthGapCandidates(
+  gaps: readonly RetrievalGap[],
+  candidateRefs: readonly TicketCandidateRef[],
+): TicketCandidateRef[] {
+  const requested = new Set(gaps
+    .filter(gap => gap.kind === 'depth' && (gap.status === 'open' || gap.status === 'unknown'))
+    .flatMap(gap => gap.evidenceRefs))
+  return candidateRefs.filter(ref => requested.has(ref))
 }
 
 function requireShape(assessment: RetrievalKnowledgeAssessment, evaluator: 'model' | 'system', nextAction: RetrievalKnowledgeAssessment['nextAction']): void {
@@ -137,7 +143,6 @@ function plan(state: RetrievalState, assessment: RetrievalKnowledgeAssessment, n
       actions.unshift(
         action('assess', candidateRefs),
         ...(searchOpen ? [action('search_next'), action('repair_search')] : []),
-        ...(canPromote(state) ? [action('promote', candidateRefs, fields(state), state.budget.maxEvidenceTokens - state.budget.evidenceTokensUsed)] : []),
         ...(candidates.length >= 2 ? [action('request_clarification', candidateRefs)] : []),
       )
       break
@@ -171,15 +176,19 @@ function plan(state: RetrievalState, assessment: RetrievalKnowledgeAssessment, n
     case 'continue': {
       requireShape(assessment, 'model', assessment.nextAction)
       const searchOpen = canSearch(state, noProgressLimit)
+      actions.unshift(action('assess', candidateRefs))
       if (assessment.nextAction === 'continue_ranking') {
         if (!searchOpen || state.lastPage?.nextCursor === undefined) throw new RetrievalError('INVALID_TRANSITION', '排名不可继续。')
         actions.unshift(action('search_next'))
       } else if (assessment.nextAction === 'keyword_search' || assessment.nextAction === 'vector_search') {
         if (!searchOpen) throw new RetrievalError('INVALID_TRANSITION', '检索预算耗尽。')
         actions.unshift(action('repair_search'))
-      } else if (assessment.nextAction === 'promote') {
-        if (!canPromote(state) || candidates.length === 0) throw new RetrievalError('INVALID_TRANSITION', '不能提升证据。')
-        actions.unshift(action('promote', candidateRefs, fields(state), state.budget.maxEvidenceTokens - state.budget.evidenceTokensUsed))
+      } else if (assessment.nextAction === 'read_l3_details') {
+        const depthRefs = depthGapCandidates(modelGaps, candidateRefs)
+        if (depthRefs.length === 0 || l3Fields(state).length === 0) {
+          throw new RetrievalError('INVALID_TRANSITION', '读取 L3 必须由引用当前候选的未解决 depth gap 触发。')
+        }
+        actions.unshift(action('read_l3_details', depthRefs, l3Fields(state)))
       } else if (assessment.nextAction === 'clarify') {
         if (candidates.length < 2) throw new RetrievalError('INVALID_TRANSITION', '候选不足。')
         actions.unshift(action('request_clarification', candidateRefs))

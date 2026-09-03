@@ -5,9 +5,11 @@ import {
   RetrievalError,
   type DetailReadRequest,
   type EvidenceReadRequest,
+  type L3DetailsReadRequest,
   type ProviderCallOptions,
   type TicketDetailResult,
   type TicketEvidenceResult,
+  type TicketL3DetailsResult,
   type TicketProviderStatus,
   type TicketRetrievalRequest,
   type TicketRetrievalSpec,
@@ -25,7 +27,6 @@ export interface Config {
   readonly dataPath: string
   readonly additionalDataPaths?: string[]
   readonly providerId?: string
-  readonly defaultRequestedCount?: number
   readonly maxRequestedCount?: number
   readonly snapshotTtlMs?: number
   readonly retrievalMode?: 'keyword' | 'dense' | 'hybrid'
@@ -34,6 +35,8 @@ export interface Config {
   readonly embeddingRevision?: string
   readonly embeddingDimensions?: number
   readonly modelDeadlineMs?: number
+  readonly preparePollIntervalMs?: number
+  readonly denseTopK?: number
   readonly rerankerEnabled?: boolean
   readonly rerankerModel?: string
   readonly rerankerRevision?: string
@@ -46,7 +49,6 @@ export const Config: z<Config> = z.object({
   dataPath: z.string().required(),
   additionalDataPaths: z.array(z.string()).default([]),
   providerId: z.string().default('local-fixture-v1'),
-  defaultRequestedCount: z.number().step(1).min(1).default(5),
   maxRequestedCount: z.number().step(1).min(1).default(20),
   snapshotTtlMs: z.number().step(1).min(1).default(900_000),
   retrievalMode: z.union(['keyword', 'dense', 'hybrid'] as const).default('hybrid'),
@@ -55,6 +57,8 @@ export const Config: z<Config> = z.object({
   embeddingRevision: z.string(),
   embeddingDimensions: z.number().step(1).min(1).default(1024),
   modelDeadlineMs: z.number().step(1).min(100).default(120_000),
+  preparePollIntervalMs: z.number().step(1).min(100).default(1_000),
+  denseTopK: z.number().step(1).min(1).max(100).default(15),
   rerankerEnabled: z.boolean().default(false),
   rerankerModel: z.string().default('Qwen/Qwen3-Reranker-0.6B'),
   rerankerRevision: z.string(),
@@ -96,12 +100,13 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
         rerankerIdentity: { model: rerankerModel, revision: rerankerRevision! },
       }),
       modelDeadlineMs: config.modelDeadlineMs ?? 120_000,
+      preparePollIntervalMs: config.preparePollIntervalMs ?? 1_000,
+      denseTopK: config.denseTopK ?? 15,
       rerankerEnabled: config.rerankerEnabled ?? false,
       allowKeywordFallback: config.allowKeywordFallback ?? false,
     })
     this.provider = new LocalTicketProvider(records, {
       ...(config.providerId === undefined ? {} : { providerId: config.providerId }),
-      ...(config.defaultRequestedCount === undefined ? {} : { defaultRequestedCount: config.defaultRequestedCount }),
       ...(config.maxRequestedCount === undefined ? {} : { maxRequestedCount: config.maxRequestedCount }),
       ...(config.snapshotTtlMs === undefined ? {} : { snapshotTtlMs: config.snapshotTtlMs }),
       defaultMode: mode,
@@ -135,6 +140,7 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
   }
   readEvidence(principal: TrustedPrincipalContext, request: EvidenceReadRequest, options?: ProviderCallOptions): Promise<TicketEvidenceResult> { return this.provider.readEvidence(principal, request, options) }
   readDetails(principal: TrustedPrincipalContext, request: DetailReadRequest, options?: ProviderCallOptions): Promise<TicketDetailResult> { return this.provider.readDetails(principal, request, options) }
+  readL3Details(principal: TrustedPrincipalContext, request: L3DetailsReadRequest, options?: ProviderCallOptions): Promise<TicketL3DetailsResult> { return this.provider.readL3Details(principal, request, options) }
   async status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus> {
     await this.preparation
     if (this.preparationError !== undefined) {

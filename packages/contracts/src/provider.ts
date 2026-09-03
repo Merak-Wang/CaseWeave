@@ -4,6 +4,7 @@ import type {
   TicketDetailResult,
   TicketEvidenceField,
   TicketEvidenceResult,
+  TicketL3DetailsResult,
   TicketProviderStatus,
   TicketRetrievalRequest,
   TicketRetrievalSpec,
@@ -20,7 +21,7 @@ export interface ProviderCallOptions {
 
 export interface PrincipalResolutionRequest {
   readonly sessionId: string
-  readonly operation: 'snapshot_open' | 'search' | 'evidence_read' | 'detail_read' | 'export'
+  readonly operation: 'snapshot_open' | 'search' | 'evidence_read' | 'detail_read' | 'l3_details_read' | 'export'
 }
 
 /** Host-owned identity seam. Implementations must ignore model/browser identity fields. */
@@ -49,6 +50,15 @@ export interface DetailReadRequest {
   readonly purpose: 'inline_detail' | 'candidate_export'
 }
 
+export const MAX_L3_DETAILS_PER_READ = 20 as const
+
+/** Dedicated atomic L3 batch read; callers cannot choose arbitrary raw fields. */
+export interface L3DetailsReadRequest {
+  readonly snapshotId: TicketSnapshotId
+  readonly candidateRefs: readonly TicketCandidateRef[]
+  readonly purpose: 'model_ticket_load'
+}
+
 /** Every data-bearing method receives the trusted principal again. */
 export interface TicketRetrievalProvider {
   readonly providerId: string
@@ -70,5 +80,10 @@ export interface TicketRetrievalProvider {
     request: DetailReadRequest,
     options?: ProviderCallOptions,
   ): Promise<TicketDetailResult>
+  readL3Details(
+    principal: TrustedPrincipalContext,
+    request: L3DetailsReadRequest,
+    options?: ProviderCallOptions,
+  ): Promise<TicketL3DetailsResult>
   status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus>
 }

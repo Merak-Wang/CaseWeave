@@ -205,8 +205,7 @@ class SpacyQueryAnalyzer:
         # 显式 AND/OR 存在时只把其左右项交给关键词通道；否则使用全部合格 POS/领域候选。
         keywords = boolean["terms"] if boolean is not None else [item["text"] for item in candidates]
         keywords = list(dict.fromkeys(keywords))[:8]
-        if not keywords:
-            raise ServiceError(422, "NO_KEYWORDS", "spaCy did not identify a usable query term.")
+        # 没有可用表面词不是查询失败：完整原始 query 仍交给多语言向量通道。
         triples = self._dependency_triples(doc)
         if boolean is not None:
             triples.insert(0, {
@@ -236,7 +235,8 @@ class SpacyQueryAnalyzer:
         ]
         # 响应同时携带检索输入和完整 provenance；协议封装由 FastAPI endpoint 追加版本与 requestId。
         return {
-            "language": doc.lang,
+            # spaCy 的 doc.lang 是内部 StringStore 哈希；线协议需要可读、可重放的语言代码。
+            "language": doc.lang_,
             "keywords": keywords,
             "candidates": candidates,
             "tokens": tokens,

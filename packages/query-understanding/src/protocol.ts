@@ -57,7 +57,8 @@ export interface QueryAnalysisParams {
 
 /**
  * 一次查询分析的完整响应。
- * keywords 是首轮关键词通道的唯一输入；tokens/entities/triples 是解释与重放证据，不允许 TypeScript 再发明关键词。
+ * keywords 是首轮关键词通道的唯一输入；空数组表示跳过关键词通道并保留原始 query 的向量首检。
+ * tokens/entities/triples 是解释与重放证据，不允许 TypeScript 再发明关键词。
  */
 export interface QueryAnalysisResponse {
   readonly protocolVersion: typeof QUERY_ANALYSIS_PROTOCOL_VERSION

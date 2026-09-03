@@ -46,7 +46,7 @@ def _state_events(trace: ProductTrace) -> tuple[Mapping[str, Any], ...]:
     return tuple(result)
 
 
-def _candidate_display_ids(states: tuple[Mapping[str, Any], ...]) -> set[str]:
+def _candidate_display_ids(trace: ProductTrace, states: tuple[Mapping[str, Any], ...]) -> set[str]:
     result: set[str] = set()
     for state in states:
         candidates = state.get("candidates", [])
@@ -55,13 +55,32 @@ def _candidate_display_ids(states: tuple[Mapping[str, Any], ...]) -> set[str]:
         for candidate in candidates:
             if isinstance(candidate, Mapping) and isinstance(candidate.get("displayId"), str):
                 result.add(candidate["displayId"])
+    for event in trace.events:
+        if event.get("type") != "retrieval/search-completed":
+            continue
+        data = event.get("data")
+        page = data.get("page") if isinstance(data, Mapping) else None
+        candidates = page.get("candidates", []) if isinstance(page, Mapping) else []
+        if isinstance(candidates, list):
+            result.update(
+                candidate["displayId"]
+                for candidate in candidates
+                if isinstance(candidate, Mapping) and isinstance(candidate.get("displayId"), str)
+            )
     return result
 
 
-def _frozen_allowlists(states: tuple[Mapping[str, Any], ...]) -> tuple[set[str], set[str]]:
-    if not states:
-        return set(), set()
-    pack = states[-1].get("frozenEvidence")
+def _frozen_allowlists(trace: ProductTrace, states: tuple[Mapping[str, Any], ...]) -> tuple[set[str], set[str]]:
+    pack = None
+    for event in trace.events:
+        if event.get("type") == "retrieval/evidence-frozen" and isinstance(event.get("data"), Mapping):
+            candidate = event["data"].get("pack")
+            if isinstance(candidate, Mapping):
+                pack = candidate
+    if pack is None and states:
+        candidate = states[-1].get("frozenEvidence")
+        if isinstance(candidate, Mapping):
+            pack = candidate
     if not isinstance(pack, Mapping):
         return set(), set()
     display_ids: set[str] = set()
@@ -89,14 +108,17 @@ def evaluate_trace(case: EvalCase, trace: ProductTrace) -> EvaluationResult:
         set(trace.model_visible_display_ids)
         | set(trace.ui_visible_display_ids)
         | set(trace.final_display_ids)
-        | _candidate_display_ids(states)
+        | _candidate_display_ids(trace, states)
     )
     leaked = sorted(exposed & case.forbidden_display_ids)
-    frozen_display_ids, frozen_evidence_ids = _frozen_allowlists(states)
+    frozen_display_ids, frozen_evidence_ids = _frozen_allowlists(trace, states)
     unknown_final_ids = sorted(set(trace.final_display_ids) - frozen_display_ids)
     unknown_evidence_ids = sorted(set(trace.final_evidence_ids) - frozen_evidence_ids)
     candidate_count = len(set(trace.ui_visible_display_ids))
     termination = states[-1].get("termination") if states else None
+    for event in trace.events:
+        if event.get("type") == "retrieval/stopped" and isinstance(event.get("data"), Mapping):
+            termination = event["data"].get("reason")
     termination_valid = case.expected_termination is None or termination == case.expected_termination
 
     final_ids = set(trace.final_display_ids)

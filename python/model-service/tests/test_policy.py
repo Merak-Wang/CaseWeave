@@ -7,7 +7,7 @@ from retrieval_agent_model_service.policy import plan_knowledge_assessment, upda
 
 
 def candidate(ref: str, rank: int) -> dict:
-    return {"ref": ref, "rank": rank, "displayId": ref.upper(), "title": ref, "summary": ref}
+    return {"ref": ref, "rank": rank, "displayId": ref.upper(), "title": ref}
 
 
 def state() -> dict:
@@ -23,7 +23,13 @@ def state() -> dict:
             "maxPromotions": 3, "evidenceTokensUsed": 0, "maxEvidenceTokens": 1_500,
         },
         "progress": {"noProgressStreak": 0, "newCandidateRefs": ["c1", "c2"], "newEvidenceIds": []},
-        "snapshot": {"fieldCatalog": [{"key": "problemDescription", "accessLevel": "L2"}]},
+        "snapshot": {
+            "capabilities": {"l3DetailsRead": True},
+            "fieldCatalog": [
+                {"key": "summary", "accessLevel": "L2", "valueKind": "text"},
+                {"key": "source.raw", "accessLevel": "L3", "valueKind": "raw_json"},
+            ],
+        },
         "lastPage": {"completeness": "exhaustive", "boundary": {"resultPagesExhausted": True}},
     }
 
@@ -59,3 +65,52 @@ def test_knowledge_policy_accepts_only_known_non_excluded_candidates() -> None:
             "excludedCandidateRefs": [], "gaps": [], "nextAction": "promote",
         }, {"noProgressLimit": 2})
     assert caught.value.code == "CANDIDATE_NOT_FOUND"
+
+
+def test_continue_plan_remains_reassessable_until_the_selected_action_runs() -> None:
+    result = plan_knowledge_assessment(state(), {
+        "decision": "continue", "evaluator": "model",
+        "selectedCandidateRefs": ["c1", "c2"], "excludedCandidateRefs": [],
+        "gaps": [], "nextAction": "vector_search",
+    }, {"noProgressLimit": 2})
+
+    assert [action["kind"] for action in result["patch"]["allowedActions"]] == [
+        "repair_search", "assess", "read_state",
+    ]
+
+
+def test_l3_requires_a_candidate_specific_open_depth_gap() -> None:
+    with pytest.raises(ServiceError) as caught:
+        plan_knowledge_assessment(state(), {
+            "decision": "continue", "evaluator": "model",
+            "selectedCandidateRefs": ["c1", "c2"], "excludedCandidateRefs": [],
+            "gaps": [{
+                "kind": "coverage", "status": "unknown", "evidenceRefs": [],
+                "evaluator": "model", "description": "semantic recall is not proven",
+            }],
+            "nextAction": "read_l3_details",
+        }, {"noProgressLimit": 2})
+    assert caught.value.code == "INVALID_TRANSITION"
+
+    result = plan_knowledge_assessment(state(), {
+        "decision": "continue", "evaluator": "model",
+        "selectedCandidateRefs": ["c1", "c2"], "excludedCandidateRefs": [],
+        "gaps": [{
+            "kind": "depth", "status": "open", "evidenceRefs": ["c2"],
+            "evaluator": "model", "description": "L2 summary is insufficient for c2",
+        }],
+        "nextAction": "read_l3_details",
+    }, {"noProgressLimit": 2})
+
+    assert [action["kind"] for action in result["patch"]["allowedActions"]] == [
+        "read_l3_details", "assess", "read_state",
+    ]
+    assert result["patch"]["allowedActions"][0]["candidateAllowlist"] == ["c2"]
+    assert result["patch"]["allowedActions"][0]["fieldAllowlist"] == ["source.raw"]
+    assert result["patch"]["gaps"] == [
+        {"kind": "coverage", "status": "unknown", "evidenceRefs": [], "evaluator": "system"},
+        {
+            "kind": "depth", "status": "open", "evidenceRefs": ["c2"],
+            "evaluator": "model", "description": "L2 summary is insufficient for c2",
+        },
+    ]

@@ -34,7 +34,7 @@ function assessment(
     selectedCandidateRefs: [CANDIDATE_REF],
     excludedCandidateRefs: [],
     gaps: [],
-    nextAction: 'promote',
+    nextAction: 'keyword_search',
     evaluator: 'model',
     ...patch,
   }
@@ -92,8 +92,8 @@ function provider(): TicketRetrievalProvider {
         target: request.target,
         originalQuery: request.query,
         normalizedQuery: request.query.trim(),
-        requestedCount: request.requestedCount ?? 3,
-        countPolicy: request.countPolicy ?? (request.requestedCount === undefined ? 'provider_default' : 'explicit'),
+        ...(request.requestedCount === undefined ? {} : { requestedCount: request.requestedCount }),
+        countPolicy: request.countPolicy ?? (request.requestedCount === undefined ? 'adaptive' : 'explicit'),
         mode: request.mode ?? 'keyword',
         filters: request.filters ?? [],
         ambiguities: request.ambiguities ?? [],
@@ -123,6 +123,7 @@ function provider(): TicketRetrievalProvider {
           pagination: false,
           evidencePromotion: true,
           detailRead: true,
+          l3DetailsRead: false,
           exportRead: true,
           keywordSearch: true,
           denseSearch: true,
@@ -141,10 +142,10 @@ function provider(): TicketRetrievalProvider {
           sourceVersion: 'source-v1',
           snapshotId,
           contentHash: 'content-hash-1',
-          evidenceLevel: 'L1',
+          evidenceLevel: 'L2',
           rank: 1,
           title: '登录失败',
-          summary: '验证码缓存失效',
+          summary: '验证码缓存异常导致登录失败。',
           l0: { category: '认证', priority: 'P1' },
           matchFragments: [{ field: 'title', text: '登录失败', truncated: false }],
         }],
@@ -191,6 +192,9 @@ function provider(): TicketRetrievalProvider {
     },
     async readDetails(_principal, request) {
       return { snapshotId: request.snapshotId, details: [], rejectedCandidateRefs: request.candidateRefs, warnings: [] }
+    },
+    async readL3Details() {
+      throw new RetrievalError('FIELD_NOT_ALLOWED', 'fixture has no L3 payload')
     },
     async status() {
       return { providerId: 'stub-v1', ready: true, readOnly: true, snapshotValid: true, warnings: [] }
@@ -307,8 +311,59 @@ function deterministicIds(): () => string {
   return () => `id-${value++}`
 }
 
+function l3Provider(reads: string[]): TicketRetrievalProvider {
+  const base = provider()
+  return {
+    ...base,
+    async openSnapshot(principal, options) {
+      const snapshot = await base.openSnapshot(principal, options)
+      return {
+        ...snapshot,
+        fieldCatalog: [
+          ...snapshot.fieldCatalog,
+          { key: 'source.raw', label: '原始对话', valueKind: 'raw_json', accessLevel: 'L3', filterOperators: [], sensitivity: 'source_controlled' },
+        ],
+        capabilities: { ...snapshot.capabilities, l3DetailsRead: true },
+      }
+    },
+    async search(principal, snapshotId, query, options) {
+      const page = await base.search(principal, snapshotId, query, options)
+      const first = page.candidates[0]!
+      const second = {
+        ...first, ref: SECOND_CANDIDATE_REF, displayId: 'INC-2', contentHash: 'content-hash-2', rank: 2,
+        title: '短信验证码失败', summary: '短信验证码服务返回超时。',
+      }
+      return {
+        ...page,
+        candidates: [first, second], returned: 2,
+        trace: searchTrace(options.stage, query.mode, [CANDIDATE_REF, SECOND_CANDIDATE_REF]),
+        boundary: { ...page.boundary, authorizedCorpusSize: 2, documentsAfterStructuredFilters: 2, rankedHits: 2 },
+      }
+    },
+    async readL3Details(_principal, request) {
+      reads.push(...request.candidateRefs)
+      return {
+        snapshotId: request.snapshotId,
+        requestedCandidateRefs: [...request.candidateRefs],
+        details: request.candidateRefs.map(candidateRef => {
+          const suffix = candidateRef === CANDIDATE_REF ? 1 : 2
+          return {
+          candidateRef,
+          displayId: `INC-${suffix}`,
+          sourceVersion: 'source-v1',
+          contentHash: `content-hash-${suffix}`,
+          source: { datasetId: 'fixture', datasetVersion: 'v1', schemaVersion: 'raw-v1', recordId: `INC-${suffix}` },
+          rawPayload: { conversation: [`用户：登录失败${suffix}`, `客服：已处理${suffix}`] },
+          trust: 'untrusted_ticket_evidence' as const,
+        }}),
+        warnings: [],
+      }
+    },
+  }
+}
+
 describe('RetrievalController', () => {
-  it('runs a bounded search, evidence promotion, freeze, and exact event replay', async () => {
+  it('runs a bounded search with candidate summaries, freeze, and exact event replay', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
     const controller = new RetrievalController(provider(), journal, new EvidenceContextPolicy({ estimateTokens: () => 1 }), { policy: POLICY,
@@ -324,25 +379,20 @@ describe('RetrievalController', () => {
     expect(state.phase).toBe('assessed')
     expect(state.lastPage?.trace.stage).toBe('initial_hybrid')
     expect(state.budget).toMatchObject({ roundsUsed: 0, searchesUsed: 1, providerLatencyMs: 7, latencyMs: 0 })
-    expect(state.allowedActions.map(item => item.kind)).toEqual(['assess', 'repair_search', 'promote', 'read_state'])
+    expect(state.allowedActions.map(item => item.kind)).toEqual(['assess', 'repair_search', 'read_state'])
     expect(() => controller.freeze(state, [])).toThrowError(RetrievalError)
-
-    state = await controller.assess(state, assessment({
-      gaps: [{ kind: 'depth', status: 'open', evidenceRefs: [CANDIDATE_REF], evaluator: 'model' }],
-      model: 'fixture-model',
-    }))
-    await expect(controller.promote(PRINCIPAL, state, [TicketCandidateRef('forged')], ['problemDescription'], 20))
-      .rejects.toMatchObject({ code: 'CANDIDATE_NOT_FOUND' })
-    state = await controller.promote(PRINCIPAL, state, [CANDIDATE_REF], ['problemDescription'], 20)
 
     const context = controller.projectContext(state, 20)
     expect(context.includedCandidateRefs).toEqual([CANDIDATE_REF])
-    expect(context.includedEvidenceIds).toEqual([EVIDENCE_ID])
-    expect(context.rendered).toContain('<untrusted_ticket_evidence>')
+    expect(context.includedEvidenceIds).toEqual([])
+    expect(context.rendered).toContain('<ticket_knowledge_context>')
+    expect(context.rendered).toContain('"requiredEveryRound":true')
+    expect(context.rendered).toContain('验证码缓存异常导致登录失败')
+    expect(context.rendered).toContain('<untrusted_ticket_candidate>')
 
     state = await controller.assess(state, assessment({
       decision: 'accept_current_top_k',
-      gaps: [{ kind: 'depth', status: 'resolved', evidenceRefs: [EVIDENCE_ID], evaluator: 'model' }],
+      gaps: [{ kind: 'depth', status: 'resolved', evidenceRefs: [CANDIDATE_REF], evaluator: 'model' }],
       nextAction: 'accept_current_top_k',
     }))
     state = controller.freeze(state, [CANDIDATE_REF])
@@ -355,11 +405,68 @@ describe('RetrievalController', () => {
     expect(foldRetrievalEvents(events, state.retrievalId)).toEqual(state)
   })
 
+  it('admits one atomic batch L3 action and preserves request order', async () => {
+    const reads: string[] = []
+    const ids = deterministicIds()
+    const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
+    const controller = new RetrievalController(l3Provider(reads), journal, undefined, {
+      policy: POLICY, now: () => NOW, id: ids,
+    })
+    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录', requestedCount: 3, countPolicy: 'explicit' })
+
+    expect(state.candidates.map(candidate => candidate.summary)).toEqual([
+      '验证码缓存异常导致登录失败。', '短信验证码服务返回超时。',
+    ])
+    expect(state.candidates[0]).not.toHaveProperty('rawPayload')
+    expect(state.allowedActions).not.toContainEqual(expect.objectContaining({ kind: 'read_l3_details' }))
+    state = await controller.assess(state, assessment({
+      selectedCandidateRefs: [CANDIDATE_REF, SECOND_CANDIDATE_REF],
+      nextAction: 'read_l3_details',
+      gaps: [{
+        kind: 'depth', status: 'open', evaluator: 'model',
+        evidenceRefs: [SECOND_CANDIDATE_REF, CANDIDATE_REF],
+        description: '这两条候选的 L2 摘要不足以区分处理路径。',
+      }],
+    }))
+    expect(state.allowedActions).toContainEqual(expect.objectContaining({
+      kind: 'read_l3_details', candidateAllowlist: [CANDIDATE_REF, SECOND_CANDIDATE_REF], fieldAllowlist: ['source.raw'],
+    }))
+    const result = await controller.readL3Details(PRINCIPAL, state, [SECOND_CANDIDATE_REF, CANDIDATE_REF])
+    expect(reads).toEqual([SECOND_CANDIDATE_REF, CANDIDATE_REF])
+    expect(result.details.map(detail => detail.candidateRef)).toEqual([SECOND_CANDIDATE_REF, CANDIDATE_REF])
+    expect(journal.read(state.retrievalId)).toContainEqual(expect.objectContaining({ type: 'retrieval/l3-details-read' }))
+  })
+
+  it('keeps adaptive completion and the Provider page window independent from task type and result limit', async () => {
+    const pageWindows: number[] = []
+    const base = provider()
+    const observingProvider: TicketRetrievalProvider = {
+      ...base,
+      async search(principal, snapshotId, query, options) {
+        pageWindows.push(options.topK)
+        return await base.search(principal, snapshotId, query, options)
+      },
+    }
+    const ids = deterministicIds()
+    const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
+    const controller = new RetrievalController(observingProvider, journal, undefined, {
+      policy: POLICY, now: () => NOW, id: ids, searchTopK: 20,
+    })
+
+    const adaptive = await controller.start(PRINCIPAL, { target: 'cohort_collection', query: '登录', countPolicy: 'adaptive' })
+    const explicit = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录', requestedCount: 1, countPolicy: 'explicit' })
+
+    expect(adaptive.task).toMatchObject({ target: 'cohort_collection', countPolicy: 'adaptive', completenessRequirement: 'top_k' })
+    expect(adaptive.query.contract).toMatchObject({ schemaVersion: 7, task: 'cohort_collection', resultPolicy: 'adaptive_top_k' })
+    expect(explicit.task).toMatchObject({ target: 'ranked_cases', requestedCount: 1, countPolicy: 'explicit', completenessRequirement: 'top_k' })
+    expect(pageWindows).toEqual([20, 20])
+  })
+
   it('rejects broken replay chains instead of accepting a partial state history', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
     const controller = new RetrievalController(provider(), journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
-    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录', requestedCount: 3, countPolicy: 'explicit' })
     const events = [...journal.read(state.retrievalId)]
     const broken = events.map((event, index) => index === 1 ? { ...event, sequence: 4 } : event)
     expect(() => foldRetrievalEvents(broken, state.retrievalId)).toThrow(/序列不连续/u)
@@ -369,7 +476,7 @@ describe('RetrievalController', () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
     const controller = new RetrievalController(provider(), journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
-    const state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    const state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录', requestedCount: 3, countPolicy: 'explicit' })
     const legacy = journal.read(state.retrievalId).map(event => ({ ...event, schemaVersion: 4 }))
     expect(() => foldRetrievalEvents(
       legacy as unknown as Parameters<typeof foldRetrievalEvents>[0],
@@ -377,7 +484,7 @@ describe('RetrievalController', () => {
     )).toThrow(/不支持检索事件版本 4/u)
   })
 
-  it('rejects provider data that escapes the requested snapshot or evidence allowlist', async () => {
+  it('rejects provider data that escapes the requested snapshot', async () => {
     const ids = deterministicIds()
     const base = provider()
     const wrongSnapshotProvider: TicketRetrievalProvider = {
@@ -388,30 +495,9 @@ describe('RetrievalController', () => {
     }
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
     const controller = new RetrievalController(wrongSnapshotProvider, journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
-    const started = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    const started = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录', requestedCount: 3, countPolicy: 'explicit' })
     expect(started).toMatchObject({ phase: 'stopped', termination: 'backend_error', candidates: [] })
 
-    const rejectedProvider: TicketRetrievalProvider = {
-      ...base,
-      async readEvidence(_principal, request) {
-        return {
-          snapshotId: request.snapshotId,
-          evidence: [],
-          requestedCandidateRefs: request.candidateRefs,
-          rejectedCandidateRefs: request.candidateRefs,
-          tokenBudget: request.tokenBudget,
-          tokensUsed: 0,
-          warnings: ['authorization_changed'],
-        }
-      },
-    }
-    const secondIds = deterministicIds()
-    const secondJournal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: secondIds })
-    const second = new RetrievalController(rejectedProvider, secondJournal, undefined, { policy: POLICY, now: () => NOW, id: secondIds })
-    let state = await second.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
-    state = await second.assess(state, assessment({ nextAction: 'promote' }))
-    await expect(second.promote(PRINCIPAL, state, [CANDIDATE_REF], ['problemDescription'], 20))
-      .rejects.toMatchObject({ code: 'UNAUTHORIZED' })
   })
 
   it('requires an honest partial assessment when round or latency budgets are exhausted', async () => {
@@ -425,17 +511,17 @@ describe('RetrievalController', () => {
       maxPromotions: 3,
       maxLatencyMs: 5,
     })
-    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录', requestedCount: 3, countPolicy: 'explicit' })
     state = controller.recordModelRequest(state, {
       estimatedInputTokens: 100, serializationBytes: 400, wallClockElapsedMs: 0, accepted: true,
     })
     state = controller.recordModelResponse(state, { modelLatencyMs: 7, outputTokens: 10, wallClockElapsedMs: 7 })
     expect(state.budget.latencyMs).toBe(7)
     expect(state.budget).toMatchObject({ modelStepsUsed: 1, modelLatencyMs: 7, providerLatencyMs: 7 })
-    expect(state.allowedActions.map(item => item.kind)).toEqual(['assess', 'repair_search', 'promote', 'read_state'])
+    expect(state.allowedActions.map(item => item.kind)).toEqual(['assess', 'repair_search', 'read_state'])
 
     await expect(controller.assess(state, assessment({
-      nextAction: 'promote',
+      nextAction: 'keyword_search',
       gaps: [{ kind: 'depth', status: 'open', evidenceRefs: [CANDIDATE_REF], evaluator: 'model' }],
     }))).rejects.toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
     state = await controller.assess(state, assessment({
@@ -453,7 +539,7 @@ describe('RetrievalController', () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
     const controller = new RetrievalController(dynamicFacetProvider(), journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
-    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '账号问题' })
+    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '账号问题', requestedCount: 3, countPolicy: 'explicit' })
     state = await controller.assess(state, assessment({
       decision: 'needs_clarification',
       selectedCandidateRefs: [CANDIDATE_REF],
@@ -489,7 +575,7 @@ describe('RetrievalController', () => {
       id: ids,
       maxSearches: 3,
     })
-    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录', requestedCount: 3, countPolicy: 'explicit' })
 
     await expect(controller.search(PRINCIPAL, state, { mode: 'keyword' })).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
     await expect(controller.search(PRINCIPAL, state, {
@@ -520,6 +606,50 @@ describe('RetrievalController', () => {
     expect(dense.query.spec.mode).toBe('dense')
     expect(dense.query.spec.semanticHints).toEqual(['缓存失效'])
     expect(dense.lastPage?.trace).toMatchObject({ stage: 'repair_search', requestedMode: 'dense', executedMode: 'dense' })
+  })
+
+  it('validates a structured repair batch before issuing one keyword Provider search', async () => {
+    const searches: { readonly stage: TicketSearchStage; readonly filters: readonly unknown[] }[] = []
+    const base = provider()
+    const observingProvider: TicketRetrievalProvider = {
+      ...base,
+      async search(principal, snapshotId, query, options) {
+        searches.push({ stage: options.stage, filters: query.filters })
+        return await base.search(principal, snapshotId, query, options)
+      },
+    }
+    const ids = deterministicIds()
+    const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
+    const controller = new RetrievalController(observingProvider, journal, undefined, {
+      policy: POLICY, now: () => NOW, id: ids, maxSearches: 2,
+    })
+    let state = await controller.start(PRINCIPAL, {
+      target: 'constrained_list', query: '最近两个月华东地区已解决的副卡工单', countPolicy: 'exhaustive',
+    })
+    state = await controller.assess(state, assessment({ nextAction: 'keyword_search' }))
+    state = await controller.search(PRINCIPAL, state, {
+      mode: 'keyword',
+      delta: {
+        kind: 'batch',
+        changes: [
+          { kind: 'add_filter', filter: { field: 'createdAt', op: 'gte', value: '2026-07-01T00:00:00.000Z' } },
+          { kind: 'add_filter', filter: { field: 'createdAt', op: 'lte', value: '2026-09-01T00:00:00.000Z' } },
+          { kind: 'add_filter', filter: { field: 'status', op: 'eq', value: 'resolved' } },
+          { kind: 'add_filter', filter: { field: 'region', op: 'eq', value: '华东' } },
+        ],
+      },
+    })
+
+    expect(searches).toHaveLength(2)
+    expect(searches[0]).toEqual({ stage: 'initial_hybrid', filters: [] })
+    expect(searches[1]).toEqual({ stage: 'repair_search', filters: [
+      { field: 'createdAt', op: 'gte', value: '2026-07-01T00:00:00.000Z' },
+      { field: 'createdAt', op: 'lte', value: '2026-09-01T00:00:00.000Z' },
+      { field: 'status', op: 'eq', value: 'resolved' },
+      { field: 'region', op: 'eq', value: '华东' },
+    ] })
+    expect(state.query.contract?.constraints).toEqual(searches[1]?.filters)
+    expect(state.query.confirmedConstraints).toEqual(searches[1]?.filters)
   })
 
   it('keeps immutable candidate history while later repair evidence can revise the active ranking', async () => {
@@ -586,7 +716,6 @@ describe('RetrievalController', () => {
     let state = await controller.start(PRINCIPAL, {
       target: 'ranked_cases',
       query: '登录',
-      requestedCount: 20,
     })
     state = await controller.assess(state, assessment({ nextAction: 'keyword_search' }))
     state = await controller.search(PRINCIPAL, state, {
@@ -623,7 +752,7 @@ describe('RetrievalController', () => {
     let state = await controller.start(PRINCIPAL, {
       target: 'cohort_collection',
       query: '登录',
-      requestedCount: 20,
+      countPolicy: 'exhaustive',
     })
 
     expect(state.lastPage).toMatchObject({ completeness: 'bounded', nextCursor: 'cursor-page-2' })
@@ -663,7 +792,7 @@ describe('RetrievalController', () => {
       completeness,
       ...(nextCursor === undefined ? {} : { nextCursor }),
     }), journal, undefined, { policy: POLICY, now: () => NOW, id: ids })
-    const state = await controller.start(PRINCIPAL, { target: 'cohort_collection', query: '登录' })
+    const state = await controller.start(PRINCIPAL, { target: 'cohort_collection', query: '登录', countPolicy: 'exhaustive' })
 
     expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'unknown', evaluator: 'system' }))
     await expect(controller.assess(state, assessment({
@@ -682,8 +811,8 @@ describe('RetrievalController', () => {
       id: ids,
       maxSearches: 3,
     })
-    let state = await controller.start(PRINCIPAL, { target: 'cohort_collection', query: '登录' })
-    expect(state.allowedActions.map(action => action.kind)).toEqual(['assess', 'search_next', 'repair_search', 'promote', 'read_state'])
+    let state = await controller.start(PRINCIPAL, { target: 'cohort_collection', query: '登录', countPolicy: 'exhaustive' })
+    expect(state.allowedActions.map(action => action.kind)).toEqual(['assess', 'search_next', 'repair_search', 'read_state'])
     state = await controller.assess(state, assessment({ nextAction: 'continue_ranking' }))
     expect(state.allowedActions.map(action => action.kind)).toContain('search_next')
     state = await controller.continueRanking(PRINCIPAL, state)
@@ -709,7 +838,7 @@ describe('RetrievalController', () => {
     const controller = new RetrievalController(paginatedProvider(), journal, undefined, { policy: POLICY,
       now: () => NOW, id: ids, maxSearches: 3,
     })
-    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡 跨域' })
+    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡 跨域', requestedCount: 20, countPolicy: 'explicit' })
     state = await controller.assess(state, assessment({
       decision: 'present_current_top_k',
       nextAction: 'present_current_top_k',
@@ -721,7 +850,7 @@ describe('RetrievalController', () => {
       lastPage: { nextCursor: 'cursor-page-2' },
     })
     expect(state.allowedActions.map(action => action.kind)).toEqual([
-      'assess', 'search_next', 'repair_search', 'promote', 'read_state',
+      'assess', 'search_next', 'repair_search', 'read_state',
     ])
     expect(() => controller.freeze(state, state.selectedCandidateRefs))
       .toThrowError(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
@@ -798,12 +927,12 @@ describe('RetrievalController', () => {
       maxRounds: 1,
       maxSearches: 4,
     })
-    let state = await controller.start(PRINCIPAL, { target: 'cohort_collection', query: '登录' })
+    let state = await controller.start(PRINCIPAL, { target: 'cohort_collection', query: '登录', countPolicy: 'exhaustive' })
     state = controller.recordModelRequest(state, {
       estimatedInputTokens: 100, serializationBytes: 400, wallClockElapsedMs: 0, accepted: true,
     })
     expect(state.gaps).toContainEqual(expect.objectContaining({ kind: 'coverage', status: 'unknown' }))
-    expect(state.allowedActions.map(action => action.kind)).toEqual(['assess', 'search_next', 'repair_search', 'promote', 'read_state'])
+    expect(state.allowedActions.map(action => action.kind)).toEqual(['assess', 'search_next', 'repair_search', 'read_state'])
 
     await expect(controller.assess(state, assessment({
       nextAction: 'continue_ranking',
@@ -831,6 +960,27 @@ describe('RetrievalController', () => {
       complete: false,
       tickets: [{ ref: CANDIDATE_REF }],
       remainingGapKinds: ['coverage', 'boundary'],
+    })
+  })
+
+  it('freezes the current authorized candidates on a safety-budget stop without requiring a model freeze action', async () => {
+    const ids = deterministicIds()
+    const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
+    const controller = new RetrievalController(provider(), journal, undefined, {
+      policy: POLICY, now: () => NOW, id: ids,
+    })
+    const state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡' })
+
+    const stopped = controller.freezeForBudget(state)
+    const result = createTicketResultCollection(stopped)
+
+    expect(stopped).toMatchObject({
+      phase: 'stopped', termination: 'budget_exhausted',
+      frozenEvidence: { stoppingReason: 'budget_exhausted', candidates: [{ ref: CANDIDATE_REF }] },
+    })
+    expect(result).toMatchObject({
+      stoppingReason: 'budget_exhausted', complete: false,
+      tickets: [{ ref: CANDIDATE_REF }],
     })
   })
 })

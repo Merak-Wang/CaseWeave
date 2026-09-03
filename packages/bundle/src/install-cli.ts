@@ -8,5 +8,14 @@ const requestedHome = homeIndex >= 0 ? args[homeIndex + 1] : process.env.DSH_HOM
 if (requestedHome === undefined || requestedHome.trim().length === 0) {
   throw new Error('Pass --home <DSH_HOME> or set DSH_HOME')
 }
-const receipt = await installLocalProductAssets(resolve(requestedHome), args.includes('--force'))
+const dataRootIndex = args.indexOf('--data-root')
+const requestedDataRoot = dataRootIndex >= 0 ? args[dataRootIndex + 1] : undefined
+if (dataRootIndex >= 0 && (requestedDataRoot === undefined || requestedDataRoot.trim().length === 0)) {
+  throw new Error('Pass a path after --data-root')
+}
+const receipt = await installLocalProductAssets(
+  resolve(requestedHome),
+  args.includes('--force'),
+  requestedDataRoot === undefined ? undefined : resolve(requestedDataRoot),
+)
 process.stdout.write(`${JSON.stringify(receipt)}\n`)

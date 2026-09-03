@@ -17,10 +17,12 @@ import { describe, expect, it } from 'vitest'
 import {
   TicketCandidateRef,
   TicketSnapshotId,
+  type L3DetailsReadRequest,
   type TicketRetrievalRequest,
   type TicketRetrievalSpec,
   type TicketSearchPage,
   type TicketSearchOptions,
+  type TicketSnapshot,
 } from '@retrieval-agent/contracts'
 import { createTicketResultCollection } from '@retrieval-agent/ticket-collection'
 import { readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
@@ -75,9 +77,11 @@ function sessionAgent(session: Session): Agent {
 }
 
 class StubPrincipalProvider extends Service {
+  readonly operations: string[] = []
   constructor(ctx: Context) { super(ctx, 'ticketPrincipalProvider') }
 
-  resolve() {
+  resolve(request: { readonly operation: string }) {
+    this.operations.push(request.operation)
     return Promise.resolve({
       tenantId: 'demo',
       subjectId: 'development-admin',
@@ -100,8 +104,8 @@ class StubTicketProvider extends Service {
       target: request.target,
       originalQuery: request.query,
       normalizedQuery: (request.retrievalQuery ?? request.query).trim(),
-      requestedCount: request.requestedCount ?? 5,
-      countPolicy: request.countPolicy ?? (request.requestedCount === undefined ? 'provider_default' : 'explicit'),
+      ...(request.requestedCount === undefined ? {} : { requestedCount: request.requestedCount }),
+      countPolicy: request.countPolicy ?? (request.requestedCount === undefined ? 'adaptive' : 'explicit'),
       mode: request.mode ?? 'keyword',
       filters: request.filters ?? [],
       ambiguities: request.ambiguities ?? [],
@@ -111,7 +115,7 @@ class StubTicketProvider extends Service {
     }
   }
 
-  openSnapshot() {
+  openSnapshot(): Promise<TicketSnapshot> {
     return Promise.resolve({
       snapshotId: TicketSnapshotId('cordis-proxy-snapshot'),
       shortId: 'proxy-snapshot',
@@ -130,6 +134,7 @@ class StubTicketProvider extends Service {
         pagination: false,
         evidencePromotion: false,
         detailRead: false,
+        l3DetailsRead: false,
         exportRead: false,
         keywordSearch: true as const,
         denseSearch: true,
@@ -201,10 +206,10 @@ class UnionTicketProvider extends StubTicketProvider {
         sourceVersion: 'fixture-v1',
         snapshotId,
         contentHash: `hash-${suffix}`,
-        evidenceLevel: 'L1' as const,
+        evidenceLevel: 'L2' as const,
         rank: 1,
         title: `工单 ${suffix}`,
-        summary: `摘要 ${suffix}`,
+        summary: `工单 ${suffix} 摘要`,
         l0: {},
         matchFragments: [{ field: 'title' as const, text: `工单 ${suffix}`, truncated: false }],
       }],
@@ -239,26 +244,75 @@ class UnionTicketProvider extends StubTicketProvider {
   }
 }
 
-class FirstRequestAssessmentAdapter extends LlmAdapter {
+class RawTicketProvider extends UnionTicketProvider {
+  readonly l3Requests: L3DetailsReadRequest[] = []
+
+  override async openSnapshot() {
+    const snapshot = await super.openSnapshot()
+    return {
+      ...snapshot,
+      fieldCatalog: [{
+        key: 'source.raw', label: '原始载荷', valueKind: 'raw_json' as const, accessLevel: 'L3' as const,
+        filterOperators: [], sensitivity: 'source_controlled' as const,
+      }],
+      capabilities: { ...snapshot.capabilities, l3DetailsRead: true },
+    }
+  }
+
+  override async search(principal: unknown, snapshotId: TicketSnapshotId, query: TicketRetrievalSpec, options: TicketSearchOptions): Promise<TicketSearchPage> {
+    const page = await super.search(principal, snapshotId, query, options)
+    if (query.mode !== 'hybrid' || page.candidates.length === 0) return page
+    const secondRef = TicketCandidateRef('candidate-2')
+    const second = {
+      ...page.candidates[0]!, ref: secondRef, displayId: 'TKT-2', contentHash: 'hash-2', rank: 2,
+      title: '工单 2', summary: '工单 2 摘要',
+    }
+    return {
+      ...page,
+      candidates: [...page.candidates, second], returned: 2,
+      trace: {
+        ...page.trace,
+        signals: [...page.trace.signals, { candidateRef: secondRef, finalRank: 2, fusedScore: 0.5, channels: [] }],
+      },
+      boundary: { ...page.boundary, rankedHits: 2 },
+    }
+  }
+
+  readL3Details(_principal: unknown, request: L3DetailsReadRequest) {
+    this.l3Requests.push(request)
+    return Promise.resolve({
+      snapshotId: request.snapshotId,
+      requestedCandidateRefs: [...request.candidateRefs],
+      details: request.candidateRefs.map((candidateRef, index) => ({
+        candidateRef,
+        displayId: `TKT-${index + 1}`,
+        sourceVersion: 'fixture-v1',
+        contentHash: `hash-${index + 1}`,
+        source: { datasetId: 'tickets', datasetVersion: 'v1', schemaVersion: 'raw-v1', recordId: `TKT-${index + 1}` },
+        rawPayload: { ticket: `TKT-${index + 1}`, status: 'closed' },
+        trust: 'untrusted_ticket_evidence' as const,
+      })),
+      warnings: [],
+    })
+  }
+}
+
+class FirstRequestAnswerAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
-    const id = CallId('first-request-assessment')
-    const argumentsText = JSON.stringify({ outcome: { verdict: 'accept_current_top_k' } })
-    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-    yield { type: 'tool-call-delta', index: 0, id, name: 'ticket_assess_state', argumentsDelta: argumentsText }
-    yield {
-      type: 'block-end', index: 0,
-      block: { type: 'tool-call', id, name: 'ticket_assess_state', arguments: argumentsText },
-    }
+    const text = '当前标题与摘要已经足以回答。'
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
     yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 12 } }
-    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
   }
 }
 
 describe('RetrievalAgentService Cordis binding', () => {
-  it('completes through the public DSH loop with state and assessment available in the first request', async () => {
+  it('does not let a natural-language first response end an active retrieval', async () => {
     const ctx = new Context()
     let disposeAgent: (() => Promise<void>) | undefined
     try {
@@ -271,12 +325,12 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
       await ctx.plugin(RetrievalAgentService, { policy: POLICY, maxContextTokens: 4_096 })
-      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20, analyzer: QUERY_ANALYZER })
-      installRetrievalTools(ctx, ctx.retrievalAgent)
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
+      installRetrievalTools(ctx, ctx.retrievalAgent, { maxFinishReminders: 1 })
       installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
       await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
 
-      const adapter = new FirstRequestAssessmentAdapter()
+      const adapter = new FirstRequestAnswerAdapter()
       ctx.llm.registerAdapter(['fixture-loop'], adapter)
       const handle = await ctx.agents.create({
         sessionId: SessionId('public-first-request-path'),
@@ -289,21 +343,26 @@ describe('RetrievalAgentService Cordis binding', () => {
       }))
       await handle.agent.whenIdle()
 
-      expect(adapter.requests).toHaveLength(1)
+      expect(adapter.requests).toHaveLength(2)
       const request = adapter.requests[0]!
       expect(request.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining([
-        'ticket_assess_state', 'ticket_keyword_search', 'ticket_vector_search', 'ticket_state',
+        'ticket_assess_state', 'ticket_bm25_search', 'ticket_rag_search',
+      ]))
+      expect(request.tools?.map(tool => tool.name)).not.toContain('ticket_read_details')
+      expect(request.tools?.map(tool => tool.name)).not.toEqual(expect.arrayContaining([
+        'ticket_continue_ranking', 'ticket_expand_detail',
+        'ticket_request_clarification', 'ticket_answer_clarification', 'ticket_state',
       ]))
       expect(request.messages.flatMap(message => message.content)
-        .some(block => block.type === 'text' && block.text.includes('<retrieval_state>'))).toBe(true)
+        .some(block => block.type === 'text' && block.text.includes('<ticket_knowledge_context>'))).toBe(true)
       expect(ctx.retrievalAgent.current(handle.agent)).toMatchObject({
-        phase: 'stopped', termination: 'top_k_accepted',
-        frozenEvidence: { complete: false, topKAccepted: true, resultPagesExhausted: true },
-        budget: { modelStepsUsed: 1, successfulToolCalls: 1, failedToolCalls: 0 },
+        phase: 'stopped', termination: 'partial',
+        task: { target: 'ranked_cases', countPolicy: 'adaptive', completenessRequirement: 'top_k' },
+        budget: { modelStepsUsed: 2, successfulToolCalls: 0, failedToolCalls: 0 },
       })
       const requests = readRetrievalSessionEvents(handle.agent.session)
         .filter(event => event.type === 'retrieval/model-request-measured')
-      expect(requests).toHaveLength(1)
+      expect(requests).toHaveLength(2)
       expect(requests[0]?.data).toMatchObject({ accepted: true })
       expect(requests[0]?.data.estimatedInputTokens).toBeLessThanOrEqual(4_096)
       expect(handle.agent.session.events.filter(event => event.type === 'request/header')).toHaveLength(1)
@@ -339,30 +398,142 @@ describe('RetrievalAgentService Cordis binding', () => {
     }
   })
 
-  it('admits 4096-token requests and rejects the next request above the hard context limit', async () => {
+  it('reauthorizes multiple current tickets through one atomic L3 provider call', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(StubPrincipalProvider)
+      await ctx.plugin(RawTicketProvider)
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY })
+      const agent = sessionAgent(Session.create(SessionId('raw-detail-agent')))
+      let state = await ctx.retrievalAgent.start(agent, {
+        target: 'ranked_cases', query: '副卡', requestedCount: 5,
+      })
+
+      const refs = state.candidates.map(candidate => candidate.ref)
+      state = await ctx.retrievalAgent.assess(agent, {
+        decision: 'continue', evaluator: 'model',
+        selectedCandidateRefs: refs, excludedCandidateRefs: [],
+        gaps: [{
+          kind: 'depth', status: 'open', evaluator: 'model', evidenceRefs: refs,
+          description: 'L2 摘要不足以核对原始处理记录。',
+        }],
+        nextAction: 'read_l3_details',
+      })
+      const detail = await ctx.retrievalAgent.readL3Details(agent, refs)
+
+      expect(detail).toEqual({
+        snapshotId: state.snapshot?.snapshotId,
+        requestedCandidateRefs: refs,
+        details: refs.map((candidateRef, index) => ({
+          candidateRef,
+          displayId: `TKT-${index + 1}`,
+          sourceVersion: 'fixture-v1',
+          contentHash: `hash-${index + 1}`,
+          source: { datasetId: 'tickets', datasetVersion: 'v1', schemaVersion: 'raw-v1', recordId: `TKT-${index + 1}` },
+          rawPayload: { ticket: `TKT-${index + 1}`, status: 'closed' },
+          trust: 'untrusted_ticket_evidence',
+        })),
+        warnings: [],
+      })
+      expect(ctx.ticketRetrievalProvider).toMatchObject({
+        l3Requests: [{
+          snapshotId: state.snapshot?.snapshotId,
+          candidateRefs: refs,
+          purpose: 'model_ticket_load',
+        }],
+      })
+      expect(ctx.ticketPrincipalProvider).toMatchObject({ operations: ['snapshot_open', 'l3_details_read'] })
+      expect(readRetrievalSessionEvents(agent.session)).toContainEqual(expect.objectContaining({ type: 'retrieval/l3-details-read' }))
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('uses the selected model capacity by default instead of the obsolete 8192-token product limit', async () => {
     const ctx = new Context()
     try {
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
-      await ctx.plugin(RetrievalAgentService, { policy: POLICY, maxContextTokens: 4_096 })
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY })
       const session = Session.create(SessionId('context-admission-agent'))
       const agent = sessionAgent(session)
       await ctx.retrievalAgent.start(agent, { target: 'ranked_cases', query: '副卡' })
 
       await expect(ctx.retrievalAgent.admitModelRequest(agent, {
-        estimatedInputTokens: 4_096, serializationBytes: 1_000, wallClockElapsedMs: 1,
+        estimatedInputTokens: 14_674, serializationBytes: 80_685, wallClockElapsedMs: 1,
+        modelContextWindow: 1_000_000,
       })).resolves.toMatchObject({ accepted: true })
       await expect(ctx.retrievalAgent.admitModelRequest(agent, {
-        estimatedInputTokens: 4_097, serializationBytes: 1_100, wallClockElapsedMs: 2,
+        estimatedInputTokens: 1_000_001, serializationBytes: 1_100, wallClockElapsedMs: 2,
+        modelContextWindow: 1_000_000,
       })).resolves.toMatchObject({ accepted: false })
 
       expect(ctx.retrievalAgent.current(agent)).toMatchObject({
         phase: 'stopped', termination: 'budget_exhausted',
-        budget: { modelStepsUsed: 1, totalInputTokens: 4_096, serializationBytes: 1_000 },
+        budget: { modelStepsUsed: 1, totalInputTokens: 14_674, serializationBytes: 80_685 },
+        frozenEvidence: { stoppingReason: 'budget_exhausted' },
       })
-      expect(readRetrievalSessionEvents(session)
+      expect(ctx.retrievalAgent.current(agent).frozenEvidence?.candidates.length).toBeGreaterThan(0)
+      const requests = readRetrievalSessionEvents(session)
         .filter(event => event.type === 'retrieval/model-request-measured')
-        .map(event => event.data.accepted)).toEqual([true, false])
+      expect(requests.map(event => event.data.accepted)).toEqual([true, false])
+      expect(requests.at(-1)?.data).toMatchObject({
+        modelContextWindow: 1_000_000,
+        effectiveContextLimit: 1_000_000,
+        rejectionReason: 'model_context',
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps an explicit deployment context cap as a narrower operator override', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(StubPrincipalProvider)
+      await ctx.plugin(UnionTicketProvider)
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY, maxContextTokens: 4_096 })
+      const session = Session.create(SessionId('deployment-context-admission-agent'))
+      const agent = sessionAgent(session)
+      await ctx.retrievalAgent.start(agent, { target: 'ranked_cases', query: '副卡' })
+
+      await expect(ctx.retrievalAgent.admitModelRequest(agent, {
+        estimatedInputTokens: 4_097, serializationBytes: 1_100, wallClockElapsedMs: 2,
+        modelContextWindow: 1_000_000,
+      })).resolves.toMatchObject({ accepted: false })
+      expect(readRetrievalSessionEvents(session)
+        .findLast(event => event.type === 'retrieval/model-request-measured')?.data).toMatchObject({
+        deploymentContextLimit: 4_096,
+        effectiveContextLimit: 4_096,
+        rejectionReason: 'deployment_context',
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('persists an explicit budget_exhausted stop when the wall-clock hook fires', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(StubPrincipalProvider)
+      await ctx.plugin(UnionTicketProvider)
+      await ctx.plugin(RetrievalAgentService, { policy: POLICY, maxLatencyMs: 120_000 })
+      const session = Session.create(SessionId('wall-clock-budget-agent'))
+      const agent = sessionAgent(session)
+      await ctx.retrievalAgent.start(agent, { target: 'ranked_cases', query: '副卡' })
+
+      await expect(ctx.retrievalAgent.stopForWallClockBudget(agent)).resolves.toMatchObject({
+        phase: 'stopped',
+        termination: 'budget_exhausted',
+      })
+      expect(ctx.retrievalAgent.current(agent)).toMatchObject({
+        phase: 'stopped',
+        termination: 'budget_exhausted',
+        frozenEvidence: { stoppingReason: 'budget_exhausted' },
+      })
+      expect(ctx.retrievalAgent.current(agent).frozenEvidence?.candidates.length).toBeGreaterThan(0)
+      expect(readRetrievalSessionEvents(session).filter(event => event.type === 'retrieval/stopped').at(-1)?.data)
+        .toMatchObject({ reason: 'budget_exhausted' })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -375,7 +546,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(StubTicketProvider)
       await ctx.plugin(RetrievalAgentService, { policy: POLICY })
-      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20, analyzer: QUERY_ANALYZER })
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
 
       const session = Session.create(SessionId('automatic-pre-step'))
       const agent = sessionAgent(session)
@@ -420,12 +591,17 @@ describe('RetrievalAgentService Cordis binding', () => {
       }
       expect(contracted.data.spec.originalQuery).toBe(rawQuery)
       expect(contracted.data.contract).toMatchObject({
-        target: 'ranked_cases', requestedCount: 20, countPolicy: 'adaptive',
+        target: 'ranked_cases', countPolicy: 'adaptive',
       })
+      expect(contracted.data.queryContract).toMatchObject({
+        schemaVersion: 7, resultPolicy: 'adaptive_top_k',
+      })
+      expect(contracted.data.queryContract).not.toHaveProperty('maxResults')
+      expect(contracted.data.queryContract).not.toHaveProperty('resultLimit')
       expect(contracted.data.spec.normalizedQuery).toBe('副卡解绑后流量仍然共享')
       const snapshotText = snapshotMessage?.content.find(block => block.type === 'text')?.text
       expect(snapshotText).toBe(projected.data.selection.rendered)
-      expect(projected.data.selection.rendered).toContain('<retrieval_state>')
+      expect(projected.data.selection.rendered).toContain('<ticket_knowledge_context>')
       expect(ctx.retrievalAgent.current(agent).query.original).toBe(rawQuery)
 
       const nextDirect = createUserMessage({
@@ -456,7 +632,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(StubTicketProvider)
       await ctx.plugin(RetrievalAgentService, { policy: POLICY })
-      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20, analyzer: QUERY_ANALYZER })
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
       const session = Session.create(SessionId('rejected-pre-step'))
       const agent = sessionAgent(session)
       const direct = createUserMessage({ content: [{ type: 'text', text: '不应启动' }], source: { kind: 'user' } })
@@ -482,7 +658,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
       await ctx.plugin(RetrievalAgentService, { policy: POLICY })
-      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20, analyzer: QUERY_ANALYZER })
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
       const session = Session.create(SessionId('natural-product-path'))
       const agent = sessionAgent(session)
       const direct = createUserMessage({
@@ -532,7 +708,7 @@ describe('RetrievalAgentService Cordis binding', () => {
     }
   })
 
-  it('connects direct-user pre-step, registered tools, repair search, and the terminal collection in one path', async () => {
+  it('connects direct-user pre-step, RAG, and the structured assessment tool', async () => {
     const ctx = new Context()
     try {
       await ctx.plugin(AgentRegistry)
@@ -541,7 +717,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(RetrievalAgentService, { policy: POLICY })
       await ctx.plugin(SystemPrompt)
       await ctx.plugin(ToolRuntime)
-      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { adaptiveMaxResults: 20, analyzer: QUERY_ANALYZER })
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
       installRetrievalTools(ctx, ctx.retrievalAgent, { maxFinishReminders: 3 })
 
       const session = Session.create(SessionId('registered-tool-product-path'))
@@ -557,49 +733,16 @@ describe('RetrievalAgentService Cordis binding', () => {
       )
       expect(decision.kind).toBe('enter')
 
-      let state = ctx.retrievalAgent.current(agent)
-      const firstAssessment = await ctx.tools.execute({
-        signal: SIGNAL,
-        callId: CallId('assess-initial'),
-        name: 'ticket_assess_state',
-        arguments: {
-          outcome: { verdict: 'continue', next: { type: 'vector_search' } },
-        },
-        agent,
-      })
-      expect(firstAssessment).toMatchObject({ isError: false, value: { phase: 'assessed' } })
-      const firstAssessmentText = firstAssessment.content.find(block => block.type === 'text')?.text ?? ''
-      expect(Buffer.byteLength(firstAssessmentText, 'utf8')).toBeLessThan(4_096)
-      expect(firstAssessmentText).not.toContain('candidate-1')
-      expect(firstAssessmentText).not.toContain('fieldCatalog')
-
       const repaired = await ctx.tools.execute({
         signal: SIGNAL,
-        callId: CallId('vector-repair'),
-        name: 'ticket_vector_search',
+        callId: CallId('rag-repair'),
+        name: 'ticket_rag_search',
         arguments: { query: '解绑后仍共享' },
         agent,
       })
       expect(repaired).toMatchObject({ isError: false, value: { phase: 'assessed' } })
       expect(Buffer.byteLength(repaired.content.find(block => block.type === 'text')?.text ?? '', 'utf8')).toBeLessThan(4_096)
-
-      state = ctx.retrievalAgent.current(agent)
-      const terminal = await ctx.tools.execute({
-        signal: SIGNAL,
-        callId: CallId('assess-finish'),
-        name: 'ticket_assess_state',
-        arguments: { outcome: { verdict: 'accept_current_top_k' } },
-        agent,
-      })
-
-      expect(terminal).toMatchObject({
-        isError: false,
-        concludesTurn: true,
-        value: {
-          type: 'ticket_collection', complete: false, topKAccepted: true, stoppingReason: 'top_k_accepted',
-          tickets: [{ displayId: 'TKT-3' }, { displayId: 'TKT-1' }],
-        },
-      })
+      expect(ctx.tools.schemas().map(tool => tool.name)).toContain('ticket_assess_state')
       expect(ctx.ticketRetrievalProvider).toMatchObject({ modes: ['hybrid', 'dense'] })
     } finally {
       await ctx.fiber.dispose()

@@ -1,17 +1,20 @@
 import { Context } from '@deepseek-ai/cordis'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { FixturePrincipalProviderService } from './principal.js'
 import { LocalTicketProviderService } from './provider.js'
 import { StreamClusterTicketProviderService } from './streamcluster-provider.js'
-import { bundledFixturePath } from './startup.js'
 import { testHybridRanker } from '../../../tests/support/fake-model-gateway.js'
+
+const LEGACY_REGRESSION_FIXTURE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'data', 'tickets', 'synthetic', 'legacy-bronze-v1.jsonl')
 
 describe('Cordis service wrappers', () => {
   it('rejects an unpinned model identity for the Hybrid development provider', async () => {
     const ctx = new Context()
     try {
       await expect(ctx.plugin(LocalTicketProviderService, {
-        dataPath: bundledFixturePath(),
+        dataPath: LEGACY_REGRESSION_FIXTURE,
         providerId: 'unpinned-hybrid',
         retrievalMode: 'hybrid',
       })).rejects.toThrow('pinned embeddingRevision')
@@ -32,7 +35,7 @@ describe('Cordis service wrappers', () => {
         developmentAdmin: true,
       })
       await ctx.plugin(LocalTicketProviderService, {
-        dataPath: bundledFixturePath(),
+        dataPath: LEGACY_REGRESSION_FIXTURE,
         providerId: 'cordis-proxy-local-v1',
         retrievalMode: 'keyword',
         ranker: testHybridRanker(),
@@ -46,6 +49,7 @@ describe('Cordis service wrappers', () => {
         target: 'ranked_cases',
         query: '副卡',
         requestedCount: 5,
+        countPolicy: 'explicit',
         mode: 'keyword',
       })
       const snapshot = await ctx.ticketRetrievalProvider.openSnapshot(principal)
@@ -68,7 +72,7 @@ describe('Cordis service wrappers', () => {
     try {
       await ctx.plugin(StreamClusterTicketProviderService, { baseUrl: 'http://127.0.0.1:9' })
       expect(ctx.ticketRetrievalProvider.providerId).toBe('streamcluster-v1')
-      expect(ctx.ticketRetrievalProvider.resolve({ target: 'ranked_cases', query: '副卡' }))
+      expect(ctx.ticketRetrievalProvider.resolve({ target: 'ranked_cases', query: '副卡', requestedCount: 5, countPolicy: 'explicit' }))
         .toMatchObject({ normalizedQuery: '副卡', requestedCount: 5 })
     } finally {
       await ctx.fiber.dispose()

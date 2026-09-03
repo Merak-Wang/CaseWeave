@@ -1,11 +1,5 @@
-import {
-  RetrievalError,
-  type NormalizedTicketRecord,
-  type TicketDisplayField,
-  type TicketFieldDescriptor,
-} from '@retrieval-agent/contracts'
+import { RetrievalError, type NormalizedTicketRecord, type TicketDisplayField, type TicketFieldDescriptor } from '@retrieval-agent/contracts'
 import { normalizeFixtureTicket, type FixtureTicketInput } from './fixture.js'
-import { stableJson } from './hash.js'
 
 export interface PublicSnapshotAccessOverlay {
   readonly tenantId: string
@@ -22,6 +16,8 @@ export const DEVELOPMENT_ADMIN_ACCESS: PublicSnapshotAccessOverlay = Object.free
 const SOURCE_FIELD_CATALOG: readonly TicketFieldDescriptor[] = Object.freeze([
   { key: 'source.dataset', label: '数据集', valueKind: 'keyword', accessLevel: 'L0', filterOperators: ['eq', 'neq'], sensitivity: 'non_sensitive' },
   { key: 'source.kind', label: '来源类型', valueKind: 'keyword', accessLevel: 'L0', filterOperators: ['eq', 'neq'], sensitivity: 'non_sensitive' },
+  { key: 'source.split', label: '数据分片', valueKind: 'keyword', accessLevel: 'L0', filterOperators: ['eq', 'neq'], sensitivity: 'non_sensitive' },
+  { key: 'source.domain', label: '业务域', valueKind: 'keyword', accessLevel: 'L0', filterOperators: ['eq', 'neq'], sensitivity: 'non_sensitive' },
   { key: 'source.queue', label: '队列', valueKind: 'keyword', accessLevel: 'L0', filterOperators: ['eq', 'neq'], sensitivity: 'source_controlled' },
   { key: 'source.tags', label: '标签', valueKind: 'string_list', accessLevel: 'L0', filterOperators: ['contains'], sensitivity: 'source_controlled' },
   { key: 'source.near_duplicate_group', label: '近重复组', valueKind: 'keyword', accessLevel: 'L0', filterOperators: ['eq', 'neq'], sensitivity: 'source_controlled' },
@@ -47,6 +43,12 @@ function stringList(record: Readonly<Record<string, unknown>>, key: string): rea
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
 }
 
+function redactionStatus(record: Readonly<Record<string, unknown>>, sourceKind: string): NormalizedTicketRecord['piiRedactionStatus'] {
+  const value = record.pii_redaction_status ?? (sourceKind === 'real' ? 'redacted' : 'not_applicable')
+  if (value === 'not_applicable' || value === 'redacted' || value === 'unreviewed') return value
+  throw new RetrievalError('INVALID_REQUEST', 'pii_redaction_status 必须是 not_applicable、redacted 或 unreviewed。')
+}
+
 function searchableStrings(value: unknown, output: string[] = [], depth = 0): string[] {
   if (output.length >= 256 || depth > 5 || value === null) return output
   if (typeof value === 'string') {
@@ -58,7 +60,9 @@ function searchableStrings(value: unknown, output: string[] = [], depth = 0): st
     for (const item of value) searchableStrings(item, output, depth + 1)
     return output
   }
-  for (const item of Object.values(value as Readonly<Record<string, unknown>>)) searchableStrings(item, output, depth + 1)
+  for (const [key, item] of Object.entries(value as Readonly<Record<string, unknown>>)) {
+    if (key !== 'source_metadata' && key !== 'transformation') searchableStrings(item, output, depth + 1)
+  }
   return output
 }
 
@@ -87,12 +91,14 @@ export function normalizePublicSnapshotTicket(
   const summary = stringValue(payload, 'summary') ?? stringValue(payload, 'title')
     ?? stringValue(payload, 'category') ?? stringValue(payload, 'type') ?? ticketId
   const sourceKind = stringValue(payload, 'source_kind') ?? 'unknown'
+  const sourceSplit = stringValue(payload, 'source_split')
+  const domain = stringValue(payload, 'domain')
   const queue = stringValue(payload, 'queue')
   const nearDuplicateGroup = stringValue(payload, 'near_duplicate_group')
   const resolution = stringValue(payload, 'resolution')
   const createdAt = stringValue(payload, 'created_at')
   const problemDescription = stringValue(payload, 'problem_description')
-  const answer = stringValue(payload, 'answer')
+  const product = stringValue(payload, 'product')
   const category = stringValue(payload, 'category')
   const type = stringValue(payload, 'type')
   const priority = stringValue(payload, 'priority')
@@ -103,9 +109,10 @@ export function normalizePublicSnapshotTicket(
   const additionalFields = [
     displayField('source.dataset', '数据集', sourceDataset, 'source_dataset'),
     displayField('source.kind', '来源类型', sourceKind, 'source_kind'),
+    displayField('source.split', '数据分片', sourceSplit, 'source_split'),
+    displayField('source.domain', '业务域', domain, 'domain'),
     displayField('source.queue', '队列', queue, 'queue'),
   ].filter((value): value is TicketDisplayField => value !== undefined)
-  const rawJson = stableJson(payload)
   const sourceIndex = payload.source_index
   return normalizeFixtureTicket({
     ticketId,
@@ -120,7 +127,7 @@ export function normalizePublicSnapshotTicket(
     ...(problemDescription === undefined ? {} : { problemDescription }),
     conversationOrUpdates: [],
     resolutionSteps: resolution === undefined ? [] : [resolution],
-    ...(answer === undefined ? {} : { answer }),
+    ...(product === undefined ? {} : { product }),
     ...(category === undefined ? {} : { category }),
     ...(type === undefined ? {} : { type }),
     ...(priority === undefined ? {} : { priority }),
@@ -128,7 +135,7 @@ export function normalizePublicSnapshotTicket(
     ...(language === undefined ? {} : { language }),
     ...(region === undefined ? {} : { region }),
     errorCodes: [],
-    piiRedactionStatus: sourceKind === 'real' ? 'redacted' : 'not_applicable',
+    piiRedactionStatus: redactionStatus(payload, sourceKind),
     rawSource: {
       datasetId: sourceDataset,
       datasetVersion,
@@ -141,12 +148,13 @@ export function normalizePublicSnapshotTicket(
     filterValues: {
       'source.dataset': sourceDataset,
       'source.kind': sourceKind,
+      ...(sourceSplit === undefined ? {} : { 'source.split': sourceSplit }),
+      ...(domain === undefined ? {} : { 'source.domain': domain }),
       ...(queue === undefined ? {} : { 'source.queue': queue }),
       ...(tags.length === 0 ? {} : { 'source.tags': tags }),
       ...(nearDuplicateGroup === undefined ? {} : { 'source.near_duplicate_group': nearDuplicateGroup }),
     },
     additionalEvidence: {
-      'source.raw': [rawJson],
       ...(resolution === undefined ? {} : { 'source.resolution': [resolution] }),
     },
     fieldCatalog: SOURCE_FIELD_CATALOG,

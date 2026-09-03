@@ -3,9 +3,11 @@ import z from '@deepseek-ai/schemastery'
 import type {
   DetailReadRequest,
   EvidenceReadRequest,
+  L3DetailsReadRequest,
   ProviderCallOptions,
   TicketDetailResult,
   TicketEvidenceResult,
+  TicketL3DetailsResult,
   TicketProviderStatus,
   TicketRetrievalRequest,
   TicketRetrievalSpec,
@@ -24,7 +26,6 @@ export interface Config {
   readonly apiKey?: string
   readonly timeoutMs?: number
   readonly maxResponseBytes?: number
-  readonly defaultRequestedCount?: number
   readonly maxRequestedCount?: number
 }
 
@@ -34,7 +35,6 @@ export const Config: z<Config> = z.object({
   apiKey: z.string(),
   timeoutMs: z.number().step(1).min(1).default(30_000),
   maxResponseBytes: z.number().step(1).min(1).default(2 * 1024 * 1024),
-  defaultRequestedCount: z.number().step(1).min(1).default(5),
   maxRequestedCount: z.number().step(1).min(1).max(100).default(20),
 })
 
@@ -51,7 +51,6 @@ export class StreamClusterTicketProviderService extends TicketRetrievalProviderS
       ...(config.apiKey === undefined || config.apiKey.length === 0 ? {} : { authorization: `Bearer ${config.apiKey}` }),
       ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
       ...(config.maxResponseBytes === undefined ? {} : { maxResponseBytes: config.maxResponseBytes }),
-      ...(config.defaultRequestedCount === undefined ? {} : { defaultRequestedCount: config.defaultRequestedCount }),
       ...(config.maxRequestedCount === undefined ? {} : { maxRequestedCount: config.maxRequestedCount }),
     })
   }
@@ -62,6 +61,7 @@ export class StreamClusterTicketProviderService extends TicketRetrievalProviderS
   search(principal: TrustedPrincipalContext, snapshotId: TicketSnapshotId, query: TicketRetrievalSpec, options: TicketSearchOptions): Promise<TicketSearchPage> { return this.provider.search(principal, snapshotId, query, options) }
   readEvidence(principal: TrustedPrincipalContext, request: EvidenceReadRequest, options?: ProviderCallOptions): Promise<TicketEvidenceResult> { return this.provider.readEvidence(principal, request, options) }
   readDetails(principal: TrustedPrincipalContext, request: DetailReadRequest, options?: ProviderCallOptions): Promise<TicketDetailResult> { return this.provider.readDetails(principal, request, options) }
+  readL3Details(principal: TrustedPrincipalContext, request: L3DetailsReadRequest, options?: ProviderCallOptions): Promise<TicketL3DetailsResult> { return this.provider.readL3Details(principal, request, options) }
   status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus> { return this.provider.status(principal, snapshotId) }
 }
 

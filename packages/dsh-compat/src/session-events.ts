@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { realpathSync } from 'node:fs'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {
@@ -22,6 +23,7 @@ declare module '@deepseek-ai/dsh-session/types' {
     'retrieval/search-completed': { readonly event: RetrievalDomainEvent<'retrieval/search-completed'> }
     'retrieval/knowledge-assessed': { readonly event: RetrievalDomainEvent<'retrieval/knowledge-assessed'> }
     'retrieval/state-recorded': { readonly event: RetrievalDomainEvent<'retrieval/state-recorded'> }
+    'retrieval/state-patched': { readonly event: RetrievalDomainEvent<'retrieval/state-patched'> }
     'retrieval/evidence-promoted': { readonly event: RetrievalDomainEvent<'retrieval/evidence-promoted'> }
     'retrieval/clarification-requested': { readonly event: RetrievalDomainEvent<'retrieval/clarification-requested'> }
     'retrieval/clarification-answered': { readonly event: RetrievalDomainEvent<'retrieval/clarification-answered'> }
@@ -32,6 +34,8 @@ declare module '@deepseek-ai/dsh-session/types' {
     'retrieval/evidence-frozen': { readonly event: RetrievalDomainEvent<'retrieval/evidence-frozen'> }
     'retrieval/stopped': { readonly event: RetrievalDomainEvent<'retrieval/stopped'> }
     'retrieval/detail-read': { readonly event: RetrievalDomainEvent<'retrieval/detail-read'> }
+    'retrieval/l3-detail-read': { readonly event: RetrievalDomainEvent<'retrieval/l3-detail-read'> }
+    'retrieval/l3-details-read': { readonly event: RetrievalDomainEvent<'retrieval/l3-details-read'> }
     'retrieval/exported': { readonly event: RetrievalDomainEvent<'retrieval/exported'> }
     'retrieval/presentation-anchored': RetrievalPresentationAnchor
   }
@@ -44,14 +48,53 @@ const REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES = Object.freeze([
 
 export interface DshSessionCompatibilityReport {
   readonly packageVersion: typeof PINNED_DSH_SESSION_VERSION
+  readonly registeredRegistryCount: number
   readonly registeredEventTypes: readonly (typeof REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES)[number][]
   readonly newlyRegisteredEventTypes: readonly (typeof REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES)[number][]
+}
+
+export interface DshSessionCompatibilityOptions {
+  /** DSH executable used to resolve the host's physical Session package instance. */
+  readonly runtimeEntrypoint?: string
 }
 
 export function assertCompatibleDshVersion(actual: unknown): asserts actual is typeof PINNED_DSH_SESSION_VERSION {
   if (actual !== PINNED_DSH_SESSION_VERSION) {
     throw new Error(`Unsupported @deepseek-ai/dsh-session version ${String(actual)}; expected ${PINNED_DSH_SESSION_VERSION}`)
   }
+}
+
+function isModuleNotFound(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && 'code' in error && (error.code === 'MODULE_NOT_FOUND' || error.code === 'ERR_MODULE_NOT_FOUND')
+}
+
+/** Resolve the Session registry used by the DSH executable, not the plugin's peer-dependency copy. */
+function resolveRuntimeSessionRegistry(entrypoint: string | undefined): Set<string> | undefined {
+  if (entrypoint === undefined || entrypoint.length === 0) return undefined
+  let runtimeRequire: NodeJS.Require
+  try {
+    runtimeRequire = createRequire(realpathSync(entrypoint))
+  } catch (error) {
+    if (isModuleNotFound(error) || (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')) {
+      return undefined
+    }
+    throw error
+  }
+  let packagePath: string
+  try {
+    packagePath = runtimeRequire.resolve('@deepseek-ai/dsh-session/package.json')
+  } catch (error) {
+    if (isModuleNotFound(error)) return undefined
+    throw error
+  }
+  const descriptor = runtimeRequire(packagePath) as { readonly version?: unknown }
+  assertCompatibleDshVersion(descriptor.version)
+  const runtimeModule = runtimeRequire('@deepseek-ai/dsh-session') as { readonly KNOWN_SESSION_EVENT_TYPES?: unknown }
+  if (!(runtimeModule.KNOWN_SESSION_EVENT_TYPES instanceof Set)) {
+    throw new Error('DSH runtime Session event registry is not mutable on the pinned runtime')
+  }
+  return runtimeModule.KNOWN_SESSION_EVENT_TYPES as Set<string>
 }
 
 /**
@@ -61,19 +104,30 @@ export function assertCompatibleDshVersion(actual: unknown): asserts actual is t
  * registration API. This mutation is deliberately centralized and guarded by
  * an exact version handshake so it fails closed when DSH changes.
  */
-export function installDshSessionCompatibility(): DshSessionCompatibilityReport {
+export function installDshSessionCompatibility(
+  options: DshSessionCompatibilityOptions = {},
+): DshSessionCompatibilityReport {
   assertCompatibleDshVersion(sessionPackage.version)
   if (!(KNOWN_SESSION_EVENT_TYPES instanceof Set)) {
     throw new Error('DSH known Session event registry is not mutable on the pinned runtime')
   }
-  const registry = KNOWN_SESSION_EVENT_TYPES as Set<string>
+  // pnpm can load the DSH executable and an out-of-tree plugin from two physical copies of the same
+  // package. Register both identities so persistence and product replay share one required vocabulary.
+  const registries = new Set<Set<string>>([KNOWN_SESSION_EVENT_TYPES as Set<string>])
+  const runtimeRegistry = resolveRuntimeSessionRegistry(options.runtimeEntrypoint ?? process.argv[1])
+  if (runtimeRegistry !== undefined) registries.add(runtimeRegistry)
   const newlyRegisteredEventTypes: (typeof REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES)[number][] = []
   for (const eventType of REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES) {
-    if (!registry.has(eventType)) newlyRegisteredEventTypes.push(eventType)
-    registry.add(eventType)
+    let newlyRegistered = false
+    for (const registry of registries) {
+      if (!registry.has(eventType)) newlyRegistered = true
+      registry.add(eventType)
+    }
+    if (newlyRegistered) newlyRegisteredEventTypes.push(eventType)
   }
   return {
     packageVersion: PINNED_DSH_SESSION_VERSION,
+    registeredRegistryCount: registries.size,
     registeredEventTypes: [...REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES],
     newlyRegisteredEventTypes,
   }
@@ -102,6 +156,7 @@ export function appendRetrievalSessionEvent(session: Session, event: RetrievalDo
     case 'retrieval/search-completed': session.append(event.type, { event }); return
     case 'retrieval/knowledge-assessed': session.append(event.type, { event }); return
     case 'retrieval/state-recorded': session.append(event.type, { event }); return
+    case 'retrieval/state-patched': session.append(event.type, { event }); return
     case 'retrieval/evidence-promoted': session.append(event.type, { event }); return
     case 'retrieval/clarification-requested': session.append(event.type, { event }); return
     case 'retrieval/clarification-answered': session.append(event.type, { event }); return
@@ -112,6 +167,8 @@ export function appendRetrievalSessionEvent(session: Session, event: RetrievalDo
     case 'retrieval/evidence-frozen': session.append(event.type, { event }); return
     case 'retrieval/stopped': session.append(event.type, { event }); return
     case 'retrieval/detail-read': session.append(event.type, { event }); return
+    case 'retrieval/l3-detail-read': session.append(event.type, { event }); return
+    case 'retrieval/l3-details-read': session.append(event.type, { event }); return
     case 'retrieval/exported': session.append(event.type, { event }); return
     default: return event satisfies never
   }

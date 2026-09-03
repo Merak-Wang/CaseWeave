@@ -14,32 +14,52 @@ const ADMIN: TrustedPrincipalContext = {
 describe('source raw vertical slice', () => {
   it('keeps provider-declared L3 raw data outside the model promotion allowlist and available to explicit detail reads', async () => {
     const now = () => new Date('2026-08-27T01:00:00.000Z')
-    const provider = new LocalTicketProvider([normalizePublicSnapshotTicket({
-      ticket_id: 'PUBLIC-RAW-1', source_dataset: 'example/raw', source_version: 'v1',
-      title: 'Extensible source record', summary: 'Contains an adapter-unknown value.', extension_blob: { future_key: 'future-value' },
-    })], { now, ranker: testHybridRanker() })
+    const provider = new LocalTicketProvider([
+      normalizePublicSnapshotTicket({
+        ticket_id: 'PUBLIC-RAW-1', source_dataset: 'example/raw', source_version: 'v1',
+        title: 'Extensible source record one', summary: 'Contains future value one.', extension_blob: { future_key: 'future-value-one' },
+      }),
+      normalizePublicSnapshotTicket({
+        ticket_id: 'PUBLIC-RAW-2', source_dataset: 'example/raw', source_version: 'v1',
+        title: 'Extensible source record two', summary: 'Contains future value two.', extension_blob: { future_key: 'future-value-two' },
+      }),
+    ], { now, ranker: testHybridRanker() })
     let serial = 0
     const controller = new RetrievalController(provider, new InMemoryRetrievalEventJournal({ now, eventId: () => `event-${serial++}` }), undefined, {
       policy: testRetrievalPolicy(), now, id: () => `domain-${serial++}`,
     })
-    let state = await controller.start(ADMIN, { target: 'ranked_cases', query: 'future value' })
+    let state = await controller.start(ADMIN, {
+      target: 'ranked_cases', query: 'future value', requestedCount: 5, countPolicy: 'explicit',
+    })
     expect(state.lastPage?.trace.stage).toBe('initial_hybrid')
-    const candidate = state.candidates[0]!
+    const candidates = state.candidates
+    expect(candidates.map(candidate => candidate.summary)).toEqual([
+      'Contains future value one.', 'Contains future value two.',
+    ])
+    expect(candidates.every(candidate => !Object.hasOwn(candidate, 'rawPayload'))).toBe(true)
     state = await controller.assess(state, {
       decision: 'continue', evaluator: 'model',
-      selectedCandidateRefs: [candidate.ref], excludedCandidateRefs: [],
-      gaps: [{ kind: 'depth', status: 'open', evidenceRefs: [candidate.ref], evaluator: 'model' }],
-      nextAction: 'promote',
+      selectedCandidateRefs: candidates.map(candidate => candidate.ref),
+      excludedCandidateRefs: [],
+      gaps: [{
+        kind: 'depth', status: 'open', evaluator: 'model',
+        evidenceRefs: candidates.map(candidate => candidate.ref),
+        description: 'L2 summaries do not expose the source extension values.',
+      }],
+      nextAction: 'read_l3_details',
     })
-    expect(state.allowedActions.find(action => action.kind === 'promote')?.fieldAllowlist).not.toContain('source.raw')
-    await expect(controller.promote(ADMIN, state, [candidate.ref], ['source.raw'], 200))
-      .rejects.toMatchObject({ code: 'FIELD_NOT_ALLOWED' })
-    const raw = await provider.readDetails(ADMIN, {
+    expect(state.allowedActions.find(action => action.kind === 'read_l3_details')).toMatchObject({
+      candidateAllowlist: candidates.map(candidate => candidate.ref), fieldAllowlist: ['source.raw'],
+    })
+    const refs = candidates.map(candidate => candidate.ref).reverse()
+    const raw = await controller.readL3Details(ADMIN, state, refs)
+    expect(raw.details.map(detail => detail.candidateRef)).toEqual(refs)
+    expect(JSON.stringify(raw.details.map(detail => detail.rawPayload))).toContain('future-value-two')
+    await expect(provider.readDetails(ADMIN, {
       snapshotId: state.snapshot!.snapshotId,
-      candidateRefs: [candidate.ref],
+      candidateRefs: refs,
       fields: ['source.raw'],
       purpose: 'inline_detail',
-    })
-    expect(raw.details[0]?.fields['source.raw']?.join('\n')).toContain('future-value')
+    })).rejects.toMatchObject({ code: 'FIELD_NOT_ALLOWED' })
   })
 })

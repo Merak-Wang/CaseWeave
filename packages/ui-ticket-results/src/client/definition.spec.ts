@@ -62,7 +62,7 @@ const contracted = makeRetrievalEvent({
 const stoppedState: RetrievalState = {
   retrievalId,
   stateId: RetrievalStateId('state-stopped'),
-  revision: 3,
+  revision: 0,
   createdAt: timestamp,
   updatedAt: timestamp,
   phase: 'stopped',

@@ -19,7 +19,6 @@ export interface AutomaticRetrievalApplication {
 }
 
 export interface AutomaticRetrievalStartConfig {
-  readonly adaptiveMaxResults: number
   readonly analyzer: TicketQueryAnalyzer
 }
 
@@ -87,7 +86,6 @@ export function installAutomaticRetrievalStart(
 
     // 在首次模型请求之前完成 spaCy 分析和固定 Hybrid 计划，模型只能在看到首轮知识状态后决定是否修复查询。
     const request = await buildFastTicketRequest(query, {
-      adaptiveMaxResults: config.adaptiveMaxResults,
       analyzer: config.analyzer,
       signal,
     })

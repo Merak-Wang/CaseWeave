@@ -12,6 +12,10 @@ interface LocalAppModule {
   }) => string
   readonly parseCliArgs: (args: readonly string[]) => { readonly command: string; readonly forwardedArgs: readonly string[] }
   readonly parseModelSyncArgs: (args: readonly string[]) => { readonly all: boolean; readonly roles: readonly string[] }
+  readonly resolveIndexPreparationConfig: (environment: Record<string, string>) => {
+    readonly pollIntervalMs: number
+    readonly checkpointEveryBatches: number
+  }
   readonly profileSetupAction: (manifest: unknown, bundleRoot: string, profileRoot: string) => string
   readonly resolveLocalAppPaths: (environment: Record<string, string>, projectRoot: string) => {
     readonly dshHome: string
@@ -105,5 +109,28 @@ describe('local source launcher', () => {
     expect(help).toContain('pnpm retrieval-agent models')
     expect(help).toContain('active, pinned model dependencies')
     expect(help).toContain('never runs a product build, pack, clean-install verification or uninstall')
+  })
+
+  it('keeps cold-index liveness configuration separate from online ranking deadlines', () => {
+    expect(launcher.resolveIndexPreparationConfig({})).toEqual({
+      pollIntervalMs: 1_000,
+      checkpointEveryBatches: 8,
+    })
+    expect(launcher.resolveIndexPreparationConfig({
+      RETRIEVAL_AGENT_INDEX_PROGRESS_INTERVAL_MS: '2500',
+      RETRIEVAL_AGENT_INDEX_CHECKPOINT_BATCHES: '4',
+    })).toEqual({
+      pollIntervalMs: 2_500,
+      checkpointEveryBatches: 4,
+    })
+    expect(() => launcher.resolveIndexPreparationConfig({
+      RETRIEVAL_AGENT_INDEX_INACTIVITY_TIMEOUT_MS: '900000',
+    })).toThrow(/was removed/u)
+    expect(() => launcher.resolveIndexPreparationConfig({
+      RETRIEVAL_AGENT_INDEX_MAX_DURATION_MS: '3600000',
+    })).toThrow(/was removed/u)
+    expect(() => launcher.resolveIndexPreparationConfig({
+      RETRIEVAL_AGENT_INDEX_PROGRESS_INTERVAL_MS: '1',
+    })).toThrow(/PROGRESS_INTERVAL/u)
   })
 })

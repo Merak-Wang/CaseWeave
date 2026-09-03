@@ -43,11 +43,11 @@ const DELTA = {
         fastQuery: {
           type: 'object', additionalProperties: false,
           properties: {
-            schemaVersion: { type: 'integer', const: 1, required: true },
+            schemaVersion: { type: 'integer', enum: [1, 2], required: true },
             source: { type: 'string', const: 'direct_user', required: true },
             rewriteApplied: { type: 'boolean', const: false, required: true },
             keyword: {
-              type: 'object', additionalProperties: false, required: true,
+              type: 'object', additionalProperties: false,
               properties: {
                 terms: { ...STRING_ARRAY, required: true },
                 operator: { type: 'string', required: true },
@@ -70,7 +70,7 @@ const DELTA = {
           rank: { type: 'integer', required: true },
           displayId: { type: 'string', required: true },
           title: { type: 'string', required: true },
-          summary: { type: 'string' },
+          summary: { type: 'string', required: true },
           l0: {
             type: 'object', additionalProperties: false, required: true,
             properties: {
@@ -95,9 +95,7 @@ const DELTA = {
         },
       },
     },
-    activeAliases: { ...STRING_ARRAY, required: true },
-    selectedAliases: { ...STRING_ARRAY, required: true },
-    excludedAliasCount: { type: 'integer', required: true },
+    activeCandidateCount: { type: 'integer', required: true },
     gaps: {
       type: 'object', additionalProperties: false, required: true,
       properties: {
@@ -151,7 +149,7 @@ const TERMINAL_RECEIPT = {
   type: 'object', additionalProperties: false,
   properties: {
     type: { type: 'string', const: 'ticket_collection', required: true },
-    schemaVersion: { type: 'integer', const: 3, required: true },
+    schemaVersion: { type: 'integer', const: 4, required: true },
     retrievalId: { type: 'string', required: true },
     packId: { type: 'string' },
     stoppingReason: { type: 'string', required: true },
@@ -162,13 +160,7 @@ const TERMINAL_RECEIPT = {
     semanticRecallKnown: { type: 'boolean', required: true },
     resultMayBeIncomplete: { type: 'boolean', required: true },
     nextPageAvailable: { type: 'boolean', required: true },
-    tickets: {
-      type: 'array', required: true,
-      items: {
-        type: 'object', additionalProperties: false,
-        properties: { alias: { type: 'string', required: true }, displayId: { type: 'string', required: true } },
-      },
-    },
+    selectedCount: { type: 'integer', required: true },
     remainingGapKinds: { ...STRING_ARRAY, required: true },
     budget: { ...BUDGET, required: true },
   },

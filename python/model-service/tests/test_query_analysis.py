@@ -21,6 +21,7 @@ def analyzer() -> SpacyQueryAnalyzer:
 
 def test_extracts_exact_conjuncts_without_query_scaffolding(analyzer: SpacyQueryAnalyzer) -> None:
     result = analyzer.analyze("帮我找副卡和跨域有关工单")
+    assert result["language"] == "zh"
     assert result["keywords"] == ["副卡", "跨域"]
     assert result["boolean"] == {
         "operator": "and", "terms": ["副卡", "跨域"], "grouping": "single_set",
@@ -28,6 +29,11 @@ def test_extracts_exact_conjuncts_without_query_scaffolding(analyzer: SpacyQuery
     assert result["triples"][0] == {
         "subject": "副卡", "predicate": "and", "object": "跨域", "source": "coordination",
     }
+
+
+def test_removes_reduplicated_search_scaffolding(analyzer: SpacyQueryAnalyzer) -> None:
+    result = analyzer.analyze("帮我找找主卡有关工单")
+    assert result["keywords"] == ["主卡"]
 
 
 def test_domain_lexicon_merges_multi_token_phrases(analyzer: SpacyQueryAnalyzer) -> None:
@@ -45,3 +51,9 @@ def test_without_domain_lexicon_falls_back_to_nouns() -> None:
     result = analyzer.analyze("卫星互联网终端离线")
     assert result["keywords"] == ["卫星", "互联网", "终端"]
     assert all(set(item["pos"]) <= {"NOUN", "PROPN"} for item in result["candidates"])
+
+
+def test_no_usable_keyword_keeps_query_available_for_dense_retrieval(analyzer: SpacyQueryAnalyzer) -> None:
+    result = analyzer.analyze("!!!")
+    assert result["keywords"] == []
+    assert result["candidates"] == []

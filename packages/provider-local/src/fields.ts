@@ -19,10 +19,12 @@ export const LEGACY_FIELD_CATALOG: readonly TicketFieldDescriptor[] = [
     key, label: key, valueKind: 'text' as const, accessLevel: 'L2' as const,
     filterOperators: [] as const, sensitivity: 'source_controlled' as const,
   })),
+  { key: 'summary', label: '摘要', valueKind: 'text', accessLevel: 'L2', filterOperators: [], sensitivity: 'source_controlled' },
 ]
 
 export function evidenceFieldValues(record: NormalizedTicketRecord, field: TicketEvidenceField): readonly string[] {
   switch (field) {
+    case 'summary': return [record.summary]
     case 'problemDescription': return record.problemDescription === undefined ? [] : [record.problemDescription]
     case 'conversationOrUpdates': return record.conversationOrUpdates
     case 'resolutionSteps': return record.resolutionSteps

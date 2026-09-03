@@ -59,7 +59,7 @@ class BronzeCase:
 
 
 def legacy_bronze_root() -> Path:
-    return Path(__file__).resolve().parents[2] / "data" / "legacy-bronze-v1"
+    return Path(__file__).resolve().parents[4] / "data" / "evals" / "legacy-bronze-v1"
 
 
 def load_legacy_bronze_cases(root: Path | None = None) -> tuple[BronzeCase, ...]:

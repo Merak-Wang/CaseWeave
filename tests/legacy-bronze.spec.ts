@@ -21,8 +21,8 @@ const principal: TrustedPrincipalContext = {
 
 describe('migrated 162-case Bronze development baseline', () => {
   it('keeps every historical qrel in the deterministic Provider top 10', async () => {
-    const records = parseFixtureJsonl(await readFile('packages/bundle/fixtures/tickets.jsonl', 'utf8'))
-    const cases = (await readFile('python/evals/data/legacy-bronze-v1/cases.jsonl', 'utf8'))
+    const records = parseFixtureJsonl(await readFile('data/tickets/synthetic/legacy-bronze-v1.jsonl', 'utf8'))
+    const cases = (await readFile('data/evals/legacy-bronze-v1/cases.jsonl', 'utf8'))
       .split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line) as BronzeCase)
     const provider = new LocalTicketProvider(records, { now: () => new Date('2026-08-27T01:00:00.000Z'), ranker: testHybridRanker() })
     const opened = await provider.openSnapshot(principal)
@@ -33,7 +33,9 @@ describe('migrated 162-case Bronze development baseline', () => {
         query: testCase.query,
         filters: testCase.filters,
         ...(testCase.retrievalIntent === undefined ? {} : { retrievalIntent: testCase.retrievalIntent }),
-        requestedCount: 10,
+        ...(testCase.target === 'constrained_list' || testCase.target === 'cohort_collection'
+          ? {}
+          : { requestedCount: 10, countPolicy: 'explicit' as const }),
       })
       const page = await provider.search(principal, opened.snapshotId, spec, { topK: 10, maxScan: 100, stage: 'baseline' })
       const found = new Set(page.candidates.map(candidate => candidate.displayId))

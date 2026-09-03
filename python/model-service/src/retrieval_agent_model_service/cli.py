@@ -19,6 +19,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--spacy-path", type=Path, required=True)
     result.add_argument("--domain-lexicon", type=Path)
     result.add_argument("--vector-cache-dir", type=Path)
+    result.add_argument("--checkpoint-every-batches", type=int, default=8)
     result.add_argument("--enable-reranker", action="store_true")
     result.add_argument("--device", default="auto")
     result.add_argument("--host", default="127.0.0.1")
@@ -42,6 +43,8 @@ def main() -> None:
     args = parser().parse_args()
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         raise SystemExit("model service may only bind to a loopback address")
+    if args.checkpoint_every_batches < 1:
+        raise SystemExit("checkpoint interval must be positive")
     backend = QwenModelBackend(
         load_manifest(args.manifest), args.embedding_path, args.reranker_path,
         args.spacy_path, args.domain_lexicon,
@@ -52,7 +55,7 @@ def main() -> None:
         Thread(target=_exit_when_stdin_closes, name="launcher-watchdog", daemon=True).start()
     print(f"retrieval-agent model service ready on http://{args.host}:{args.port}", flush=True)
     try:
-        serve(backend, args.host, args.port, args.vector_cache_dir)
+        serve(backend, args.host, args.port, args.vector_cache_dir, args.checkpoint_every_batches)
     except KeyboardInterrupt:
         print("retrieval-agent model service stopped", flush=True)
 

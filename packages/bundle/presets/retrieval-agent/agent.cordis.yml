@@ -7,7 +7,8 @@
 
       首轮快查询不改写：关键词通道使用从原始输入直接抽取的关键词，向量通道嵌入完整原始问题，
       两路在同一授权快照中并行执行并归并。候选只用 c1、c2 等稳定短别名，不得生成或复述不透明
-      引用。首轮之后才允许改写关键词或向量 query、继续隐藏游标、读取 L2 或请求澄清。system gaps
+      引用。候选已含 L2 摘要；只有先评估出引用具体候选的 open depth gap，才可以使用动态开放的 L3 读取工具，并应选最小必要批次。
+      首轮之后才允许改写关键词或向量 query、继续隐藏游标或请求澄清。system gaps
       和 BoundaryState 只读；模型不能生成 coverage/quality 分数，也不能把 accept_current_top_k 解释为
       数据源穷尽或语义找全。
 
@@ -37,12 +38,9 @@
     - id: local-provider
       name: '@retrieval-agent/bundle/provider'
       config:
-        dataPath: !!js process.env.RETRIEVAL_AGENT_DATA_PATH ?? dshHomePath('retrieval-agent', 'data', 'tickets.jsonl')
-        additionalDataPaths:
-          - !!js dshHomePath('retrieval-agent', 'data', 'public', 'fcc-1000-seed-20260825.jsonl')
-          - !!js dshHomePath('retrieval-agent', 'data', 'public', 'bitext-1000-seed-20260825.jsonl')
+        dataPath: !!js process.env.RETRIEVAL_AGENT_DATA_PATH ?? dshHomePath('retrieval-agent', 'data', 'default.jsonl')
+        additionalDataPaths: []
         providerId: local-dataset-v1
-        defaultRequestedCount: 5
         maxRequestedCount: 20
         snapshotTtlMs: 900000
         retrievalMode: hybrid
@@ -50,7 +48,11 @@
         embeddingModel: Qwen/Qwen3-Embedding-0.6B
         embeddingRevision: 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
         embeddingDimensions: 1024
+        # 在线单次排名保留 deadline；冷索引准备不设任何时间上限。
         modelDeadlineMs: 120000
+        preparePollIntervalMs: !!js Number(process.env.RETRIEVAL_AGENT_INDEX_PROGRESS_INTERVAL_MS ?? 1000)
+        # Dense 只提供语义补充候选；关键词合格集合不受此上限影响。
+        denseTopK: 15
         rerankerEnabled: !!js process.env.RETRIEVAL_AGENT_RERANKER_ENABLED === 'true'
         rerankerModel: Qwen/Qwen3-Reranker-0.6B
         rerankerRevision: e61197ed45024b0ed8a2d74b80b4d909f1255473
@@ -60,16 +62,14 @@
       name: '@retrieval-agent/bundle/agent'
       config:
         maxRounds: 8
-        maxSearches: 4
+        # 跨动作总页预算覆盖关键词全集与 Dense Top-15 的融合候选；单动作仍至多推进一页，且它不是最终结果条数上限。
+        maxSearches: 2500
         maxPromotions: 3
         maxEvidenceTokens: 1500
         maxLatencyMs: 120000
         noProgressLimit: 2
-        searchTopK: 8
+        searchTopK: 20
         searchMaxScan: 50000
-        contextTokenBudget: 1500
-        maxContextTokens: 8192
-        adaptiveMaxResults: 20
         queryAnalysisBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
         queryAnalysisDeadlineMs: 5000
         retrievalPolicyBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'

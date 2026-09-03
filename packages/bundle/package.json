@@ -33,7 +33,7 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "files": ["lib", "cordis.patch.yml", "presets", "fixtures", "README.md"],
+  "files": ["lib", "cordis.patch.yml", "presets", "README.md"],
   "bin": {
     "retrieval-agent-install": "./lib/install-cli.js",
     "retrieval-agent-uninstall": "./lib/uninstall-cli.js"

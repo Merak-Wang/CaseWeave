@@ -5,20 +5,20 @@
   "authorizationOverlay": "development-admin-only",
   "sources": [
     {
-      "path": "tickets.jsonl",
+      "path": "tickets/synthetic/legacy-bronze-v1.jsonl",
       "recordCount": 40,
       "sha256": "f6950eb58e398ecabf4fecf77d529a674afa6877d0229d943a2887017dce8bc8",
       "sourceKind": "synthetic"
     },
     {
-      "path": "public/fcc-1000-seed-20260825.jsonl",
+      "path": "tickets/ood/fcc/fcc-1000-seed-20260825.jsonl",
       "recordCount": 1000,
       "sha256": "523d962be0bff67ed7916da0310f06cb122db4b2c26d1df9affc63ece74bf53d",
       "sourceKind": "captured-public-sample",
       "upstreamRowCountAtCapture": 3629766
     },
     {
-      "path": "public/bitext-1000-seed-20260825.jsonl",
+      "path": "tickets/ood/bitext/bitext-1000-seed-20260825.jsonl",
       "recordCount": 1000,
       "sha256": "99c1d460c778d402113cddbdc31a615f9b564c66b1e5f0b4e11c34371ecd3301",
       "sourceKind": "captured-public-sample",
@@ -26,12 +26,12 @@
     }
   ],
   "rawPayloadContract": {
-    "description": "Every captured public JSON object is retained unchanged inside the Provider as rawSource.payload and is readable only through the declared L2 source.raw field.",
+    "description": "Every captured public JSON object is retained unchanged inside the Provider as rawSource.payload and is readable only through the declared L3 source.raw field.",
     "upstreamRawArchivesBundled": false
   },
   "limitations": [
     "This is the complete locally captured development corpus, not the complete upstream FCC or Bitext datasets.",
     "The development administrator overlay is not a production authorization policy.",
-    "The public snapshots retain their source licenses and capture manifests under public/*.manifest.json."
+    "The public snapshots retain their source licenses and capture manifests under tickets/ood/*/manifest.json."
   ]
 }

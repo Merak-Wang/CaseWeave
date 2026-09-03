@@ -1,16 +1,18 @@
 import { readFile } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { type TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import { createTicketResultCollection } from '@retrieval-agent/ticket-collection'
 import { InMemoryRetrievalEventJournal, RetrievalController } from '@retrieval-agent/domain'
 import { LocalTicketProvider, parseFixtureJsonl } from '@retrieval-agent/provider-local'
-import { bundledFixturePath } from '@retrieval-agent/bundle/startup'
 import { testHybridRanker } from './support/fake-model-gateway.js'
 import { buildFastTicketRequest } from '@retrieval-agent/query-understanding'
 import { fixtureQueryAnalyzer } from './support/query-analyzer.js'
 import { testRetrievalPolicy } from './support/retrieval-policy.js'
 
 const NOW = new Date('2026-08-27T04:00:00.000Z')
+const LEGACY_REGRESSION_FIXTURE = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'tickets', 'synthetic', 'legacy-bronze-v1.jsonl')
 const PRINCIPAL: TrustedPrincipalContext = {
   tenantId: 'demo', subjectId: 'development-admin', entitlementVersion: 'development-admin-v1',
   purpose: 'ticket_retrieval', attributes: { group: ['admin'], region: ['cn'], role: ['administrator'] },
@@ -19,7 +21,7 @@ const PRINCIPAL: TrustedPrincipalContext = {
 
 describe('fixed first-pass Hybrid retrieval', () => {
   it('keeps all 11 exact 副卡 title matches reachable across the unmodified fast-search result pages', async () => {
-    const provider = new LocalTicketProvider(parseFixtureJsonl(await readFile(bundledFixturePath(), 'utf8')), {
+    const provider = new LocalTicketProvider(parseFixtureJsonl(await readFile(LEGACY_REGRESSION_FIXTURE, 'utf8')), {
       now: () => NOW,
       ranker: testHybridRanker(),
       defaultMode: 'hybrid',
@@ -64,13 +66,13 @@ describe('fixed first-pass Hybrid retrieval', () => {
   })
 
   it('keeps vector diagnostics separate while assessment selects the automatic Hybrid result collection', async () => {
-    const provider = new LocalTicketProvider(parseFixtureJsonl(await readFile(bundledFixturePath(), 'utf8')), {
+    const provider = new LocalTicketProvider(parseFixtureJsonl(await readFile(LEGACY_REGRESSION_FIXTURE, 'utf8')), {
       now: () => NOW,
       ranker: testHybridRanker(),
     })
     const snapshot = await provider.openSnapshot(PRINCIPAL)
     const dense = await provider.search(PRINCIPAL, snapshot.snapshotId, provider.resolve({
-      target: 'ranked_cases', query: '主副卡解绑后仍共享流量', mode: 'dense',
+      target: 'ranked_cases', query: '主副卡解绑后仍共享流量', mode: 'dense', requestedCount: 5, countPolicy: 'explicit',
     }), { topK: 5, maxScan: 100, stage: 'baseline' })
     expect(dense.trace.executedMode).toBe('dense')
     expect(dense.trace.channels.map(channel => channel.channel)).toEqual(['vector'])
@@ -81,7 +83,7 @@ describe('fixed first-pass Hybrid retrieval', () => {
       policy: testRetrievalPolicy(), now: () => NOW, id: () => `hybrid-domain-${serial++}`, searchTopK: 5,
     })
     let state = await controller.start(PRINCIPAL, {
-      target: 'ranked_cases', query: '主副卡解绑后仍共享流量', requestedCount: 5,
+      target: 'ranked_cases', query: '主副卡解绑后仍共享流量', requestedCount: 5, countPolicy: 'explicit',
     })
     expect(state.lastPage?.trace).toMatchObject({ stage: 'initial_hybrid', requestedMode: 'hybrid', executedMode: 'hybrid' })
     expect(state.lastPage?.trace.channels.map(channel => channel.channel)).toEqual(['keyword', 'vector'])

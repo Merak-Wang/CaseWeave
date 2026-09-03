@@ -87,6 +87,27 @@ export interface RankOptions {
   readonly signal?: AbortSignal
 }
 
+export type PreparationPhase = 'checking_cache' | 'embedding' | 'publishing' | 'ready' | 'failed'
+
+export interface PreparationProgress {
+  readonly schemaVersion: 1
+  readonly phase: PreparationPhase
+  readonly revision: number
+  readonly completedDocuments: number
+  readonly totalDocuments: number
+  readonly resumedDocuments: number
+  readonly batchSize: number
+  readonly cacheHit: boolean
+  readonly elapsedMs: number
+  readonly documentsPerSecond: number
+  readonly estimatedRemainingMs: number | null
+}
+
+export interface PrepareOptions {
+  readonly signal?: AbortSignal
+  readonly onProgress?: (progress: PreparationProgress) => void
+}
+
 export interface RetrievalRanker {
   readonly profileVersion: string
   readonly capabilities: {
@@ -96,7 +117,7 @@ export interface RetrievalRanker {
     readonly reranker: boolean
   }
   /** Optional lifecycle hook used to make document vectors ready before traffic. */
-  prepare?(documents: readonly RankingDocument[], options?: { readonly signal?: AbortSignal }): Promise<{
+  prepare?(documents: readonly RankingDocument[], options?: PrepareOptions): Promise<{
     readonly documentCount: number
     readonly model: string
     readonly revision: string

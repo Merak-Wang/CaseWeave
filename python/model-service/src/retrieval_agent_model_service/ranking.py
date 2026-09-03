@@ -3,18 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
-import tempfile
+import threading
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 
 from .errors import ServiceError
+from .vector_cache import VECTOR_CACHE_FORMAT_VERSION, VectorCacheStore
 
 
 RAG_PROTOCOL_VERSION = "retrieval-agent.rag.v1"
@@ -23,7 +23,6 @@ BM25F_VERSION = f"bm25f-v1:{RANKING_TOKENIZER_VERSION}"
 DENSE_RANKING_VERSION = "exact-cosine-v1"
 DENSE_PROJECTION_VERSION = "ticket-search-projection-v1"
 FUSION_VERSION = "weighted-rrf-v1"
-VECTOR_CACHE_FORMAT_VERSION = "float32-le-v1"
 DEFAULT_EMBEDDING_INSTRUCTION = (
     "Given a support ticket search query, retrieve historical tickets with matching "
     "symptoms, products, constraints, and resolution context."
@@ -168,6 +167,7 @@ def _profile(value: Any) -> dict[str, Any]:
         ),
         "embeddingBatchSize": _integer(value.get("embeddingBatchSize", 16), "embedding batch size", 1),
         "minimumDenseScore": _number(value.get("minimumDenseScore", 0.1), "minimum dense score"),
+        "denseTopK": _integer(value.get("denseTopK", 15), "dense top K", 1),
         "modelDeadlineMs": _integer(value.get("modelDeadlineMs", 120_000), "model deadline", 100),
         "rerankerEnabled": value.get("rerankerEnabled", False),
         "rerankTopN": _integer(value.get("rerankTopN", 20), "rerank top N", 1),
@@ -181,6 +181,8 @@ def _profile(value: Any) -> dict[str, Any]:
     }
     if not isinstance(result["rerankerEnabled"], bool) or not isinstance(result["allowKeywordFallback"], bool):
         raise ServiceError(400, "INVALID_REQUEST", "ranking profile flags are invalid.")
+    if result["denseTopK"] > 100:
+        raise ServiceError(400, "INVALID_REQUEST", "dense top K cannot exceed 100.")
     if result["fusion"]["keywordWeight"] + result["fusion"]["vectorWeight"] <= 0:
         raise ServiceError(400, "INVALID_REQUEST", "fusion weights cannot both be zero.")
     return result
@@ -195,6 +197,7 @@ def profile_version(profile: dict[str, Any]) -> str:
         "rerankerInstruction": profile["rerankerInstruction"],
         "embeddingBatchSize": profile["embeddingBatchSize"],
         "minimumDenseScore": profile["minimumDenseScore"],
+        "denseTopK": profile["denseTopK"],
         "fusion": profile["fusion"],
         "bm25f": profile["bm25f"],
         "rerankerEnabled": profile["rerankerEnabled"],
@@ -315,13 +318,41 @@ class PreparedCorpus:
     identity: dict[str, Any]
 
 
+@dataclass
+class _PrepareFlight:
+    key: str
+    completed: threading.Event
+    started: float
+    total_documents: int
+    batch_size: int
+    request_ids: set[str] = field(default_factory=set)
+    phase: str = "checking_cache"
+    revision: int = 1
+    completed_documents: int = 0
+    resumed_documents: int = 0
+    cache_hit: bool = False
+    prepared: PreparedCorpus | None = None
+    error: BaseException | None = None
+
+
 class RetrievalRankingBackend:
     """Provider-neutral RAG ranking implementation behind the FastAPI boundary."""
 
-    def __init__(self, model_backend: Any, vector_cache_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        model_backend: Any,
+        vector_cache_dir: Path | None = None,
+        checkpoint_every_batches: int = 8,
+    ) -> None:
+        if checkpoint_every_batches < 1:
+            raise ValueError("checkpoint_every_batches must be positive")
         self.model_backend = model_backend
         self.vector_cache_dir = vector_cache_dir.resolve() if vector_cache_dir else None
+        self.checkpoint_every_batches = checkpoint_every_batches
         self.prepared: PreparedCorpus | None = None
+        self._prepare_lock = threading.Lock()
+        self._prepare_flight: _PrepareFlight | None = None
+        self._prepare_requests: dict[str, _PrepareFlight] = {}
 
     def descriptor(self) -> dict[str, Any]:
         return {
@@ -330,7 +361,7 @@ class RetrievalRankingBackend:
             "ranking": {
                 "strategy": "quick-hybrid-v1", "bm25f": BM25F_VERSION,
                 "dense": DENSE_RANKING_VERSION, "fusion": FUSION_VERSION,
-                "vectorCache": VECTOR_CACHE_FORMAT_VERSION,
+                "vectorCache": VECTOR_CACHE_FORMAT_VERSION, "preparationProgressSchema": 1,
             },
             "policy": {"candidateRanking": "candidate-ranking-v1", "knowledgeAssessment": "knowledge-assessment-v1"},
         }
@@ -358,86 +389,189 @@ class RetrievalRankingBackend:
     def _cache_key(self, identity: dict[str, Any]) -> str:
         return hashlib.sha256(_stable(identity).encode()).hexdigest()
 
-    def _load_cache(self, identity: dict[str, Any]) -> np.ndarray | None:
-        if self.vector_cache_dir is None:
-            return None
-        key = self._cache_key(identity)
-        try:
-            metadata = json.loads((self.vector_cache_dir / f"{key}.json").read_text(encoding="utf-8"))
-            data = (self.vector_cache_dir / f"{key}.f32").read_bytes()
-            expected = {
-                **identity, "formatVersion": VECTOR_CACHE_FORMAT_VERSION,
-                "rowCount": len(identity["documents"]), "dataSha256": hashlib.sha256(data).hexdigest(),
+    def _update_progress(self, flight: _PrepareFlight, **changes: Any) -> None:
+        with self._prepare_lock:
+            for name, value in changes.items():
+                setattr(flight, name, value)
+            flight.revision += 1
+
+    def preparation_status(self, request_id: str) -> dict[str, Any]:
+        with self._prepare_lock:
+            flight = self._prepare_requests.get(request_id)
+            if flight is None:
+                raise ServiceError(404, "PREPARATION_NOT_FOUND", "Ranking preparation request was not found.")
+            elapsed_ms = max(0.0, (time.perf_counter() - flight.started) * 1000)
+            processed = max(0, flight.completed_documents - flight.resumed_documents)
+            rate = processed / (elapsed_ms / 1000) if processed > 0 and elapsed_ms > 0 else 0.0
+            remaining = max(0, flight.total_documents - flight.completed_documents)
+            eta = remaining / rate * 1000 if rate > 0 else None
+            return {
+                "schemaVersion": 1,
+                "phase": flight.phase,
+                "revision": flight.revision,
+                "completedDocuments": flight.completed_documents,
+                "totalDocuments": flight.total_documents,
+                "resumedDocuments": flight.resumed_documents,
+                "batchSize": flight.batch_size,
+                "cacheHit": flight.cache_hit,
+                "elapsedMs": elapsed_ms,
+                "documentsPerSecond": rate,
+                "estimatedRemainingMs": eta,
             }
-            if metadata != expected or len(data) != expected["rowCount"] * identity["dimensions"] * 4:
-                return None
-            vectors = np.frombuffer(data, dtype="<f4").reshape(expected["rowCount"], identity["dimensions"]).copy()
-            norms = np.linalg.norm(vectors, axis=1)
-            return vectors if np.isfinite(vectors).all() and np.all(np.abs(norms - 1) <= 0.02) else None
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return None
 
-    def _publish_cache(self, identity: dict[str, Any], vectors: np.ndarray) -> None:
-        if self.vector_cache_dir is None:
-            return
-        if vectors.shape != (len(identity["documents"]), identity["dimensions"]):
-            raise ServiceError(500, "INVALID_VECTOR", "Refusing to publish a malformed vector cache.")
-        self.vector_cache_dir.mkdir(parents=True, exist_ok=True)
-        key = self._cache_key(identity)
-        data = np.asarray(vectors, dtype="<f4").tobytes(order="C")
-        metadata = {
-            **identity, "formatVersion": VECTOR_CACHE_FORMAT_VERSION,
-            "rowCount": len(identity["documents"]), "dataSha256": hashlib.sha256(data).hexdigest(),
-        }
-        data_handle, data_name = tempfile.mkstemp(prefix=f"{key}.", suffix=".tmp", dir=self.vector_cache_dir)
-        metadata_handle, metadata_name = tempfile.mkstemp(prefix=f"{key}.", suffix=".tmp", dir=self.vector_cache_dir)
-        try:
-            with os.fdopen(data_handle, "wb") as stream:
-                stream.write(data)
-            with os.fdopen(metadata_handle, "w", encoding="utf-8") as stream:
-                json.dump(metadata, stream, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            os.replace(data_name, self.vector_cache_dir / f"{key}.f32")
-            os.replace(metadata_name, self.vector_cache_dir / f"{key}.json")
-        finally:
-            for temporary in (data_name, metadata_name):
-                try:
-                    os.unlink(temporary)
-                except FileNotFoundError:
-                    pass
-
-    def _vectors(self, documents: list[dict[str, str]], profile: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+    def _vectors(
+        self,
+        documents: list[dict[str, str]],
+        profile: dict[str, Any],
+        flight: _PrepareFlight | None = None,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         identity = self._identity(documents, self._verify_model_identity(profile, True))
-        cached = self._load_cache(identity)
+        store = VectorCacheStore(self.vector_cache_dir, self._cache_key(identity), identity)
+        cached = store.load_final()
         if cached is not None:
+            if flight is not None:
+                self._update_progress(
+                    flight,
+                    completed_documents=len(documents),
+                    resumed_documents=len(documents),
+                    cache_hit=True,
+                )
             return cached, identity
-        rows: list[list[float]] = []
         batch_size = min(profile["embeddingBatchSize"], self.model_backend.max_batch_size)
-        for offset in range(0, len(documents), batch_size):
+        checkpoint = store.load_checkpoint()
+        resumed = len(checkpoint)
+        chunks = [checkpoint] if resumed > 0 else []
+        pending: list[np.ndarray] = []
+        if flight is not None:
+            self._update_progress(
+                flight,
+                phase="embedding",
+                completed_documents=resumed,
+                resumed_documents=resumed,
+                batch_size=batch_size,
+            )
+        batch_number = 0
+        for offset in range(resumed, len(documents), batch_size):
             batch = documents[offset:offset + batch_size]
-            rows.extend(self.model_backend.embed(
+            values = np.asarray(self.model_backend.embed(
                 [_projection(document) for document in batch], "document", None, identity["dimensions"]
-            ))
-        vectors = np.asarray(rows, dtype=np.float32)
+            ), dtype=np.float32)
+            if values.shape != (len(batch), identity["dimensions"]):
+                raise ServiceError(500, "INVALID_VECTOR", "Document embedding dimensions changed.")
+            chunks.append(values)
+            pending.append(values)
+            batch_number += 1
+            completed = offset + len(batch)
+            if batch_number % self.checkpoint_every_batches == 0 or completed == len(documents):
+                store.append_checkpoint(np.concatenate(pending, axis=0))
+                pending.clear()
+            if flight is not None:
+                self._update_progress(flight, completed_documents=completed)
+        vectors = np.concatenate(chunks, axis=0) if chunks else np.empty((0, identity["dimensions"]), dtype=np.float32)
         if vectors.shape != (len(documents), identity["dimensions"]):
             raise ServiceError(500, "INVALID_VECTOR", "Document embedding dimensions changed.")
-        self._publish_cache(identity, vectors)
+        if flight is not None:
+            self._update_progress(flight, phase="publishing", completed_documents=len(documents))
+        store.publish(vectors)
         return vectors, identity
 
-    def prepare(self, raw_documents: Any, raw_profile: Any, max_scan: int) -> dict[str, Any]:
-        started = time.perf_counter()
-        documents = _documents(raw_documents, max_scan)
-        profile = _profile(raw_profile)
-        vectors, identity = self._vectors(documents, profile)
-        self.prepared = PreparedCorpus(
-            rows={document["id"]: (row, document["contentHash"]) for row, document in enumerate(documents)},
-            vectors=vectors,
-            identity=identity,
-        )
+    @staticmethod
+    def _prepare_response(prepared: PreparedCorpus, profile: dict[str, Any], started: float) -> dict[str, Any]:
+        identity = prepared.identity
         return {
-            "documentCount": len(documents), "model": identity["model"], "revision": identity["revision"],
+            "documentCount": len(prepared.rows), "model": identity["model"], "revision": identity["revision"],
             "dimensions": identity["dimensions"], "elapsedMs": max(0.0, (time.perf_counter() - started) * 1000),
             "profileVersion": profile_version(profile),
         }
+
+    def prepare(
+        self,
+        raw_documents: Any,
+        raw_profile: Any,
+        max_scan: int,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        documents = _documents(raw_documents, max_scan)
+        profile = _profile(raw_profile)
+        embedding_identity = self._verify_model_identity(profile, True)
+        key = self._cache_key(self._identity(documents, embedding_identity))
+        batch_size = min(profile["embeddingBatchSize"], self.model_backend.max_batch_size)
+
+        with self._prepare_lock:
+            prepared = self.prepared
+            if prepared is not None and self._cache_key(prepared.identity) == key:
+                if request_id is not None:
+                    ready_flight = _PrepareFlight(
+                        key=key,
+                        completed=threading.Event(),
+                        started=started,
+                        total_documents=len(documents),
+                        batch_size=batch_size,
+                        phase="ready",
+                        completed_documents=len(documents),
+                        resumed_documents=len(documents),
+                        cache_hit=True,
+                    )
+                    ready_flight.completed.set()
+                    ready_flight.request_ids.add(request_id)
+                    self._prepare_requests[request_id] = ready_flight
+                return self._prepare_response(prepared, profile, started)
+            flight = self._prepare_flight
+            if flight is None:
+                flight = _PrepareFlight(
+                    key=key,
+                    completed=threading.Event(),
+                    started=started,
+                    total_documents=len(documents),
+                    batch_size=batch_size,
+                )
+                self._prepare_flight = flight
+                leader = True
+            elif flight.key == key:
+                leader = False
+            else:
+                raise ServiceError(
+                    429, "BACKPRESSURE", "A different ranking corpus is already being prepared.", retryable=True
+                )
+            if request_id is not None:
+                flight.request_ids.add(request_id)
+                self._prepare_requests[request_id] = flight
+
+        if not leader:
+            flight.completed.wait()
+            if flight.error is not None:
+                raise flight.error
+            if flight.prepared is None:
+                raise ServiceError(500, "INFERENCE_FAILED", "Shared ranking preparation completed without a result.")
+            return self._prepare_response(flight.prepared, profile, started)
+
+        try:
+            vectors, identity = self._vectors(documents, profile, flight)
+            prepared = PreparedCorpus(
+                rows={document["id"]: (row, document["contentHash"]) for row, document in enumerate(documents)},
+                vectors=vectors,
+                identity=identity,
+            )
+        except BaseException as error:
+            with self._prepare_lock:
+                flight.error = error
+                flight.phase = "failed"
+                flight.revision += 1
+                if self._prepare_flight is flight:
+                    self._prepare_flight = None
+                flight.completed.set()
+            raise
+        with self._prepare_lock:
+            self.prepared = prepared
+            flight.prepared = prepared
+            flight.phase = "ready"
+            flight.completed_documents = len(documents)
+            flight.revision += 1
+            if self._prepare_flight is flight:
+                self._prepare_flight = None
+            flight.completed.set()
+        return self._prepare_response(prepared, profile, started)
 
     def _dense(self, documents: list[dict[str, str]], query: str, profile: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         started = time.perf_counter()
@@ -462,6 +596,9 @@ class RetrievalRankingBackend:
             if math.isfinite(float(scores[index])) and float(scores[index]) >= profile["minimumDenseScore"]
         ]
         hits.sort(key=lambda item: (-item["score"], item["documentId"]))
+        # The threshold is only an eligibility guard. It must never turn dense
+        # recall into a full-corpus ranking consumed page by page.
+        hits = hits[:profile["denseTopK"]]
         for rank, hit in enumerate(hits, start=1):
             hit["rank"] = rank
         return hits, {
@@ -499,15 +636,19 @@ class RetrievalRankingBackend:
         keyword_query = query["keywordQuery"]
         if keyword_query is not None and (
             not isinstance(keyword_query, dict) or keyword_query.get("operator") not in {"and", "or"}
-            or not isinstance(keyword_query.get("terms"), list) or not all(isinstance(term, str) for term in keyword_query["terms"])
+            or not isinstance(keyword_query.get("terms"), list) or not 1 <= len(keyword_query["terms"]) <= 8
+            or not all(isinstance(term, str) and term.strip() for term in keyword_query["terms"])
         ):
             raise ServiceError(400, "INVALID_REQUEST", "keyword query is invalid.")
         excluded = {token for term in query["excludedTerms"] for token in tokenize_ranking_text(term)}
         allowed = [document for document in documents if not excluded.intersection(tokenize_ranking_text("\n".join(document.values())))]
-        keyword_allowed = [document for document in allowed if self._keyword_eligible(document, query)]
+        # A fast-path query without usable surface terms is intentionally dense-only.
+        # Language is provenance and never selects a different retrieval algorithm.
+        keyword_enabled = mode != "dense" and (not query["fastPath"] or keyword_query is not None)
+        keyword_allowed = [document for document in allowed if self._keyword_eligible(document, query)] if keyword_enabled else []
         lexical: list[dict[str, Any]] | None = None
         lexical_elapsed = 0.0
-        if mode != "dense":
+        if keyword_enabled:
             text = " ".join(keyword_query["terms"]) if keyword_query and keyword_query["terms"] else query["text"]
             lexical, lexical_elapsed = Bm25fIndex(keyword_allowed, profile["bm25f"]).search(text, query["excludedTerms"])
             if keyword_query is not None:
@@ -524,7 +665,7 @@ class RetrievalRankingBackend:
             hits = [self._channel_hit(item, "keyword") for item in lexical or []]
             return self._result(mode, "keyword", profile, hits, [keyword_execution], allowed, keyword_allowed, [])
         if profile["embeddingIdentity"] is None:
-            if mode == "dense" or not profile["allowKeywordFallback"]:
+            if mode == "dense" or not profile["allowKeywordFallback"] or not lexical:
                 raise ServiceError(503, "HYBRID_UNAVAILABLE", "Dense retrieval requires a configured embedding identity.", retryable=True)
             hits = [self._channel_hit(item, "keyword") for item in lexical or []]
             return self._result(mode, "keyword_fallback", profile, hits, [keyword_execution], allowed, keyword_allowed, ["dense_unavailable_keyword_fallback"])
@@ -532,7 +673,7 @@ class RetrievalRankingBackend:
         try:
             dense, dense_meta = self._dense(allowed, dense_query, profile)
         except ServiceError:
-            if mode == "dense" or not profile["allowKeywordFallback"]:
+            if mode == "dense" or not profile["allowKeywordFallback"] or not lexical:
                 raise
             hits = [self._channel_hit(item, "keyword") for item in lexical or []]
             return self._result(mode, "keyword_fallback", profile, hits, [keyword_execution], allowed, keyword_allowed, ["dense_failed_keyword_fallback"])
@@ -543,9 +684,10 @@ class RetrievalRankingBackend:
         }
         if mode == "dense":
             return self._result(mode, "dense", profile, [self._channel_hit(item, "vector") for item in dense], [dense_execution], allowed, keyword_allowed, [])
-        hits = self._fusion(lexical or [], dense, profile["fusion"])
+        fused = bool(lexical)
+        hits = self._fusion(lexical, dense, profile["fusion"]) if fused else [self._channel_hit(item, "vector") for item in dense]
         channels = [keyword_execution, dense_execution]
-        warnings: list[str] = []
+        warnings = [] if fused else ["keyword_no_hits_dense_only" if lexical is not None else "keyword_unavailable_dense_only"]
         reranker = None
         if profile["rerankerEnabled"] and hits:
             hits, reranker, warning, execution = self._rerank(hits, allowed, query, profile)
@@ -553,10 +695,11 @@ class RetrievalRankingBackend:
                 warnings.append(warning)
             if execution:
                 channels.append(execution)
-        result = self._result(mode, "hybrid", profile, hits, channels, allowed, keyword_allowed, warnings)
-        result["execution"]["fusion"] = {
-            "method": "weighted_rrf", "version": FUSION_VERSION, **profile["fusion"],
-        }
+        result = self._result(mode, "hybrid" if fused else "dense", profile, hits, channels, allowed, keyword_allowed, warnings)
+        if fused:
+            result["execution"]["fusion"] = {
+                "method": "weighted_rrf", "version": FUSION_VERSION, **profile["fusion"],
+            }
         if reranker is not None:
             result["execution"]["reranker"] = reranker
         return result

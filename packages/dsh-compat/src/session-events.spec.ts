@@ -1,3 +1,7 @@
+import { createRequire } from 'node:module'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { KNOWN_SESSION_EVENT_TYPES, Session, SessionId } from '@deepseek-ai/dsh-session'
 import {
@@ -28,6 +32,34 @@ describe('DSH Session compatibility boundary', () => {
     expect(second.newlyRegisteredEventTypes).toEqual([])
     expect(REQUIRED_RETRIEVAL_EVENT_TYPES.every(type => KNOWN_SESSION_EVENT_TYPES.has(type))).toBe(true)
     expect(KNOWN_SESSION_EVENT_TYPES.has(RETRIEVAL_PRESENTATION_EVENT_TYPE)).toBe(true)
+  })
+
+  it('registers the separate physical Session package used by the DSH runtime', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'retrieval-agent-dsh-host-'))
+    try {
+      const packageRoot = join(root, 'node_modules', '@deepseek-ai', 'dsh-session')
+      const entrypoint = join(root, 'bin.cjs')
+      await mkdir(packageRoot, { recursive: true })
+      await writeFile(entrypoint, '', 'utf8')
+      await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+        name: '@deepseek-ai/dsh-session',
+        version: PINNED_DSH_SESSION_VERSION,
+        main: 'index.cjs',
+        exports: { '.': './index.cjs', './package.json': './package.json' },
+      }), 'utf8')
+      await writeFile(join(packageRoot, 'index.cjs'),
+        'module.exports = { KNOWN_SESSION_EVENT_TYPES: new Set() }\n', 'utf8')
+
+      const report = installDshSessionCompatibility({ runtimeEntrypoint: entrypoint })
+      const runtimeRequire = createRequire(entrypoint)
+      const runtime = runtimeRequire('@deepseek-ai/dsh-session') as { KNOWN_SESSION_EVENT_TYPES: Set<string> }
+
+      expect(report.registeredRegistryCount).toBe(2)
+      expect(REQUIRED_RETRIEVAL_EVENT_TYPES.every(type => runtime.KNOWN_SESSION_EVENT_TYPES.has(type))).toBe(true)
+      expect(runtime.KNOWN_SESSION_EVENT_TYPES.has(RETRIEVAL_PRESENTATION_EVENT_TYPE)).toBe(true)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('round-trips the complete typed domain envelope through a detached Session', () => {

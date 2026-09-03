@@ -4,6 +4,7 @@ import type {
   RetrievalState,
   TicketCandidateNode,
 } from '@retrieval-agent/contracts'
+import { foldRetrievalEvents } from '@retrieval-agent/retrieval-replay'
 import { createTicketResultCollection } from '@retrieval-agent/ticket-collection'
 
 const STATUS_MESSAGES: Partial<Record<RetrievalState['termination'], string>> = {
@@ -40,8 +41,7 @@ export function projectTicketCandidateNode(
 ): TicketCandidateNode {
   const relevant = events.filter(event => event.retrievalId === retrievalId)
   const contract = relevant.find(event => event.type === 'retrieval/query-contracted')
-  const states = relevant.filter((event): event is RetrievalDomainEvent<'retrieval/state-recorded'> => event.type === 'retrieval/state-recorded')
-  const state = states.at(-1)?.data.state
+  const state = foldRetrievalEvents(relevant, retrievalId)
   const queryContract = state?.query.contract
     ?? (contract?.type === 'retrieval/query-contracted' ? contract.data.queryContract : undefined)
   const querySummary = state?.query.original

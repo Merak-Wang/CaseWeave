@@ -1,12 +1,11 @@
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { createTicketResultCollection } from '@retrieval-agent/ticket-collection'
 import { InMemoryRetrievalEventJournal, RetrievalController } from '@retrieval-agent/domain'
 import { ModelServiceClient } from '@retrieval-agent/model-service-client'
 import { LocalTicketProvider, parseTicketDatasetJsonl, rankingDocuments } from '@retrieval-agent/provider-local'
 import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
-import { bundledFixtureRoot } from '@retrieval-agent/bundle/startup'
+import { bundledDefaultTicketPaths } from '@retrieval-agent/bundle/startup'
 import { loadModelDependencyManifest } from './model-dependencies.mjs'
 
 const rerankerEnabled = process.argv.includes('--reranker')
@@ -18,13 +17,9 @@ const embeddingRevision = modelManifest.embedding.revision
 const rerankerModel = modelManifest.reranker.model
 const rerankerRevision = modelManifest.reranker.revision
 
-const fixtureRoot = bundledFixtureRoot()
-const records = (await Promise.all([
-  'tickets.jsonl',
-  'public/fcc-1000-seed-20260825.jsonl',
-  'public/bitext-1000-seed-20260825.jsonl',
-].map(async path => parseTicketDatasetJsonl(await readFile(join(fixtureRoot, path), 'utf8'))))).flat()
-if (records.length !== 2_040) throw new Error(`expected 2,040 development records, received ${records.length}`)
+const records = (await Promise.all(bundledDefaultTicketPaths()
+  .map(async path => parseTicketDatasetJsonl(await readFile(path, 'utf8'))))).flat()
+if (records.length !== 19_587) throw new Error(`expected 19,587 ESFT development records, received ${records.length}`)
 
 const gateway = new ModelServiceClient({
   baseUrl,

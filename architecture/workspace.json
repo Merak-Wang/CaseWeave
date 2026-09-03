@@ -46,11 +46,19 @@
       "maxSourceLines": 100
     },
     {
+      "directory": "retrieval-replay",
+      "name": "@retrieval-agent/retrieval-replay",
+      "kind": "event-replay",
+      "capability": "相邻检索状态的有界 JSON Patch 编解码与跨应用/UI 的确定性 Session 重放；不执行检索策略。",
+      "allowedInternalDependencies": ["@retrieval-agent/contracts"],
+      "maxSourceLines": 500
+    },
+    {
       "directory": "domain",
       "name": "@retrieval-agent/domain",
       "kind": "domain",
       "capability": "确定性检索控制器、远端策略 patch 最终准入、状态重放、查询收敛与证据上下文策略。",
-      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/retrieval-policy"],
+      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/retrieval-replay", "@retrieval-agent/retrieval-policy"],
       "maxSourceLines": 1250
     },
     {
@@ -65,9 +73,9 @@
       "directory": "retrieval-ranking",
       "name": "@retrieval-agent/retrieval-ranking",
       "kind": "retrieval-client",
-      "capability": "Python Retrieval FastAPI 排名的版本化 HTTP Consumer、profile 身份、超时取消、错误映射与授权候选越界校验。",
+      "capability": "Python Retrieval FastAPI 排名与无时限索引准备长任务的版本化 HTTP Consumer、profile 身份、进度观察、主动取消、错误映射与授权候选越界校验。",
       "allowedInternalDependencies": [],
-      "maxSourceLines": 500
+      "maxSourceLines": 600
     },
     {
       "directory": "provider-local",
@@ -98,7 +106,7 @@
       "name": "@retrieval-agent/ui-ticket-results",
       "kind": "ui",
       "capability": "从持久化事件投影可折叠候选集合，通过 Product API 按需读取已重新授权的详情，并注册 DSH 客户端 renderer。",
-      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/product-api", "@retrieval-agent/ticket-collection"],
+      "allowedInternalDependencies": ["@retrieval-agent/contracts", "@retrieval-agent/product-api", "@retrieval-agent/retrieval-replay", "@retrieval-agent/ticket-collection"],
       "maxSourceLines": 1050
     },
     {

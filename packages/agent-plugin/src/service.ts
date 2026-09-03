@@ -9,7 +9,7 @@ import {
   type RetrievalKnowledgeAssessment,
   type RetrievalState,
   type TicketCandidateRef,
-  type TicketEvidenceField,
+  type TicketL3DetailsResult,
   type TicketRetrievalRequest,
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
@@ -70,15 +70,15 @@ export class RetrievalAgentService extends Service {
   static inject = ['ticketRetrievalProvider', 'ticketPrincipalProvider']
   private readonly active = new WeakMap<Agent, ActiveRetrieval>()
   private readonly controllerConfig: RetrievalControllerConfig
-  readonly contextTokenBudget: number
-  readonly maxContextTokens: number
+  readonly contextTokenBudget: number | undefined
+  readonly maxContextTokens: number | undefined
 
   constructor(ctx: Context, config: RetrievalAgentServiceConfig = {}) {
     super(ctx, 'retrievalAgent')
     installDshSessionCompatibility()
     this.controllerConfig = config
-    this.contextTokenBudget = config.contextTokenBudget ?? 1_500
-    this.maxContextTokens = config.maxContextTokens ?? 8_192
+    this.contextTokenBudget = config.contextTokenBudget
+    this.maxContextTokens = config.maxContextTokens
   }
 
   currentOrUndefined(agent: Agent): RetrievalState | undefined {
@@ -122,7 +122,7 @@ export class RetrievalAgentService extends Service {
       } catch (error) {
         const reason = stoppedReason(error)
         if (reason === undefined) throw error
-        return entry.controller.stop(state, reason)
+        return this.stopForReason(entry, state, reason)
       }
     })
   }
@@ -130,9 +130,29 @@ export class RetrievalAgentService extends Service {
   async continueRanking(agent: Agent, signal?: AbortSignal): Promise<RetrievalState> {
     const entry = this.entry(agent)
     return await this.mutate(entry, async state => {
-      const principal = await this.resolvePrincipal(agent, 'search', signal)
-      return await entry.controller.continueRanking(principal, state, signal)
+      if (state.phase === 'stopped') return state
+      try {
+        const principal = await this.resolvePrincipal(agent, 'search', signal)
+        return await entry.controller.continueRanking(principal, state, signal)
+      } catch (error) {
+        const reason = stoppedReason(error)
+        if (reason === undefined) throw error
+        return this.stopForReason(entry, state, reason)
+      }
     })
+  }
+
+  async readL3Details(agent: Agent, refs: readonly TicketCandidateRef[], signal?: AbortSignal): Promise<TicketL3DetailsResult> {
+    const entry = this.entry(agent)
+    let result: TicketL3DetailsResult | undefined
+    await this.mutate(entry, async state => {
+      if (state.phase === 'stopped') throw new RetrievalError('INVALID_TRANSITION', '已结束的检索不能读取 L3 原始详情。')
+      const principal = await this.resolvePrincipal(agent, 'l3_details_read', signal)
+      result = await entry.controller.readL3Details(principal, state, refs, signal)
+      return state
+    })
+    if (result === undefined) throw new RetrievalError('PROTOCOL_MISMATCH', 'L3 原始详情读取没有返回结果。')
+    return result
   }
 
   async assess(agent: Agent, assessment: RetrievalKnowledgeAssessment): Promise<RetrievalState> {
@@ -141,21 +161,6 @@ export class RetrievalAgentService extends Service {
       const assessed = await entry.controller.assess(state, assessment)
       const freeze = assessed.allowedActions.find(action => action.kind === 'freeze')
       return freeze === undefined ? assessed : entry.controller.freeze(assessed, assessed.selectedCandidateRefs)
-    })
-  }
-
-  async promote(agent: Agent, refs: readonly TicketCandidateRef[], fields: readonly TicketEvidenceField[], tokenBudget: number, signal?: AbortSignal): Promise<RetrievalState> {
-    const entry = this.entry(agent)
-    return await this.mutate(entry, async state => {
-      if (state.phase === 'stopped') return state
-      try {
-        const principal = await this.resolvePrincipal(agent, 'evidence_read', signal)
-        return await entry.controller.promote(principal, state, refs, fields, tokenBudget, signal)
-      } catch (error) {
-        const reason = stoppedReason(error)
-        if (reason === undefined) throw error
-        return entry.controller.stop(state, reason)
-      }
     })
   }
 
@@ -177,25 +182,48 @@ export class RetrievalAgentService extends Service {
     return entry.state
   }
 
-  projectContext(agent: Agent, tokenBudget = this.contextTokenBudget): EvidenceContextSelection {
+  projectContext(agent: Agent, tokenBudget?: number): EvidenceContextSelection {
     const entry = this.entry(agent)
-    return entry.controller.projectContext(entry.state, tokenBudget)
+    const configured = tokenBudget ?? this.contextTokenBudget
+    return entry.controller.projectContext(entry.state, typeof configured === 'number' ? configured : undefined)
+  }
+
+  /** Resolve the selected route's capacity with an optional narrower deployment override. */
+  modelContextTokenLimit(agent: Agent): number | undefined {
+    return this.effectiveContextLimit(agent.session.requestContext()?.contextWindow)
   }
 
   async admitModelRequest(agent: Agent, input: {
     readonly estimatedInputTokens: number
     readonly serializationBytes: number
     readonly wallClockElapsedMs: number
+    readonly modelContextWindow?: number
   }): Promise<{ readonly accepted: boolean; readonly remainingWallClockMs: number }> {
     const entry = this.entry(agent)
     let accepted = false
     const state = await this.mutate(entry, async current => {
       if (current.phase === 'stopped') return current
-      accepted = input.estimatedInputTokens <= this.maxContextTokens
-        && (current.budget.modelStepsUsed ?? current.budget.roundsUsed) < current.budget.maxRounds
-        && input.wallClockElapsedMs < current.budget.maxLatencyMs
-      const measured = entry.controller.recordModelRequest(current, { ...input, accepted })
-      return accepted ? measured : entry.controller.stop(measured, 'budget_exhausted')
+      const effectiveContextLimit = this.effectiveContextLimit(input.modelContextWindow)
+      const contextExceeded = effectiveContextLimit !== undefined
+        && input.estimatedInputTokens > effectiveContextLimit
+      const modelStepsExceeded = (current.budget.modelStepsUsed ?? current.budget.roundsUsed) >= current.budget.maxRounds
+      const wallClockExceeded = input.wallClockElapsedMs >= current.budget.maxLatencyMs
+      const rejectionReason = contextExceeded
+        ? this.maxContextTokens !== undefined
+          && (input.modelContextWindow === undefined || this.maxContextTokens < input.modelContextWindow)
+          ? 'deployment_context' as const
+          : 'model_context' as const
+        : modelStepsExceeded ? 'model_steps' as const
+          : wallClockExceeded ? 'wall_clock' as const : undefined
+      accepted = rejectionReason === undefined
+      const measured = entry.controller.recordModelRequest(current, {
+        ...input,
+        ...(this.maxContextTokens === undefined ? {} : { deploymentContextLimit: this.maxContextTokens }),
+        ...(effectiveContextLimit === undefined ? {} : { effectiveContextLimit }),
+        ...(rejectionReason === undefined ? {} : { rejectionReason }),
+        accepted,
+      })
+      return accepted ? measured : entry.controller.freezeForBudget(measured)
     })
     return {
       accepted,
@@ -221,7 +249,7 @@ export class RetrievalAgentService extends Service {
     const entry = this.entry(agent)
     return await this.mutate(entry, async state => state.phase === 'stopped'
       ? state
-      : entry.controller.stop(state, 'budget_exhausted'))
+      : entry.controller.freezeForBudget(state))
   }
 
   async principal(agent: Agent, operation: 'detail_read' | 'export', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
@@ -251,6 +279,22 @@ export class RetrievalAgentService extends Service {
     return entry
   }
 
+  private effectiveContextLimit(modelContextWindow: number | undefined): number | undefined {
+    if (modelContextWindow === undefined) return this.maxContextTokens
+    if (this.maxContextTokens === undefined) return modelContextWindow
+    return Math.min(modelContextWindow, this.maxContextTokens)
+  }
+
+  private stopForReason(
+    entry: ActiveRetrieval,
+    state: RetrievalState,
+    reason: NonNullable<ReturnType<typeof stoppedReason>>,
+  ): RetrievalState {
+    return reason === 'budget_exhausted'
+      ? entry.controller.freezeForBudget(state)
+      : entry.controller.stop(state, reason)
+  }
+
   private async finalize(entry: ActiveRetrieval, signal?: AbortSignal): Promise<RetrievalState> {
     entry.state = await entry.controller.finalizeExhaustedEmptyResult(entry.state, signal)
     return entry.state
@@ -273,7 +317,7 @@ export class RetrievalAgentService extends Service {
     }
   }
 
-  private async resolvePrincipal(agent: Agent, operation: 'snapshot_open' | 'search' | 'evidence_read' | 'detail_read' | 'export', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
+  private async resolvePrincipal(agent: Agent, operation: 'snapshot_open' | 'search' | 'evidence_read' | 'detail_read' | 'l3_details_read' | 'export', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
     return await this.ctx.ticketPrincipalProvider.resolve(
       { sessionId: String(agent.session.id), operation },
       signal === undefined ? undefined : { signal },

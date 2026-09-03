@@ -105,10 +105,14 @@ function validAction(value: unknown, state: RetrievalState): value is RetrievalA
   const action = object(value)
   if (action === undefined) return false
   const candidateRefs = new Set(state.candidates.map(candidate => candidate.ref))
-  const evidenceFields = new Set(state.snapshot?.fieldCatalog.filter(field => field.accessLevel === 'L2').map(field => field.key) ?? [])
-  return ['search', 'search_next', 'repair_search', 'assess', 'promote', 'request_clarification', 'freeze', 'read_state'].includes(String(action?.kind))
+  const allowedFields = new Set(state.snapshot?.fieldCatalog
+    .filter(field => action.kind === 'read_l3_details'
+      ? field.accessLevel === 'L3' && field.valueKind === 'raw_json'
+      : field.accessLevel === 'L2')
+    .map(field => field.key) ?? [])
+  return ['search', 'search_next', 'repair_search', 'assess', 'read_l3_details', 'request_clarification', 'freeze', 'read_state'].includes(String(action?.kind))
     && Array.isArray(action.candidateAllowlist) && action.candidateAllowlist.every(ref => typeof ref === 'string' && candidateRefs.has(ref as TicketCandidateRef))
-    && Array.isArray(action.fieldAllowlist) && action.fieldAllowlist.every(field => typeof field === 'string' && evidenceFields.has(field))
+    && Array.isArray(action.fieldAllowlist) && action.fieldAllowlist.every(field => typeof field === 'string' && allowedFields.has(field))
     && Number.isSafeInteger(action.maxTokens) && Number(action.maxTokens) >= 0 && Number(action.maxTokens) <= state.budget.maxEvidenceTokens
 }
 

@@ -1,4 +1,4 @@
-import type { RankingDocument, RankingQuery, RankingResult } from './types.js'
+import type { PreparationProgress, RankingDocument, RankingQuery, RankingResult } from './types.js'
 
 export const RAG_SERVICE_PROTOCOL_VERSION = 'retrieval-agent.rag.v1' as const
 
@@ -10,6 +10,8 @@ export interface RankingProfileParams {
   readonly embeddingBatchSize: number
   readonly modelDeadlineMs: number
   readonly minimumDenseScore: number
+  /** Hard candidate budget applied to the dense channel before fusion. */
+  readonly denseTopK: number
   readonly fusion: {
     readonly rankConstant: number
     readonly keywordWeight: number
@@ -30,7 +32,9 @@ export interface PrepareRankingParams {
   readonly requestId: string
   readonly documents: readonly RankingDocument[]
   readonly profile: RankingProfileParams
-  readonly options: { readonly maxScan: number; readonly deadlineMs: number }
+  readonly options: {
+    readonly maxScan: number
+  }
 }
 
 export interface PrepareRankingResponse {
@@ -42,6 +46,12 @@ export interface PrepareRankingResponse {
   readonly dimensions: number
   readonly elapsedMs: number
   readonly profileVersion: string
+}
+
+export interface PrepareRankingProgressResponse {
+  readonly protocolVersion: typeof RAG_SERVICE_PROTOCOL_VERSION
+  readonly requestId: string
+  readonly progress: PreparationProgress
 }
 
 export interface RankDocumentsParams {

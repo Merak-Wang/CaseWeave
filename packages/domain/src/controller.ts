@@ -2,14 +2,14 @@ import { randomUUID } from 'node:crypto'
 import {
   RetrievalError,
   RetrievalId,
-  RetrievalStateId,
+  MAX_L3_DETAILS_PER_READ,
   type EvidenceContextSelection,
   type FrozenEvidencePack,
   type RetrievalKnowledgeAssessment,
   type RetrievalState,
   type RetrievalTermination,
   type TicketCandidateRef,
-  type TicketEvidenceField,
+  type TicketL3DetailsResult,
   type TicketQueryDelta,
   type TicketRetrievalMode,
   type TicketRetrievalProvider,
@@ -27,13 +27,13 @@ import {
   emptyBudget,
   requireAction as hasAction,
   taskCompletionSatisfied,
-  snapshotEvidenceFields,
   stopReason,
   validateCandidateRefs as validateRefs,
 } from './state-guards.js'
 import { executeSearchTransition } from './search-transition.js'
 import { fallbackQueryContract } from './query-contract.js'
 import { modelRequestBudget, modelResponseBudget, toolCallBudget } from './runtime-budget.js'
+import { advanceRetrievalState, recordMeasuredBudget, recordRetrievalState, retrievalStateId } from './state-transition.js'
 
 export interface RetrievalControllerConfig {
   readonly rulesVersion?: string
@@ -56,8 +56,7 @@ export interface RetrievalControllerConfig {
 
 export interface RetrievalSearchInput {
   readonly mode: Extract<TicketRetrievalMode, 'keyword' | 'dense'>
-  readonly delta?: TicketQueryDelta
-  readonly cursor?: string
+  readonly delta?: TicketQueryDelta; readonly cursor?: string
 }
 /** Model intent is admitted only through these deterministic transitions. */
 export class RetrievalController {
@@ -87,14 +86,14 @@ export class RetrievalController {
       deadlineMs: config.retrievalPolicyDeadlineMs ?? 5_000,
     })
     this.#rulesVersion = config.rulesVersion ?? 'retrieval-rules-v1'
-    this.#promptVersion = config.promptVersion ?? 'retrieval-prompt-v1'
+    this.#promptVersion = config.promptVersion ?? 'retrieval-prompt-v2'
     this.#maxRounds = config.maxRounds ?? 8
-    this.#maxSearches = config.maxSearches ?? 4
+    this.#maxSearches = config.maxSearches ?? 2_500
     this.#maxPromotions = config.maxPromotions ?? 3
     this.#maxEvidenceTokens = config.maxEvidenceTokens ?? 1_500
     this.#maxLatencyMs = config.maxLatencyMs ?? 120_000
     this.#noProgressLimit = config.noProgressLimit ?? 2
-    this.#searchTopK = config.searchTopK ?? 8
+    this.#searchTopK = config.searchTopK ?? 20
     this.#searchMaxScan = config.searchMaxScan ?? 50_000
     this.#now = config.now ?? (() => new Date())
     this.#id = config.id ?? (() => randomUUID())
@@ -106,10 +105,10 @@ export class RetrievalController {
     const queryContract = request.queryContract ?? fallbackQueryContract(spec)
     const task = {
       target: spec.target,
-      requestedCount: spec.requestedCount,
+      ...(spec.requestedCount === undefined ? {} : { requestedCount: spec.requestedCount }),
       countPolicy: spec.countPolicy,
       answerabilityPolicy: 'current_snapshot_evidence_only' as const,
-      completenessRequirement: spec.target === 'constrained_list' || spec.target === 'cohort_collection' ? 'exhaustive' as const : 'top_k' as const,
+      completenessRequirement: spec.countPolicy === 'exhaustive' ? 'exhaustive' as const : 'top_k' as const,
     }
     const contracted = this.#journal.append(retrievalId, 'retrieval/query-contracted', { contract: task, queryContract, spec })
     const snapshot = await this.#provider.openSnapshot(principal, { ...(signal === undefined ? {} : { signal }) })
@@ -117,7 +116,7 @@ export class RetrievalController {
     const now = this.#now().toISOString()
     const state: RetrievalState = {
       retrievalId,
-      stateId: RetrievalStateId(this.#stateId(retrievalId, 0)),
+      stateId: retrievalStateId(retrievalId, 0, this.#id()),
       revision: 0,
       createdAt: now,
       updatedAt: now,
@@ -159,7 +158,7 @@ export class RetrievalController {
         sourceEventIds: [contracted.eventId, opened.eventId],
       },
     }
-    this.#record(state)
+    recordRetrievalState(this.#journal, state)
     try {
       if (!snapshot.capabilities.keywordSearch || !snapshot.capabilities.denseSearch || !snapshot.capabilities.hybridFusion) {
         throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Provider 未声明首轮 Hybrid 所需的真实双通道能力。')
@@ -198,15 +197,15 @@ export class RetrievalController {
     const patch = await this.#policy.planKnowledgeAssessment(
       state, assessment, { noProgressLimit: this.#noProgressLimit }, signal,
     )
-    const next = this.#next(state, {
+    const next = advanceRetrievalState(state, {
       ...patch,
       provenance: {
         ...state.provenance,
         ...(assessment.model === undefined ? {} : { model: assessment.model }),
         sourceEventIds: [assessed.eventId],
       },
-    })
-    this.#record(next)
+    }, this.#now, this.#id)
+    recordRetrievalState(this.#journal, next, state)
     return next
   }
   /** Only an exhausted empty Provider result is semantically safe to finish without a model assessment. */
@@ -224,45 +223,46 @@ export class RetrievalController {
     return this.freeze(assessed, [])
   }
 
-  async promote(principal: TrustedPrincipalContext, state: RetrievalState, refs: readonly TicketCandidateRef[], fields: readonly TicketEvidenceField[], tokenBudget: number, signal?: AbortSignal): Promise<RetrievalState> {
-    const allowed = hasAction(state, 'promote')
+  /** Reauthorize one atomic batch of complete L3 source payloads. */
+  async readL3Details(
+    principal: TrustedPrincipalContext,
+    state: RetrievalState,
+    refs: readonly TicketCandidateRef[],
+    signal?: AbortSignal,
+  ): Promise<TicketL3DetailsResult> {
+    const allowed = hasAction(state, 'read_l3_details')
+    if (refs.length === 0 || refs.length > MAX_L3_DETAILS_PER_READ || new Set(refs).size !== refs.length) {
+      throw new RetrievalError('INVALID_REQUEST', `L3 批量读取必须包含 1–${MAX_L3_DETAILS_PER_READ} 个不重复候选。`)
+    }
     const selected = validateRefs(state, refs)
-    if (selected.length === 0) throw new RetrievalError('INVALID_REQUEST', '必须选择至少一个候选读取证据。')
-    if (selected.some(ref => !allowed.candidateAllowlist.includes(ref))) throw new RetrievalError('UNAUTHORIZED', '候选不在当前读取 allowlist 中。')
-    if (fields.length === 0 || fields.some(field => !allowed.fieldAllowlist.includes(field))) throw new RetrievalError('FIELD_NOT_ALLOWED', '字段不在当前读取 allowlist 中。')
-    if (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1 || tokenBudget > allowed.maxTokens) throw new RetrievalError('BUDGET_EXHAUSTED', '证据读取预算无效或已耗尽。')
-    if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '当前检索没有有效快照。')
-    const result = await this.#provider.readEvidence(principal, {
+    if (selected.some(ref => !allowed.candidateAllowlist.includes(ref))) {
+      throw new RetrievalError('UNAUTHORIZED', '批次中存在不在当前 L3 读取 allowlist 中的候选。')
+    }
+    if (state.snapshot === undefined || state.snapshot.capabilities.l3DetailsRead !== true) {
+      throw new RetrievalError('SNAPSHOT_INVALID', '当前检索快照不支持批量 L3 原始详情读取。')
+    }
+    const result = await this.#provider.readL3Details(principal, {
       snapshotId: state.snapshot.snapshotId,
       candidateRefs: selected,
-      fields,
-      tokenBudget,
+      purpose: 'model_ticket_load',
     }, signal === undefined ? undefined : { signal })
-    if (result.snapshotId !== state.snapshot.snapshotId) throw new RetrievalError('PROTOCOL_MISMATCH', 'Provider 返回了不同快照的证据。')
-    if (result.rejectedCandidateRefs.length > 0) throw new RetrievalError('UNAUTHORIZED', '候选证据授权已变化，请重新检索。')
-    if (result.tokensUsed > tokenBudget || result.evidence.some(evidence => !selected.includes(evidence.candidateRef))) {
-      throw new RetrievalError('PROTOCOL_MISMATCH', 'Provider 返回的证据超出本次 allowlist 或预算。')
+    if (result.snapshotId !== state.snapshot.snapshotId
+      || result.requestedCandidateRefs.length !== selected.length
+      || result.details.length !== selected.length) {
+      throw new RetrievalError('PROTOCOL_MISMATCH', 'Provider 返回了错误数量或不同快照的批量 L3 原始详情。')
     }
-    const promoted = this.#journal.append(state.retrievalId, 'retrieval/evidence-promoted', { evidence: result.evidence, tokensUsed: result.tokensUsed })
-    const budget = {
-      ...state.budget,
-      promotionsUsed: state.budget.promotionsUsed + 1,
-      evidenceTokensUsed: state.budget.evidenceTokensUsed + result.tokensUsed,
+    for (let index = 0; index < selected.length; index += 1) {
+      const ref = selected[index]!
+      const candidate = state.candidates.find(item => item.ref === ref)
+      const detail = result.details[index]
+      if (result.requestedCandidateRefs[index] !== ref || detail?.candidateRef !== ref
+        || candidate === undefined || detail.displayId !== candidate.displayId
+        || detail.sourceVersion !== candidate.sourceVersion || detail.contentHash !== candidate.contentHash) {
+        throw new RetrievalError('PROTOCOL_MISMATCH', 'Provider 批量 L3 结果的顺序、身份、版本或内容 hash 不一致。')
+      }
     }
-    const next = this.#next(state, {
-      phase: 'assessed',
-      promotedEvidence: [...state.promotedEvidence, ...result.evidence],
-      allowedActions: [
-        action('assess', state.candidates.map(candidate => candidate.ref)),
-        ...state.allowedActions.filter(candidate => candidate.kind === 'search_next' || candidate.kind === 'repair_search'),
-        action('read_state'),
-      ],
-      budget,
-      progress: { ...state.progress, newEvidenceIds: result.evidence.map(evidence => evidence.evidenceId), newDecisiveEvidence: result.evidence.length > 0, noProgressStreak: result.evidence.length > 0 ? 0 : state.progress.noProgressStreak + 1 },
-      provenance: { ...state.provenance, sourceEventIds: [promoted.eventId] },
-    })
-    this.#record(next)
-    return next
+    this.#journal.append(state.retrievalId, 'retrieval/l3-details-read', { details: result.details })
+    return result
   }
   requestClarification(state: RetrievalState, facet: string, question: string, refs: readonly TicketCandidateRef[]): RetrievalState {
     hasAction(state, 'request_clarification')
@@ -278,14 +278,14 @@ export class RetrievalController {
     const normalizedQuestion = question.trim()
     if (normalizedQuestion.length < 2 || normalizedQuestion.length > 500) throw new RetrievalError('INVALID_REQUEST', '澄清问题无效。')
     const event = this.#journal.append(state.retrievalId, 'retrieval/clarification-requested', { facet, question: normalizedQuestion, candidateRefs: selected })
-    const next = this.#next(state, {
+    const next = advanceRetrievalState(state, {
       phase: 'awaiting_clarification',
       clarification: { facet, question: normalizedQuestion, candidateRefs: selected },
       allowedActions: [action('answer_clarification', selected), action('read_state')],
       termination: 'needs_clarification',
       provenance: { ...state.provenance, sourceEventIds: [event.eventId] },
-    })
-    this.#record(next)
+    }, this.#now, this.#id)
+    recordRetrievalState(this.#journal, next, state)
     return next
   }
   answerClarification(state: RetrievalState, input: { readonly accepted: boolean; readonly answer?: string }): RetrievalState {
@@ -316,7 +316,7 @@ export class RetrievalController {
     const actions = input.accepted && state.budget.searchesUsed < state.budget.maxSearches
       ? [action('repair_search'), action('read_state')]
       : [action('freeze', state.candidates.map(candidate => candidate.ref)), action('read_state')]
-    const next = this.#next(state, {
+    const next = advanceRetrievalState(state, {
       phase: 'assessed',
       query: {
         ...state.query,
@@ -338,11 +338,11 @@ export class RetrievalController {
       allowedActions: actions,
       termination: 'active',
       provenance: { ...state.provenance, sourceEventIds: [event.eventId] },
-    })
-    this.#record(next)
+    }, this.#now, this.#id)
+    recordRetrievalState(this.#journal, next, state)
     return next
   }
-  projectContext(state: RetrievalState, tokenBudget: number): EvidenceContextSelection {
+  projectContext(state: RetrievalState, tokenBudget?: number): EvidenceContextSelection {
     const selection = this.#contextPolicy.select(state, tokenBudget)
     this.#journal.append(state.retrievalId, 'retrieval/context-projected', { selection })
     return selection
@@ -351,7 +351,7 @@ export class RetrievalController {
   /** Persist one full-request admission decision before any model bytes are sent. */
   recordModelRequest(state: RetrievalState, input: Parameters<typeof modelRequestBudget>[1]): RetrievalState {
     const event = this.#journal.append(state.retrievalId, 'retrieval/model-request-measured', input)
-    return this.#recordMeasuredBudget(state, event.eventId, modelRequestBudget(state.budget, input))
+    return recordMeasuredBudget(this.#journal, state, event.eventId, modelRequestBudget(state.budget, input), this.#now, this.#id)
   }
   /** Persist settled model latency and provider-reported output use. */
   recordModelResponse(state: RetrievalState, input: Parameters<typeof modelResponseBudget>[1]): RetrievalState {
@@ -359,14 +359,41 @@ export class RetrievalController {
       modelLatencyMs: input.modelLatencyMs,
       outputTokens: input.outputTokens,
     })
-    return this.#recordMeasuredBudget(state, event.eventId, modelResponseBudget(state.budget, input))
+    return recordMeasuredBudget(this.#journal, state, event.eventId, modelResponseBudget(state.budget, input), this.#now, this.#id)
   }
   recordToolCall(state: RetrievalState, input: { readonly success: boolean; readonly serializationBytes: number }): RetrievalState {
     const event = this.#journal.append(state.retrievalId, 'retrieval/tool-call-measured', input)
-    return this.#recordMeasuredBudget(state, event.eventId, toolCallBudget(state.budget, input))
+    return recordMeasuredBudget(this.#journal, state, event.eventId, toolCallBudget(state.budget, input), this.#now, this.#id)
   }
   freeze(state: RetrievalState, refs: readonly TicketCandidateRef[], reason?: Exclude<RetrievalTermination, 'active' | 'needs_clarification'>): RetrievalState {
     hasAction(state, 'freeze')
+    return this.#freeze(state, refs, reason)
+  }
+  /**
+   * Preserve already-authorized candidates when an execution safety ceiling is
+   * reached before the model can submit a normal terminal assessment.
+   */
+  freezeForBudget(state: RetrievalState): RetrievalState {
+    if (state.candidates.length === 0 || state.snapshot === undefined) return this.stop(state, 'budget_exhausted')
+    return this.#freeze(state, state.candidates.map(candidate => candidate.ref), 'budget_exhausted')
+  }
+  stop(state: RetrievalState, reason: Extract<RetrievalTermination, 'budget_exhausted' | 'permission_blocked' | 'backend_error' | 'snapshot_invalid' | 'cancelled'>): RetrievalState {
+    const event = this.#journal.append(state.retrievalId, 'retrieval/stopped', { reason, remainingGapKinds: state.gaps.map(gap => gap.kind) })
+    const next = advanceRetrievalState(state, {
+      phase: 'stopped',
+      allowedActions: [],
+      termination: reason,
+      provenance: { ...state.provenance, sourceEventIds: [event.eventId] },
+    }, this.#now, this.#id)
+    recordRetrievalState(this.#journal, next, state)
+    return next
+  }
+
+  #freeze(
+    state: RetrievalState,
+    refs: readonly TicketCandidateRef[],
+    reason?: Exclude<RetrievalTermination, 'active' | 'needs_clarification'>,
+  ): RetrievalState {
     if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '当前检索没有有效快照。')
     const selected = validateRefs(state, refs)
     const taskSatisfied = taskCompletionSatisfied(
@@ -406,7 +433,7 @@ export class RetrievalController {
           displayId: candidate.displayId,
           sourceVersion: candidate.sourceVersion,
           contentHash: candidate.contentHash,
-          evidenceLevel: evidenceIds.length > 0 ? 'L2' as const : 'L1' as const,
+          evidenceLevel: 'L2' as const,
           evidenceIds,
         }
       }),
@@ -419,7 +446,8 @@ export class RetrievalController {
       topKAccepted: state.task.completenessRequirement === 'top_k' && stoppingReason === 'top_k_accepted',
       resultPagesExhausted,
       semanticRecallKnown,
-      resultMayBeIncomplete: !semanticRecallKnown,
+      resultMayBeIncomplete: (stoppingReason !== 'top_k_accepted' && stoppingReason !== 'no_result')
+        || !semanticRecallKnown || !resultPagesExhausted,
       nextPageAvailable,
       providerId: state.snapshot.providerId,
       promptVersion: state.provenance.promptVersion,
@@ -429,25 +457,14 @@ export class RetrievalController {
       reason: stoppingReason,
       remainingGapKinds: pack.remainingGaps.map(gap => gap.kind),
     })
-    const next = this.#next(state, {
+    const next = advanceRetrievalState(state, {
       phase: 'stopped',
       allowedActions: [],
       termination: stoppingReason,
       frozenEvidence: pack,
       provenance: { ...state.provenance, sourceEventIds: [frozen.eventId, stopped.eventId] },
-    })
-    this.#record(next)
-    return next
-  }
-  stop(state: RetrievalState, reason: Extract<RetrievalTermination, 'budget_exhausted' | 'permission_blocked' | 'backend_error' | 'snapshot_invalid' | 'cancelled'>): RetrievalState {
-    const event = this.#journal.append(state.retrievalId, 'retrieval/stopped', { reason, remainingGapKinds: state.gaps.map(gap => gap.kind) })
-    const next = this.#next(state, {
-      phase: 'stopped',
-      allowedActions: [],
-      termination: reason,
-      provenance: { ...state.provenance, sourceEventIds: [event.eventId] },
-    })
-    this.#record(next)
+    }, this.#now, this.#id)
+    recordRetrievalState(this.#journal, next, state)
     return next
   }
 
@@ -476,37 +493,8 @@ export class RetrievalController {
       topK: this.#searchTopK,
       maxScan: this.#searchMaxScan,
     })
-    const next = this.#next(state, result.patch)
-    this.#record(next)
+    const next = advanceRetrievalState(state, result.patch, this.#now, this.#id)
+    recordRetrievalState(this.#journal, next, state)
     return next
-  }
-
-  #next(state: RetrievalState, patch: Partial<RetrievalState>): RetrievalState {
-    const revision = state.revision + 1
-    const next: RetrievalState = {
-      ...state,
-      ...patch,
-      stateId: RetrievalStateId(this.#stateId(state.retrievalId, revision)),
-      previousStateId: state.stateId,
-      revision,
-      updatedAt: this.#now().toISOString(),
-    }
-    if (next.lastAssessment !== undefined) return next
-    const { lastAssessment: _lastAssessment, ...serializable } = next
-    return serializable
-  }
-
-  #record(state: RetrievalState): void {
-    this.#journal.append(state.retrievalId, 'retrieval/state-recorded', { state })
-  }
-
-  #recordMeasuredBudget(state: RetrievalState, eventId: string, budget: RetrievalState['budget']): RetrievalState {
-    const next = this.#next(state, { budget, provenance: { ...state.provenance, sourceEventIds: [eventId] } })
-    this.#record(next)
-    return next
-  }
-
-  #stateId(retrievalId: string, revision: number): string {
-    return `state_${retrievalId}_${revision}_${this.#id()}`
   }
 }

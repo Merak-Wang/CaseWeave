@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from retrieval_agent_model_service import PROTOCOL_VERSION
-from retrieval_agent_model_service.ranking import RAG_PROTOCOL_VERSION
+from retrieval_agent_model_service.ranking import RAG_PROTOCOL_VERSION, RetrievalRankingBackend
 from retrieval_agent_model_service.server import create_app
 
 
@@ -124,7 +124,7 @@ def test_rejects_protocol_drift_and_duplicate_rerank_ids() -> None:
 def test_rag_ranking_and_policy_endpoints_use_a_separate_versioned_protocol() -> None:
     profile = {
         "embeddingInstruction": "retrieve", "rerankerInstruction": "judge",
-        "embeddingBatchSize": 16, "modelDeadlineMs": 5_000, "minimumDenseScore": 0.1,
+        "embeddingBatchSize": 16, "modelDeadlineMs": 5_000, "minimumDenseScore": 0.1, "denseTopK": 15,
         "fusion": {"rankConstant": 60, "keywordWeight": 0.55, "vectorWeight": 0.45},
         "bm25f": {}, "rerankerEnabled": False, "rerankTopN": 20, "allowKeywordFallback": False,
     }
@@ -157,3 +157,39 @@ def test_rag_ranking_and_policy_endpoints_use_a_separate_versioned_protocol() ->
     })
     assert mismatch.status_code == 409
     assert mismatch.json()["protocolVersion"] == RAG_PROTOCOL_VERSION
+
+
+def test_rag_prepare_progress_endpoint_reports_completed_work() -> None:
+    async def execute() -> tuple[httpx.Response, httpx.Response]:
+        model_backend = FakeBackend()
+        ranking_backend = RetrievalRankingBackend(model_backend)
+        transport = httpx.ASGITransport(app=create_app(model_backend, ranking_backend))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            prepared = await client.post("/v1/ranking/prepare", json={
+                "protocolVersion": RAG_PROTOCOL_VERSION,
+                "requestId": "prepare-observable",
+                "documents": [{
+                    "id": "ticket-1", "contentHash": "hash-1", "title": "副卡跨域失败",
+                    "summary": "办理失败", "body": "", "metadata": "",
+                }],
+                "options": {"maxScan": 10},
+                "profile": {
+                    "embeddingInstruction": "retrieve", "rerankerInstruction": "judge",
+                    "embeddingBatchSize": 16, "modelDeadlineMs": 5_000,
+                    "minimumDenseScore": 0.1, "denseTopK": 15,
+                    "fusion": {"rankConstant": 60, "keywordWeight": 0.55, "vectorWeight": 0.45},
+                    "bm25f": {}, "rerankerEnabled": False, "rerankTopN": 20,
+                    "allowKeywordFallback": False,
+                    "embeddingIdentity": {"model": "embedding", "revision": "embed-v1", "dimensions": 2},
+                },
+            })
+            progress = await client.get("/v1/ranking/prepare/prepare-observable")
+            return prepared, progress
+
+    prepared, progress = asyncio.run(execute())
+    assert prepared.status_code == 200
+    assert progress.status_code == 200
+    assert progress.json()["protocolVersion"] == RAG_PROTOCOL_VERSION
+    assert progress.json()["requestId"] == "prepare-observable"
+    assert progress.json()["progress"]["phase"] == "ready"
+    assert progress.json()["progress"]["completedDocuments"] == 1

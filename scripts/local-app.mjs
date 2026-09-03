@@ -11,6 +11,10 @@ import {
 } from './model-dependencies.mjs'
 import { loadSpacyDependency, syncSpacyDependency } from './spacy-dependency.mjs'
 import { seedModelSettings } from './local-settings.mjs'
+import { createStartupProgressReporter } from './startup-progress.mjs'
+import { resolveIndexPreparationConfig } from './index-preparation-config.mjs'
+
+export { resolveIndexPreparationConfig } from './index-preparation-config.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const bundleName = '@retrieval-agent/bundle'
@@ -263,11 +267,20 @@ async function filesUnder(directory) {
 }
 
 async function assetFingerprint(paths) {
-  const roots = [join(paths.bundleRoot, 'presets'), join(paths.bundleRoot, 'fixtures')]
-  const files = (await Promise.all(roots.map(filesUnder))).flat().sort()
+  const dataManifestPath = join(paths.root, 'data', 'manifest.json')
+  const dataManifest = await readJson(dataManifestPath)
+  const profile = dataManifest.ticketProfiles?.[dataManifest.defaultTicketProfile]
+  if (profile === undefined || !Array.isArray(profile.paths) || profile.paths.length === 0) {
+    throw new Error(`default ticket profile ${String(dataManifest.defaultTicketProfile)} is invalid`)
+  }
+  const files = [
+    ...await filesUnder(join(paths.bundleRoot, 'presets')),
+    dataManifestPath,
+    ...profile.paths.map(path => join(paths.root, 'data', path)),
+  ].sort()
   const hash = createHash('sha256')
   for (const path of files) {
-    hash.update(relative(paths.bundleRoot, path).replaceAll('\\', '/'))
+    hash.update(relative(paths.root, path).replaceAll('\\', '/'))
     hash.update('\0')
     hash.update(await readFile(path))
     hash.update('\0')
@@ -299,11 +312,23 @@ async function ensureAssets(paths) {
 export async function setupLocalApp(options = {}) {
   const environment = options.environment ?? process.env
   const paths = resolveLocalAppPaths(environment, options.projectRoot ?? root)
+  const progress = options.progress
+  progress?.stage('[startup 1/8] Workspace build', 'checking previously built artifacts')
   await assertBuilt(paths)
+  progress?.complete('[startup 1/8] Workspace build', 'artifacts ready')
+  progress?.stage('[startup 2/8] DSH runtime', 'checking pinned runtime')
   const runtime = await ensureDshRuntime(paths)
+  progress?.complete('[startup 2/8] DSH runtime', runtime.installed ? `installed ${runtime.version}` : `reused ${runtime.version}`)
+  progress?.stage('[startup 3/8] DSH profile', 'checking product bundle links')
   const profile = await ensureProfile(paths, runtime.dshBin, environment)
+  progress?.complete('[startup 3/8] DSH profile', profile.linked ? 'bundle linked' : 'profile reused')
+  progress?.stage('[startup 4/8] Product assets', 'checking data, preset and model settings')
   const assetsUpdated = await ensureAssets(paths)
   const settingsUpdated = await seedModelSettings(paths, environment)
+  progress?.complete(
+    '[startup 4/8] Product assets',
+    `${assetsUpdated ? 'assets synchronized' : 'assets reused'}, ${settingsUpdated ? 'settings synchronized' : 'settings reused'}`,
+  )
   return { paths, runtime, profile, assetsUpdated, settingsUpdated }
 }
 
@@ -322,6 +347,7 @@ function spawnModelService(paths, environment, modelPlan, spacyDependency) {
   const url = new URL(paths.modelServiceBaseUrl)
   const host = url.hostname === '[::1]' ? '::1' : url.hostname
   const port = url.port.length > 0 ? url.port : '80'
+  const indexPreparation = resolveIndexPreparationConfig(environment)
   const args = [
     'run', '--frozen', '--project', 'python/model-service', '--group', 'runtime', 'retrieval-agent-model-service',
     '--manifest', 'architecture/model-manifest.json',
@@ -332,6 +358,7 @@ function spawnModelService(paths, environment, modelPlan, spacyDependency) {
     '--host', host,
     '--port', port,
     '--exit-on-stdin-close',
+    '--checkpoint-every-batches', String(indexPreparation.checkpointEveryBatches),
   ]
   if (enabled(environment.RETRIEVAL_AGENT_RERANKER_ENABLED)) {
     args.push('--reranker-path', modelPlan.roles.reranker.dependency.targetPath, '--enable-reranker')
@@ -349,22 +376,25 @@ function spawnModelService(paths, environment, modelPlan, spacyDependency) {
 }
 
 function childExit(child, kind) {
+  if (child.exitCode !== null) {
+    return Promise.resolve({ kind, code: child.exitCode, signal: child.signalCode })
+  }
   return new Promise((resolvePromise, rejectPromise) => {
     child.once('error', rejectPromise)
     child.once('exit', (code, signal) => resolvePromise({ kind, code, signal }))
   })
 }
 
-async function waitForModelService(paths, child, deadlineMs) {
+async function waitForModelService(paths, child, onProgress) {
   const started = performance.now()
-  while (performance.now() - started < deadlineMs) {
+  while (true) {
     if (child !== undefined && child.exitCode !== null) {
       throw new Error(`local model service exited before readiness with code ${child.exitCode}`)
     }
     if (await modelServiceReady(paths.modelServiceBaseUrl)) return
+    onProgress?.(performance.now() - started)
     await wait(500)
   }
-  throw new Error(`model service did not become ready within ${deadlineMs} ms: ${paths.modelServiceBaseUrl}`)
 }
 
 async function stopChild(child) {
@@ -376,9 +406,14 @@ async function stopChild(child) {
   if (child.exitCode === null) child.kill('SIGKILL')
 }
 
-async function ensureModelService(paths, environment) {
+async function ensureModelService(paths, environment, progress) {
   const ready = await modelServiceReady(paths.modelServiceBaseUrl)
-  if (ready) return { child: undefined, owned: false }
+  if (ready) {
+    progress?.complete('[startup 5/8] Model dependencies', 'ready service already owns loaded dependencies')
+    progress?.complete('[startup 6/8] Model service', `reused ${paths.modelServiceBaseUrl}`)
+    return { child: undefined, owned: false }
+  }
+  progress?.stage('[startup 5/8] Model dependencies', 'checking/downloading pinned models and spaCy pipeline')
   const modelPlan = await loadModelDependencyManifest(paths.root, environment)
   const spacyDependency = await loadSpacyDependency(paths.root, environment)
   const action = modelServiceAction({
@@ -389,37 +424,81 @@ async function ensureModelService(paths, environment) {
   if (action === 'unavailable') {
     throw new Error(`model service is not ready at ${paths.modelServiceBaseUrl}; only an unavailable loopback HTTP service can be started automatically`)
   }
-  await syncModelDependencies({ projectRoot: paths.root, environment, plan: modelPlan })
-  await syncSpacyDependency({ projectRoot: paths.root, environment, dependency: spacyDependency })
+  const synchronizedModels = await syncModelDependencies({
+    projectRoot: paths.root,
+    environment,
+    plan: modelPlan,
+    onProgress: event => event.totalBytes === undefined
+      ? progress?.stage(`[model ${event.dependency}] ${event.phase}`, event.detail)
+      : progress?.bytes(`[model ${event.dependency}] ${event.phase}: ${event.detail}`, event.completedBytes, event.totalBytes),
+  })
+  const synchronizedSpacy = await syncSpacyDependency({
+    projectRoot: paths.root,
+    environment,
+    dependency: spacyDependency,
+    onProgress: event => progress?.stage(`[spaCy] ${event.phase}`, event.detail),
+  })
+  progress?.complete(
+    '[startup 5/8] Model dependencies',
+    `models downloaded=${synchronizedModels.downloaded.length}, reused=${synchronizedModels.reused.length}; spaCy ${synchronizedSpacy.reused ? 'reused' : 'materialized'}`,
+  )
+  progress?.stage('[startup 6/8] Model service', `starting ${paths.modelServiceBaseUrl}`)
   const child = spawnModelService(paths, environment, modelPlan, spacyDependency)
   try {
-    const deadline = Number(environment.RETRIEVAL_AGENT_MODEL_STARTUP_DEADLINE_MS ?? 300_000)
-    await waitForModelService(paths, child, Number.isFinite(deadline) && deadline > 0 ? deadline : 300_000)
+    await waitForModelService(
+      paths,
+      child,
+      elapsed => progress?.activity('[startup 6/8] Model service', elapsed, 'loading model runtime'),
+    )
+    progress?.complete('[startup 6/8] Model service', `ready at ${paths.modelServiceBaseUrl}`)
     return { child, owned: true }
   } catch (error) {
+    progress?.fail('[startup 6/8] Model service', error)
     await stopChild(child)
     throw error
   }
 }
 
-async function prepareIndex(paths) {
+async function prepareIndex(paths, environment, progress, model) {
   const { prepareDevelopmentIndex } = await import('./prepare-development-index.mjs')
-  console.log('Preparing or reusing the persistent 2,040-ticket vector index...')
-  const prepared = await prepareDevelopmentIndex({
+  const preparation = resolveIndexPreparationConfig(environment)
+  progress?.stage(
+    '[startup 7/8] Vector index',
+    'checking/resuming 19,587 tickets',
+  )
+  const controller = new AbortController()
+  const preparing = prepareDevelopmentIndex({
     cacheDir: paths.vectorCacheDir,
     modelServiceBaseUrl: paths.modelServiceBaseUrl,
+    ...preparation,
+    signal: controller.signal,
+    onProgress: value => progress?.preparation('[7/8] Vector index', value),
   })
-  console.log(`Retrieval index ready: ${prepared.documentCount} documents, ${Math.round(prepared.elapsedMs)} ms`)
+  const prepared = model.owned && model.child !== undefined
+    ? await Promise.race([
+      preparing,
+      childExit(model.child, 'model').then(result => {
+        const error = new Error(
+          `managed model service exited during vector preparation (code=${String(result.code)}, signal=${String(result.signal)})`,
+        )
+        controller.abort(error)
+        throw error
+      }),
+    ])
+    : await preparing
+  progress?.complete('[startup 7/8] Vector index', `${prepared.documentCount} documents ready in ${Math.round(prepared.elapsedMs)} ms`)
 }
 
 export async function runLocalWeb(forwardedArgs = [], options = {}) {
   const environment = options.environment ?? process.env
-  const setup = await setupLocalApp({ environment, projectRoot: options.projectRoot ?? root })
+  const progress = options.progress ?? createStartupProgressReporter(options.progressStream ?? process.stderr)
+  const setup = await setupLocalApp({ environment, projectRoot: options.projectRoot ?? root, progress })
   const { paths } = setup
-  const model = await ensureModelService(paths, environment)
+  const model = await ensureModelService(paths, environment, progress)
   try {
-    await prepareIndex(paths)
+    await prepareIndex(paths, environment, progress, model)
   } catch (error) {
+    progress.fail('[startup 7/8] Vector index', error)
     if (model.owned) await stopChild(model.child)
     throw error
   }
@@ -432,13 +511,14 @@ export async function runLocalWeb(forwardedArgs = [], options = {}) {
     RETRIEVAL_AGENT_VECTOR_CACHE_DIR: paths.vectorCacheDir,
     RETRIEVAL_AGENT_RERANKER_ENABLED: normalizedRerankerFlag(environment.RETRIEVAL_AGENT_RERANKER_ENABLED),
   }
-  console.log(`Starting Retrieval Agent with persistent state in ${relative(paths.root, paths.dshHome)}...`)
+  progress.stage('[startup 8/8] Retrieval Agent Web', `starting with state in ${relative(paths.root, paths.dshHome)}`)
   const dsh = spawn(process.execPath, [setup.runtime.dshBin, 'web', ...forwardedArgs], {
     cwd: paths.root,
     env: childEnvironment,
     stdio: 'inherit',
     windowsHide: true,
   })
+  progress.complete('[startup 8/8] Retrieval Agent Web', 'process started')
   let stopping = false
   const stop = () => {
     stopping = true
@@ -463,6 +543,7 @@ export async function runLocalWeb(forwardedArgs = [], options = {}) {
       throw new Error(`DSH Web exited with code ${String(first.code)} and signal ${String(first.signal)}`)
     }
   } finally {
+    progress.close()
     process.off('SIGINT', stop)
     process.off('SIGTERM', stop)
     if (model.owned) await stopChild(model.child)
@@ -478,22 +559,30 @@ export async function runCli(argv, options = {}) {
   }
   if (parsed.command === 'setup') {
     if (parsed.forwardedArgs.length > 0) throw new Error('setup does not accept positional arguments')
-    const result = await setupLocalApp(options)
+    const progress = options.progress ?? createStartupProgressReporter(options.progressStream ?? process.stderr)
+    const result = await setupLocalApp({ ...options, progress })
+    progress.close()
     console.log(`Retrieval Agent local profile ready: ${result.paths.dshHome}`)
     return
   }
   if (parsed.command === 'models') {
     const selection = parseModelSyncArgs(parsed.forwardedArgs)
     const environment = options.environment ?? process.env
+    const progress = options.progress ?? createStartupProgressReporter(options.progressStream ?? process.stderr)
     const result = await syncModelDependencies({
       projectRoot: options.projectRoot ?? root,
       environment,
       ...selection,
+      onProgress: event => event.totalBytes === undefined
+        ? progress.stage(`[model ${event.dependency}] ${event.phase}`, event.detail)
+        : progress.bytes(`[model ${event.dependency}] ${event.phase}: ${event.detail}`, event.completedBytes, event.totalBytes),
     })
     const spacy = await syncSpacyDependency({
       projectRoot: options.projectRoot ?? root,
       environment,
+      onProgress: event => progress.stage(`[spaCy] ${event.phase}`, event.detail),
     })
+    progress.close()
     console.log(`Model dependencies ready: ${[...result.reused, ...result.downloaded, `spacy:${spacy.reused ? 'reused' : 'materialized'}`].join(', ')}`)
     return
   }

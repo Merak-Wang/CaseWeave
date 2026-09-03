@@ -14,7 +14,7 @@ import {
 
 export * from './protocol.js'
 
-const ASSEMBLER_VERSION = 'spacy-fast-query-v1'
+const ASSEMBLER_VERSION = 'spacy-fast-query-v3'
 
 /** 查询分析端口：业务装配依赖这个接口，不依赖某个具体 HTTP 客户端，便于替换 Provider 和做契约测试。 */
 export interface TicketQueryAnalyzer {
@@ -68,7 +68,7 @@ function validResponse(value: unknown, requestId: string, query: string): value 
       .every(item => nonEmptyString(item))
     || !Array.isArray(analyzer.components) || !analyzer.components.every(item => nonEmptyString(item, 100))
     || !nonEmptyString(response.language, 20) || !Number.isFinite(response.elapsedMs) || Number(response.elapsedMs) < 0
-    || !Array.isArray(response.keywords) || response.keywords.length < 1 || response.keywords.length > 8
+    || !Array.isArray(response.keywords) || response.keywords.length > 8
     || !response.keywords.every(term => nonEmptyString(term) && query.includes(term))
     || new Set(response.keywords).size !== response.keywords.length
     || !Array.isArray(response.candidates) || response.candidates.length > 32
@@ -189,7 +189,6 @@ export class SpacyQueryAnalyzer implements TicketQueryAnalyzer {
 
 export interface FastTicketRequestOptions {
   readonly analyzer: TicketQueryAnalyzer
-  readonly adaptiveMaxResults?: number
   readonly signal?: AbortSignal
 }
 
@@ -224,6 +223,27 @@ function explicitLogic(analysis: QueryAnalysisResponse): TicketQueryLogic | unde
   }
 }
 
+/** Task classification is independent from quantity and result-set completion policy. */
+function taskTarget(query: string): TicketRetrievalRequest['target'] {
+  const normalized = query.normalize('NFKC').toLowerCase()
+  if (/(?:如何|怎么|怎样).{0,16}(?:处理|解决|处置)|(?:处理|解决|处置)(?:方法|方案|路径|流程)|\bhow\s+to\b/u.test(normalized)) {
+    return 'resolution_path'
+  }
+  if (/(?:列出|列表|清单|汇总|集合|统计)|\b(?:list|inventory|summary)\b/u.test(normalized)) {
+    return 'cohort_collection'
+  }
+  return 'ranked_cases'
+}
+
+/** Exhaustive collection requires explicit language; omission of a number remains adaptive. */
+function resultCountPolicy(query: string, requestedCount: number | undefined): NonNullable<TicketRetrievalRequest['countPolicy']> {
+  if (requestedCount !== undefined) return 'explicit'
+  const normalized = query.normalize('NFKC').toLowerCase()
+  return /(?:全部|所有|全量|一个不漏|每(?:一)?(?:条|个)工单|完整(?:地)?(?:列出|返回|查找|检索))|\b(?:all|every)\b/u.test(normalized)
+    ? 'exhaustive'
+    : 'adaptive'
+}
+
 /**
  * 用已经校验的 NLP 结果装配固定首轮快查询。
  *
@@ -237,27 +257,24 @@ export async function buildFastTicketRequest(
   if (rawQuery.trim().length === 0 || rawQuery.length > 2_000) {
     throw new TypeError('rawQuery must contain 1-2000 characters')
   }
-  const maxResults = config.adaptiveMaxResults ?? 20
-  if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 50) {
-    throw new TypeError('adaptiveMaxResults must be an integer between 1 and 50')
-  }
-
   // NLP 只执行一次，后续所有字段都从同一份版本化分析结果派生，保证事件可重放。
   const analysis = await config.analyzer.analyze(rawQuery, config.signal)
   const keywordTerms = [...analysis.keywords]
   const queryLogic = explicitLogic(analysis)
   // 未识别到显式 OR 时按 AND 查找包含全部关键词的工单；向量文本始终逐字保留用户输入。
   const fastQuery: TicketFastQueryPlan = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: 'direct_user',
     rewriteApplied: false,
-    keyword: {
+    ...(keywordTerms.length === 0 ? {} : { keyword: {
       terms: keywordTerms,
       operator: analysis.boolean?.operator ?? 'and',
-    },
+    } }),
     vector: { text: rawQuery },
   }
-  const requestedCount = analysis.requestedCount ?? maxResults
+  const requestedCount = analysis.requestedCount
+  const target = taskTarget(rawQuery)
+  const countPolicy = resultCountPolicy(rawQuery, requestedCount)
   // normalized 只用于契约比较和通用检索视图，不替代 fastQuery.vector.text 中的原始 query。
   const normalized = rawQuery.normalize('NFKC').trim().replace(/\s+/gu, ' ')
   const analyzerVersion = [
@@ -268,12 +285,14 @@ export async function buildFastTicketRequest(
     analysis.analyzer.lexiconVersion,
   ].join(':')
   const queryContract: TicketQueryContract = {
-    schemaVersion: 5,
+    schemaVersion: 7,
     original: rawQuery,
     normalized,
-    task: 'ranked_cases',
-    resultPolicy: analysis.requestedCount === undefined ? 'adaptive_top_k' : 'explicit_top_k',
-    maxResults: requestedCount,
+    task: target,
+    resultPolicy: countPolicy === 'explicit'
+      ? 'explicit_top_k'
+      : countPolicy === 'exhaustive' ? 'exhaustive_current_snapshot' : 'adaptive_top_k',
+    ...(requestedCount === undefined ? {} : { resultLimit: requestedCount }),
     domain: 'telecom_ticket',
     language: language(analysis.language),
     entities: keywordEntities(keywordTerms),
@@ -314,11 +333,11 @@ export async function buildFastTicketRequest(
     compilerVersion: `${ASSEMBLER_VERSION}:${analyzerVersion}`,
   }
   return {
-    target: 'ranked_cases',
+    target,
     query: rawQuery,
     retrievalQuery: normalized,
-    requestedCount,
-    countPolicy: analysis.requestedCount === undefined ? 'adaptive' : 'explicit',
+    ...(requestedCount === undefined ? {} : { requestedCount }),
+    countPolicy,
     fastQuery,
     queryContract,
   }

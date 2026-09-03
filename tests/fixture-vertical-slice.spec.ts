@@ -1,15 +1,17 @@
 import { readFile } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { type TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import { InMemoryRetrievalEventJournal, RetrievalController } from '@retrieval-agent/domain'
 import { LocalTicketProvider, parseFixtureJsonl } from '@retrieval-agent/provider-local'
 import { CandidateExportService, InMemoryExportAuditSink } from '@retrieval-agent/product-api'
 import { projectTicketCandidateNode } from '@retrieval-agent/ui-ticket-results'
-import { bundledFixturePath } from '@retrieval-agent/bundle/startup'
 import { testHybridRanker } from './support/fake-model-gateway.js'
 import { testRetrievalPolicy } from './support/retrieval-policy.js'
 
 const NOW = new Date('2026-08-27T04:00:00.000Z')
+const LEGACY_REGRESSION_FIXTURE = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'tickets', 'synthetic', 'legacy-bronze-v1.jsonl')
 const PRINCIPAL: TrustedPrincipalContext = {
   tenantId: 'demo',
   subjectId: 'development-admin',
@@ -26,8 +28,8 @@ function ids(prefix: string): () => string {
 }
 
 describe('fixture vertical slice', () => {
-  it('searches one authorized snapshot, promotes evidence, replays UI, and reauthorizes export', async () => {
-    const records = parseFixtureJsonl(await readFile(bundledFixturePath(), 'utf8'))
+  it('searches summary-bearing candidates, reads L3 details, replays UI, and reauthorizes export', async () => {
+    const records = parseFixtureJsonl(await readFile(LEGACY_REGRESSION_FIXTURE, 'utf8'))
     const provider = new LocalTicketProvider(records, {
       now: () => NOW,
       snapshotTtlMs: 60_000,
@@ -46,33 +48,24 @@ describe('fixture vertical slice', () => {
 
     let state = await controller.start(PRINCIPAL, {
       target: 'resolution_path', query: '如何处理：主副卡解绑后仍共享流量',
-      requestedCount: 5, countPolicy: 'adaptive',
+      countPolicy: 'adaptive',
     })
     expect(state.lastPage?.trace.stage).toBe('initial_hybrid')
     expect(state.candidates[0]?.displayId).toBe('TKT-0029')
 
     const selected = state.candidates[0]!
     state = await controller.assess(state, {
-      decision: 'continue',
-      evaluator: 'model',
-      selectedCandidateRefs: [selected.ref],
-      excludedCandidateRefs: [],
-      gaps: [{ kind: 'depth', status: 'open', evidenceRefs: [selected.ref], evaluator: 'model' }],
-      nextAction: 'promote',
-    })
-    state = await controller.promote(PRINCIPAL, state, [selected.ref], ['problemDescription', 'answer'], 100)
-    state = await controller.assess(state, {
       decision: 'accept_current_top_k',
       evaluator: 'model',
       selectedCandidateRefs: [selected.ref],
       excludedCandidateRefs: [],
-      gaps: [{ kind: 'depth', status: 'resolved', evidenceRefs: state.promotedEvidence.map(evidence => evidence.evidenceId), evaluator: 'model' }],
+      gaps: [{ kind: 'depth', status: 'resolved', evidenceRefs: [selected.ref], evaluator: 'model' }],
       nextAction: 'accept_current_top_k',
     })
     state = controller.freeze(state, [selected.ref])
     const node = projectTicketCandidateNode(journal.read(state.retrievalId), state.retrievalId)
     expect(node).toMatchObject({ status: 'results', completeness: 'bounded', exportEnabled: true })
-    expect(node.alreadyReadEvidence.length).toBeGreaterThan(0)
+    expect(node.alreadyReadEvidence).toHaveLength(0)
     expect(node.result).toMatchObject({
       type: 'ticket_collection',
       complete: false,

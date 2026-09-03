@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "version": "telecom-query-phrases-v1",
+  "version": "telecom-query-phrases-v2",
   "phrases": [
     "异地补卡",
     "实名认证",
@@ -10,6 +10,7 @@
     "帮",
     "帮我",
     "找",
+    "找找",
     "查找",
     "查询",
     "检索",

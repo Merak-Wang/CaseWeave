@@ -107,18 +107,10 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
   const searchOpen = budget.searchesUsed < budget.maxSearches
     && (budget.modelStepsUsed ?? budget.roundsUsed) < budget.maxRounds
     && (budget.wallClockElapsedMs ?? budget.latencyMs) < budget.maxLatencyMs
-  const promotionOpen = budget.promotionsUsed < budget.maxPromotions
-    && budget.evidenceTokensUsed < budget.maxEvidenceTokens
-  const evidenceFields = state.snapshot.fieldCatalog
-    .filter(field => field.accessLevel === 'L2')
-    .map(field => field.key)
   const allowedActions: RetrievalAllowedAction[] = [
     action('assess', candidateRefs),
     ...(searchOpen && page.nextCursor !== undefined ? [action('search_next')] : []),
     ...(searchOpen ? [action('repair_search')] : []),
-    ...(promotionOpen && candidateRefs.length > 0 && evidenceFields.length > 0
-      ? [action('promote', candidateRefs, evidenceFields, budget.maxEvidenceTokens - budget.evidenceTokensUsed)]
-      : []),
     ...(candidateRefs.length >= 2 ? [action('request_clarification', candidateRefs)] : []),
     action('read_state'),
   ]

@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { isAgentLoopRequest, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type { RetrievalState } from '@retrieval-agent/contracts'
 
@@ -10,6 +10,7 @@ export interface RetrievalRuntimeBudgetApplication {
     readonly estimatedInputTokens: number
     readonly serializationBytes: number
     readonly wallClockElapsedMs: number
+    readonly modelContextWindow?: number
   }): Promise<{ readonly accepted: boolean; readonly remainingWallClockMs: number }>
   recordModelResponse(agent: Agent, input: {
     readonly modelLatencyMs: number
@@ -34,22 +35,33 @@ function rejectedStream(): AsyncIterable<StreamChunk> {
   })()
 }
 
+function isOrdinaryConversationRequest(options: GenerateOptions): boolean {
+  // `isAgentLoopRequest()` is backed by a module-private WeakSet. A linked
+  // out-of-tree plugin and the DSH host can load distinct physical copies of
+  // dsh-llm, making the host's marker invisible here. `purpose` is the public,
+  // structural discriminator: loop conversation requests leave it unset,
+  // while compaction and session-title requests must set it.
+  return options.purpose === undefined
+}
+
 /** Meter the exact public model/tool boundaries without changing the DSH loop. */
 export function installRetrievalRuntimeBudget(
   ctx: Context,
   application: RetrievalRuntimeBudgetApplication,
 ): void {
   ctx.on('llm/stream', (options, next): AsyncIterable<StreamChunk> => {
-    if (!isAgentLoopRequest(options) || options.sessionId === undefined) return next()
+    if (!isOrdinaryConversationRequest(options) || options.sessionId === undefined) return next()
     const agent = ctx.agents.get(options.sessionId)
     const initial = agent === undefined ? undefined : application.currentOrUndefined(agent)
     if (agent === undefined || initial === undefined || initial.phase === 'stopped') return next()
 
     return (async function* (): AsyncIterable<StreamChunk> {
+      const modelContextWindow = agent.session.requestContext()?.contextWindow
       const admission = await application.admitModelRequest(agent, {
         estimatedInputTokens: ctx.tokenMeter.measure(agent.session).totalTokens,
         serializationBytes: serializedBytes({ system: options.system, tools: options.tools, messages: options.messages }),
         wallClockElapsedMs: elapsedSince(initial),
+        ...(modelContextWindow === undefined ? {} : { modelContextWindow }),
       })
       if (!admission.accepted) {
         yield* rejectedStream()

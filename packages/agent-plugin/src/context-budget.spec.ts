@@ -3,6 +3,7 @@ import AgentRegistry, { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, {
   CallId,
   deepFreeze,
+  isAgentLoopRequest,
   LlmAdapter,
   markAgentLoopRequest,
   type GenerateOptions,
@@ -61,7 +62,18 @@ function fixtureAgent(ctx: Context): { readonly agent: Agent; readonly state: Re
   return { agent, state, cancel }
 }
 
-async function runtime(accepted: boolean, remainingWallClockMs = 60_000, adapterDelayMs = 0) {
+type RequestMarker = <T extends GenerateOptions>(request: T) => T
+
+async function runtime(
+  accepted: boolean,
+  remainingWallClockMs = 60_000,
+  adapterDelayMs = 0,
+  options: {
+    readonly markRequest?: RequestMarker
+    readonly purpose?: GenerateOptions['purpose']
+    readonly contextWindow?: number
+  } = {},
+) {
   const ctx = new Context()
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LlmRuntime)
@@ -71,6 +83,11 @@ async function runtime(accepted: boolean, remainingWallClockMs = 60_000, adapter
   const adapter = new CountingAdapter(adapterDelayMs)
   ctx.llm.registerAdapter(['mock'], adapter)
   const { agent, state, cancel } = fixtureAgent(ctx)
+  if (options.contextWindow !== undefined) {
+    agent.session.append('request/context', {
+      provider: 'mock', model: 'model', contextWindow: options.contextWindow,
+    })
+  }
   ctx.agents.register(agent)
   const admitModelRequest = vi.fn(async (
     _agent: Agent,
@@ -90,23 +107,25 @@ async function runtime(accepted: boolean, remainingWallClockMs = 60_000, adapter
     stopForWallClockBudget,
   }
   installRetrievalRuntimeBudget(ctx, application)
-  const request = markAgentLoopRequest(deepFreeze({
+  const request = (options.markRequest ?? markAgentLoopRequest)(deepFreeze({
     provider: 'mock', model: 'model', messages: [], system: 'retrieval policy',
     sessionId: agent.id, signal: SIGNAL,
+    ...(options.purpose === undefined ? {} : { purpose: options.purpose }),
   }))
   const chunks: StreamChunk[] = []
   for await (const chunk of ctx.llm.stream(request)) chunks.push(chunk)
-  return { ctx, agent, adapter, admitModelRequest, recordModelResponse, recordToolCall, stopForWallClockBudget, cancel, chunks }
+  return { ctx, agent, adapter, request, admitModelRequest, recordModelResponse, recordToolCall, stopForWallClockBudget, cancel, chunks }
 }
 
 describe('retrieval runtime budget boundary', () => {
   it('meters the full loop request and persists provider usage around the public stream', async () => {
-    const result = await runtime(true)
+    const result = await runtime(true, 60_000, 0, { contextWindow: 1_000_000 })
     try {
       expect(result.adapter.calls).toBe(1)
       expect(result.admitModelRequest).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
         estimatedInputTokens: expect.any(Number),
         serializationBytes: expect.any(Number),
+        modelContextWindow: 1_000_000,
       }))
       expect(result.admitModelRequest.mock.calls[0]?.[1].estimatedInputTokens).toBeGreaterThan(0)
       expect(result.admitModelRequest.mock.calls[0]?.[1].serializationBytes).toBeGreaterThan(0)
@@ -131,13 +150,34 @@ describe('retrieval runtime budget boundary', () => {
   })
 
   it('persists a wall-clock stop and cancels an in-flight model request at the admitted deadline', async () => {
-    const result = await runtime(true, 1, 15)
+    const foreignAgentLoopRequests = new WeakSet<object>()
+    const result = await runtime(true, 1, 15, {
+      markRequest: request => {
+        foreignAgentLoopRequests.add(request)
+        return request
+      },
+    })
     try {
+      expect(foreignAgentLoopRequests.has(result.request)).toBe(true)
+      expect(isAgentLoopRequest(result.request)).toBe(false)
+      expect(result.admitModelRequest).toHaveBeenCalledTimes(1)
       expect(result.stopForWallClockBudget).toHaveBeenCalledTimes(1)
       expect(result.cancel).toHaveBeenCalledWith(
         { kind: 'hook', reason: 'retrieval wall-clock budget exhausted' },
         { keepInbox: true },
       )
+    } finally {
+      await result.ctx.fiber.dispose()
+    }
+  })
+
+  it('leaves purpose-tagged auxiliary model requests outside the retrieval wall-clock budget', async () => {
+    const result = await runtime(true, 1, 15, { markRequest: request => request, purpose: 'compaction' })
+    try {
+      expect(result.adapter.calls).toBe(1)
+      expect(result.admitModelRequest).not.toHaveBeenCalled()
+      expect(result.stopForWallClockBudget).not.toHaveBeenCalled()
+      expect(result.cancel).not.toHaveBeenCalled()
     } finally {
       await result.ctx.fiber.dispose()
     }

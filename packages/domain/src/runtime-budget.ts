@@ -4,6 +4,10 @@ export interface ModelRequestMeasurement {
   readonly estimatedInputTokens: number
   readonly serializationBytes: number
   readonly wallClockElapsedMs: number
+  readonly modelContextWindow?: number
+  readonly deploymentContextLimit?: number
+  readonly effectiveContextLimit?: number
+  readonly rejectionReason?: 'model_context' | 'deployment_context' | 'model_steps' | 'wall_clock'
   readonly accepted: boolean
 }
 export interface ModelResponseMeasurement {

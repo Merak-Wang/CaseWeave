@@ -66,11 +66,52 @@ function fixtureRecords(): readonly NormalizedTicketRecord[] {
 }
 
 describe('LocalTicketProvider authorization boundary', () => {
+  it('defaults an unquantified request to adaptive independently of task type', () => {
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker: testHybridRanker() })
+    const spec = provider.resolve({ target: 'cohort_collection', query: '登录工单' })
+    expect(spec).toMatchObject({ target: 'cohort_collection', countPolicy: 'adaptive' })
+    expect(spec).not.toHaveProperty('requestedCount')
+  })
+
+  it('applies an explicit result limit independently from the Provider page window', async () => {
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker: testHybridRanker() })
+    const user = principal()
+    const snapshot = await provider.openSnapshot(user)
+    const spec = provider.resolve({ target: 'ranked_cases', query: '登录', requestedCount: 1, countPolicy: 'explicit' })
+    const page = await provider.search(user, snapshot.snapshotId, spec, {
+      topK: 20, maxScan: 100, stage: 'initial_hybrid',
+    })
+
+    expect(page.candidates).toHaveLength(1)
+    expect(page.nextCursor).toBeUndefined()
+    expect(page.boundary.rankedHits).toBeGreaterThan(1)
+  })
+
+  it('does not synthesize a keyword query when the fast plan is dense-only', async () => {
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker: testHybridRanker() })
+    const spec = provider.resolve({
+      target: 'cohort_collection', query: 'same semantic issue in another language', mode: 'hybrid',
+      fastQuery: {
+        schemaVersion: 2, source: 'direct_user', rewriteApplied: false,
+        vector: { text: 'same semantic issue in another language' },
+      },
+    })
+    expect(spec.semanticQuery).toBe('same semantic issue in another language')
+    expect(spec).not.toHaveProperty('keywordQuery')
+    const snapshot = await provider.openSnapshot(principal())
+    const page = await provider.search(principal(), snapshot.snapshotId, spec, {
+      topK: 20, maxScan: 100, stage: 'initial_hybrid',
+    })
+    expect(page.trace).toMatchObject({ requestedMode: 'hybrid', executedMode: 'dense' })
+    expect(page.trace.channels.map(channel => channel.channel)).toEqual(['vector'])
+    expect(page.boundary.documentsEligibleForKeywordChannel).toBe(0)
+  })
+
   it('filters unauthorized, cross-tenant, and unreviewed-PII records before ranking', async () => {
     const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker: testHybridRanker() })
     const user = principal()
     const snapshot = await provider.openSnapshot(user)
-    const page = await provider.search(user, snapshot.snapshotId, provider.resolve({ target: 'ranked_cases', query: '登录' }), {
+    const page = await provider.search(user, snapshot.snapshotId, provider.resolve({ target: 'ranked_cases', query: '登录', requestedCount: 5, countPolicy: 'explicit' }), {
       topK: 10,
       maxScan: 100,
       stage: 'baseline',
@@ -79,6 +120,29 @@ describe('LocalTicketProvider authorization boundary', () => {
     expect(page.candidates.map(candidate => candidate.displayId)).toEqual(['INC-1', 'INC-2'])
     expect(page.completeness).toBe('exhaustive')
     expect(snapshot.authorizationVersion).toBe('entitlements-v1')
+  })
+
+  it('returns the authorized L2 summary and keeps the evidence read independently auditable', async () => {
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker: testHybridRanker() })
+    const user = principal()
+    const snapshot = await provider.openSnapshot(user)
+    const page = await provider.search(user, snapshot.snapshotId, provider.resolve({ target: 'ranked_cases', query: '验证码', requestedCount: 5, countPolicy: 'explicit' }), {
+      topK: 5, maxScan: 100, stage: 'baseline',
+    })
+    const candidate = page.candidates[0]!
+
+    expect(candidate.summary).toBe('登录故障摘要')
+    expect(candidate.matchFragments.every(fragment => fragment.field === 'title')).toBe(true)
+    expect(snapshot.fieldCatalog).toContainEqual(expect.objectContaining({ key: 'summary', accessLevel: 'L2' }))
+    const promoted = await provider.readEvidence(user, {
+      snapshotId: snapshot.snapshotId,
+      candidateRefs: [candidate.ref],
+      fields: ['summary'],
+      tokenBudget: 64,
+    })
+    expect(promoted.evidence).toEqual([expect.objectContaining({
+      candidateRef: candidate.ref, field: 'summary', text: '登录故障摘要',
+    })])
   })
 
   it('makes every exact AND match eligible in the keyword channel', async () => {
@@ -153,7 +217,7 @@ describe('LocalTicketProvider authorization boundary', () => {
     const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker: testHybridRanker() })
     const user = principal()
     const snapshot = await provider.openSnapshot(user)
-    const spec = provider.resolve({ target: 'ranked_cases', query: '验证码' })
+    const spec = provider.resolve({ target: 'ranked_cases', query: '验证码', requestedCount: 5, countPolicy: 'explicit' })
     const page = await provider.search(user, snapshot.snapshotId, spec, { topK: 5, maxScan: 100, stage: 'baseline' })
 
     await expect(provider.search(principal({ attributes: { region: ['cn'], group: ['support', 'support'] } }), snapshot.snapshotId, spec, { topK: 5, maxScan: 100, stage: 'baseline' }))
@@ -177,7 +241,7 @@ describe('LocalTicketProvider authorization boundary', () => {
     const provider = new LocalTicketProvider(fixtureRecords(), { now: () => now, snapshotTtlMs: 1_000, ranker: testHybridRanker() })
     const user = principal()
     const snapshot = await provider.openSnapshot(user)
-    const spec = provider.resolve({ target: 'ranked_cases', query: '登录' })
+    const spec = provider.resolve({ target: 'ranked_cases', query: '登录', requestedCount: 5, countPolicy: 'explicit' })
     const first = await provider.search(user, snapshot.snapshotId, spec, { topK: 1, maxScan: 100, stage: 'baseline' })
     expect(first.nextCursor).toBeDefined()
     const decoded = Buffer.from(first.nextCursor!, 'base64url').toString('utf8')
@@ -200,6 +264,33 @@ describe('LocalTicketProvider authorization boundary', () => {
     await expect(provider.status(user, snapshot.snapshotId)).resolves.toMatchObject({ snapshotValid: false })
   })
 
+  it('reuses one ranking result while an exhaustive query advances through Provider pages', async () => {
+    const base = testHybridRanker()
+    let rankingCalls = 0
+    const ranker: RetrievalRanker = {
+      profileVersion: base.profileVersion,
+      capabilities: base.capabilities,
+      rank: (...args) => {
+        rankingCalls += 1
+        return base.rank(...args)
+      },
+    }
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker })
+    const user = principal()
+    const snapshot = await provider.openSnapshot(user)
+    const spec = provider.resolve({ target: 'cohort_collection', query: '登录', countPolicy: 'exhaustive' })
+    const first = await provider.search(user, snapshot.snapshotId, spec, {
+      topK: 1, maxScan: 100, stage: 'initial_hybrid',
+    })
+    if (first.nextCursor === undefined) throw new Error('fixture should contain a second ranked page')
+    const second = await provider.search(user, snapshot.snapshotId, spec, {
+      topK: 1, maxScan: 100, stage: 'next_page', cursor: first.nextCursor,
+    })
+
+    expect(second.nextCursor).toBeUndefined()
+    expect(rankingCalls).toBe(1)
+  })
+
   it('maps RAG transport failures to stable domain errors', async () => {
     const ranker: RetrievalRanker = {
       profileVersion: 'failing-v1',
@@ -209,7 +300,7 @@ describe('LocalTicketProvider authorization boundary', () => {
     const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker })
     const user = principal()
     const snapshot = await provider.openSnapshot(user)
-    await expect(provider.search(user, snapshot.snapshotId, provider.resolve({ target: 'ranked_cases', query: '登录' }), {
+    await expect(provider.search(user, snapshot.snapshotId, provider.resolve({ target: 'ranked_cases', query: '登录', requestedCount: 5, countPolicy: 'explicit' }), {
       topK: 5, maxScan: 100, stage: 'baseline',
     })).rejects.toMatchObject({ code: 'TIMEOUT', retryable: true })
   })

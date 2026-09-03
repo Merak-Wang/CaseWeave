@@ -21,8 +21,8 @@ import type {
 
 export interface RetrievalTaskContract {
   readonly target: TicketTaskTarget
-  /** Explicit result count or adaptive upper bound, according to countPolicy. */
-  readonly requestedCount: number
+  /** User-level Top-K limit. Exhaustive tasks deliberately omit it. */
+  readonly requestedCount?: number
   readonly countPolicy: TicketCountPolicy
   readonly answerabilityPolicy: 'current_snapshot_evidence_only'
   readonly completenessRequirement: 'top_k' | 'exhaustive'
@@ -41,7 +41,7 @@ export interface RetrievalGap {
 }
 
 export type RetrievalKnowledgeDecision = 'present_current_top_k' | 'accept_current_top_k' | 'return_partial' | 'no_result' | 'needs_clarification' | 'continue'
-export type RetrievalNextAction = 'present_current_top_k' | 'accept_current_top_k' | 'finish_partial' | 'finish_no_result' | 'continue_ranking' | 'keyword_search' | 'vector_search' | 'promote' | 'clarify'
+export type RetrievalNextAction = 'present_current_top_k' | 'accept_current_top_k' | 'finish_partial' | 'finish_no_result' | 'continue_ranking' | 'keyword_search' | 'vector_search' | 'read_l3_details' | 'clarify'
 
 /** Strict semantic judgment proposed by the model and admitted by Harness. */
 export interface RetrievalKnowledgeAssessment {
@@ -67,7 +67,7 @@ export type RetrievalActionKind =
   | 'search_next'
   | 'repair_search'
   | 'assess'
-  | 'promote'
+  | 'read_l3_details'
   | 'request_clarification'
   | 'answer_clarification'
   | 'freeze'
@@ -235,6 +235,20 @@ export interface RetrievalState {
   readonly provenance: RetrievalStateProvenance
 }
 
+/** RFC 6902-shaped operation used only for a state-to-state durable transition. */
+export type RetrievalStatePatchOperation =
+  | { readonly op: 'add' | 'replace'; readonly path: string; readonly value: unknown }
+  | { readonly op: 'remove'; readonly path: string }
+
+/** One replayable, state-chain-bound delta between consecutive revisions. */
+export interface RetrievalStatePatch {
+  readonly fromStateId: RetrievalStateId
+  readonly fromRevision: number
+  readonly toStateId: RetrievalStateId
+  readonly toRevision: number
+  readonly operations: readonly RetrievalStatePatchOperation[]
+}
+
 export interface EvidenceContextSelection {
   readonly retrievalId: RetrievalId
   readonly stateId: RetrievalStateId
@@ -242,7 +256,8 @@ export interface EvidenceContextSelection {
   readonly includedCandidateRefs: readonly TicketCandidateRef[]
   readonly includedEvidenceIds: readonly TicketEvidenceId[]
   readonly excluded: readonly { readonly ref: string; readonly reason: 'unauthorized' | 'not_selected' | 'superseded' | 'token_budget' | 'unread' }[]
-  readonly tokenBudget: number
+  /** Optional deployment cap. Absent means structural selection bounds are the only product-level limit. */
+  readonly tokenBudget?: number
   readonly estimatedTokens: number
   readonly rendered: string
 }

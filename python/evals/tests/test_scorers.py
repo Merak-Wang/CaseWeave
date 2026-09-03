@@ -80,3 +80,29 @@ def test_broken_sequence_and_unfrozen_references_fail_closed() -> None:
     assert not result.passed
     failed = {check.name for check in result.blocking_checks if not check.passed}
     assert {"event_sequence_contiguous", "final_display_refs_frozen", "final_evidence_refs_frozen"} <= failed
+
+
+def test_v9_granular_events_do_not_require_repeated_full_state_snapshots() -> None:
+    case = EvalCase.from_mapping({"caseId": "case-v9", "relevantDisplayIds": ["INC-1"], "forbiddenDisplayIds": []})
+    trace = ProductTrace.from_mapping({
+        "traceId": "trace-v9",
+        "events": [
+            {
+                "eventId": "search-0", "sequence": 0, "type": "retrieval/search-completed",
+                "data": {"page": {"candidates": [{"displayId": "INC-1"}]}},
+            },
+            {
+                "eventId": "frozen-1", "sequence": 1, "type": "retrieval/evidence-frozen",
+                "data": {"pack": {"candidates": [{"displayId": "INC-1", "evidenceIds": ["ev-1"]}]}},
+            },
+            {"eventId": "stopped-2", "sequence": 2, "type": "retrieval/stopped", "data": {"reason": "top_k_accepted"}},
+        ],
+        "uiVisibleDisplayIds": ["INC-1"],
+        "finalDisplayIds": ["INC-1"],
+        "finalEvidenceIds": ["ev-1"],
+    })
+
+    result = evaluate_trace(case, trace)
+
+    assert result.passed
+    assert result.metrics == {"precision": 1.0, "recall": 1.0}

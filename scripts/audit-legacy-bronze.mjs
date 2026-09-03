@@ -1,11 +1,8 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { bundledFixtureRoot } from '@retrieval-agent/bundle/startup'
-
-const fixtureRoot = bundledFixtureRoot()
-const tickets = (await readFile(join(fixtureRoot, 'tickets.jsonl'), 'utf8'))
+const tickets = (await readFile(join(process.cwd(), 'data', 'tickets', 'synthetic', 'legacy-bronze-v1.jsonl'), 'utf8'))
   .split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line))
-const cases = (await readFile(join(process.cwd(), 'python', 'evals', 'data', 'legacy-bronze-v1', 'cases.jsonl'), 'utf8'))
+const cases = (await readFile(join(process.cwd(), 'data', 'evals', 'legacy-bronze-v1', 'cases.jsonl'), 'utf8'))
   .split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line))
 const titleById = new Map(tickets.map(ticket => [ticket.ticketId, String(ticket.title)]))
 const positives = cases.filter(item => item.qrels.some(qrel => qrel.relevance > 0))
