@@ -6,10 +6,10 @@ import {
   type CandidateDetailReadReceipt,
   type CandidateExportReceipt,
   type EvidenceContextSelection,
-  type RetrievalKnowledgeAssessment,
+  type RetrievalDecision,
+  type RetrievalId,
   type RetrievalState,
-  type TicketCandidateRef,
-  type TicketL3DetailsResult,
+  type TicketDetailResult,
   type TicketRetrievalRequest,
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
@@ -18,6 +18,7 @@ import {
   RetrievalController,
   foldRetrievalEvents,
   type RetrievalControllerConfig,
+  type RetrievalClarificationAnswer,
   type RetrievalSearchInput,
 } from '@retrieval-agent/domain'
 import { installDshSessionCompatibility, readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
@@ -62,7 +63,7 @@ function latestRetrieval(agent: Agent): { readonly events: ReturnType<typeof rea
   if (latestId === undefined) return undefined
   const events = groups.get(latestId) ?? []
   const state = foldRetrievalEvents(events)
-  return state === undefined ? undefined : { events: all, state }
+  return state === undefined ? undefined : { events: all, state: { ...state, accessValidation: 'required' } }
 }
 
 /** Per-session product application; model calls only intents on this service. */
@@ -142,50 +143,83 @@ export class RetrievalAgentService extends Service {
     })
   }
 
-  async readL3Details(agent: Agent, refs: readonly TicketCandidateRef[], signal?: AbortSignal): Promise<TicketL3DetailsResult> {
-    const entry = this.entry(agent)
-    let result: TicketL3DetailsResult | undefined
-    await this.mutate(entry, async state => {
-      if (state.phase === 'stopped') throw new RetrievalError('INVALID_TRANSITION', '已结束的检索不能读取 L3 原始详情。')
-      const principal = await this.resolvePrincipal(agent, 'l3_details_read', signal)
-      result = await entry.controller.readL3Details(principal, state, refs, signal)
-      return state
-    })
-    if (result === undefined) throw new RetrievalError('PROTOCOL_MISMATCH', 'L3 原始详情读取没有返回结果。')
-    return result
-  }
-
-  async assess(agent: Agent, assessment: RetrievalKnowledgeAssessment): Promise<RetrievalState> {
+  async decide(agent: Agent, decision: RetrievalDecision, signal?: AbortSignal): Promise<RetrievalState> {
     const entry = this.entry(agent)
     return await this.mutate(entry, async state => {
-      const assessed = await entry.controller.assess(state, assessment)
-      const freeze = assessed.allowedActions.find(action => action.kind === 'freeze')
-      return freeze === undefined ? assessed : entry.controller.freeze(assessed, assessed.selectedCandidateRefs)
+      const operation = decision.action.kind === 'inspect' ? 'evidence_read' : 'search'
+      try {
+        const principal = await this.resolvePrincipal(agent, operation, signal)
+        return await entry.controller.decide(principal, state, decision, signal)
+      } catch (error) {
+        const reason = stoppedReason(error)
+        if (reason === undefined) throw error
+        return this.stopForReason(entry, state, reason)
+      }
     })
   }
 
-  requestClarification(agent: Agent, facet: string, question: string, refs: readonly TicketCandidateRef[]): RetrievalState {
+  async resumeClarification(agent: Agent, answer: RetrievalClarificationAnswer, signal?: AbortSignal): Promise<RetrievalState> {
     const entry = this.entry(agent)
-    entry.state = entry.controller.requestClarification(entry.state, facet, question, refs)
-    return entry.state
+    return await this.mutate(entry, async state => {
+      try {
+        const principal = await this.resolvePrincipal(agent, 'search', signal)
+        return await entry.controller.resumeClarification(principal, state, answer, signal)
+      } catch (error) {
+        const reason = stoppedReason(error)
+        if (reason === undefined) throw error
+        return this.stopForReason(entry, state, reason)
+      }
+    })
   }
 
-  answerClarification(agent: Agent, input: { readonly accepted: boolean; readonly answer?: string }): RetrievalState {
+  async applyUserFeedback(agent: Agent, answer: RetrievalClarificationAnswer, signal?: AbortSignal): Promise<RetrievalState> {
     const entry = this.entry(agent)
-    entry.state = entry.controller.answerClarification(entry.state, input)
-    return entry.state
+    return await this.mutate(entry, async state => {
+      try {
+        const principal = await this.resolvePrincipal(agent, 'search', signal)
+        return await entry.controller.applyUserFeedback(principal, state, answer, signal)
+      } catch (error) {
+        const reason = stoppedReason(error)
+        if (reason === undefined) throw error
+        return this.stopForReason(entry, state, reason)
+      }
+    })
   }
 
-  freeze(agent: Agent, refs: readonly TicketCandidateRef[]): RetrievalState {
+  async cancel(agent: Agent): Promise<RetrievalState> {
     const entry = this.entry(agent)
-    entry.state = entry.controller.freeze(entry.state, refs)
-    return entry.state
+    return await this.mutate(entry, async state => entry.controller.stop(state, 'cancelled'))
+  }
+
+  async stopIncomplete(agent: Agent, explanation: string): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return await this.mutate(entry, async state => entry.controller.stopIncomplete(state, explanation))
+  }
+
+  async authorizePresentation(agent: Agent, retrievalId: RetrievalId, signal?: AbortSignal): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    if (entry.state.retrievalId !== retrievalId) throw new RetrievalError('INVALID_REQUEST', '当前会话没有对应的检索结果。')
+    return await this.mutate(entry, async state => {
+      const principal = await this.resolvePrincipal(agent, 'detail_read', signal)
+      return await entry.controller.reauthorize(principal, state, signal)
+    })
+  }
+
+  async ensureModelAccess(agent: Agent, signal?: AbortSignal): Promise<RetrievalState | undefined> {
+    if (this.currentOrUndefined(agent) === undefined) return undefined
+    const entry = this.entry(agent)
+    if (entry.state.accessValidation !== 'required') return entry.state
+    return await this.authorizePresentation(agent, entry.state.retrievalId, signal)
   }
 
   projectContext(agent: Agent, tokenBudget?: number): EvidenceContextSelection {
     const entry = this.entry(agent)
+    if (entry.state.accessValidation === 'required') throw new RetrievalError('UNAUTHORIZED', '历史证据必须先经当前身份重新授权。')
     const configured = tokenBudget ?? this.contextTokenBudget
-    return entry.controller.projectContext(entry.state, typeof configured === 'number' ? configured : undefined)
+    const budget = typeof configured === 'number' ? configured : undefined
+    const selection = entry.controller.projectContext(entry.state, budget)
+    entry.state = entry.controller.recordContextSelection(entry.state, selection)
+    return entry.controller.projectContext(entry.state, budget)
   }
 
   /** Resolve the selected route's capacity with an optional narrower deployment override. */
@@ -206,7 +240,7 @@ export class RetrievalAgentService extends Service {
       const effectiveContextLimit = this.effectiveContextLimit(input.modelContextWindow)
       const contextExceeded = effectiveContextLimit !== undefined
         && input.estimatedInputTokens > effectiveContextLimit
-      const modelStepsExceeded = (current.budget.modelStepsUsed ?? current.budget.roundsUsed) >= current.budget.maxRounds
+      const modelStepsExceeded = current.budget.modelStepsUsed >= current.budget.maxRounds
       const wallClockExceeded = input.wallClockElapsedMs >= current.budget.maxLatencyMs
       const rejectionReason = contextExceeded
         ? this.maxContextTokens !== undefined
@@ -256,9 +290,10 @@ export class RetrievalAgentService extends Service {
     return await this.resolvePrincipal(agent, operation, signal)
   }
 
-  recordDetailRead(agent: Agent, receipt: CandidateDetailReadReceipt): void {
+  recordDetailRead(agent: Agent, receipt: CandidateDetailReadReceipt, result: TicketDetailResult): void {
     const entry = this.entry(agent)
     if (entry.state.retrievalId !== receipt.retrievalId) throw new RetrievalError('INVALID_TRANSITION', '详情回执不属于当前检索。')
+    entry.state = entry.controller.recordDetailRead(entry.state, receipt, result)
     entry.journal.append(entry.state.retrievalId, 'retrieval/detail-read', { receipt })
   }
   recordExport(agent: Agent, receipt: CandidateExportReceipt): void {
@@ -317,7 +352,7 @@ export class RetrievalAgentService extends Service {
     }
   }
 
-  private async resolvePrincipal(agent: Agent, operation: 'snapshot_open' | 'search' | 'evidence_read' | 'detail_read' | 'l3_details_read' | 'export', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
+  private async resolvePrincipal(agent: Agent, operation: 'snapshot_open' | 'search' | 'evidence_read' | 'detail_read' | 'export', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
     return await this.ctx.ticketPrincipalProvider.resolve(
       { sessionId: String(agent.session.id), operation },
       signal === undefined ? undefined : { signal },

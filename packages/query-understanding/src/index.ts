@@ -11,10 +11,12 @@ import {
   type QueryAnalysisParams,
   type QueryAnalysisResponse,
 } from './protocol.js'
+import { compileUserConditions, explicitUserCount } from './conditions.js'
 
 export * from './protocol.js'
+export { compileUserConditions, explicitUserCount } from './conditions.js'
 
-const ASSEMBLER_VERSION = 'spacy-fast-query-v3'
+const ASSEMBLER_VERSION = 'spacy-fast-query-v4'
 
 /** 查询分析端口：业务装配依赖这个接口，不依赖某个具体 HTTP 客户端，便于替换 Provider 和做契约测试。 */
 export interface TicketQueryAnalyzer {
@@ -76,11 +78,6 @@ function validResponse(value: unknown, requestId: string, query: string): value 
     || !Array.isArray(response.entities) || response.entities.length > 32
     || !Array.isArray(response.triples) || response.triples.length > 8) return false
 
-  if (response.requestedCount !== undefined
-    && (typeof response.requestedCount !== 'number' || !Number.isSafeInteger(response.requestedCount)
-      || response.requestedCount < 1 || response.requestedCount > 50)) {
-    return false
-  }
   // 候选词必须是原始 query 的连续表面片段；领域词典只能合并原文，不能在首轮生成同义词。
   for (const raw of response.candidates) {
     const item = object(raw)
@@ -190,6 +187,8 @@ export class SpacyQueryAnalyzer implements TicketQueryAnalyzer {
 export interface FastTicketRequestOptions {
   readonly analyzer: TicketQueryAnalyzer
   readonly signal?: AbortSignal
+  readonly now?: Date
+  readonly timeZone?: string
 }
 
 function language(value: string): TicketQueryContract['language'] {
@@ -235,13 +234,19 @@ function taskTarget(query: string): TicketRetrievalRequest['target'] {
   return 'ranked_cases'
 }
 
-/** Exhaustive collection requires explicit language; omission of a number remains adaptive. */
-function resultCountPolicy(query: string, requestedCount: number | undefined): NonNullable<TicketRetrievalRequest['countPolicy']> {
-  if (requestedCount !== undefined) return 'explicit'
+/** Undefined means the user did not revise quantity; explicit withdrawal of exhaustive scope is adaptive. */
+export function compileUserResultPolicy(query: string): Pick<TicketRetrievalRequest, 'countPolicy' | 'requestedCount'> | undefined {
+  const requestedCount = explicitUserCount(query)
+  if (requestedCount !== undefined) return { countPolicy: 'explicit', requestedCount }
   const normalized = query.normalize('NFKC').toLowerCase()
-  return /(?:全部|所有|全量|一个不漏|每(?:一)?(?:条|个)工单|完整(?:地)?(?:列出|返回|查找|检索))|\b(?:all|every)\b/u.test(normalized)
-    ? 'exhaustive'
-    : 'adaptive'
+  const exhaustive = normalized.matchAll(/(?:全部|所有|全量|一个不漏|每(?:一)?(?:条|个)工单|完整(?:地)?(?:列出|返回|查找|检索))|\b(?:all|every)\b/gu)
+  let withdrawn = false
+  for (const match of exhaustive) {
+    const prefix = normalized.slice(0, match.index)
+    if (/(?:不要|不必|无需|不用|不是|不想|不要求|不需要|别|非|not|don't|do not)[^，。；;.!?]{0,16}$/u.test(prefix)) { withdrawn = true; continue }
+    return { countPolicy: 'exhaustive' }
+  }
+  return withdrawn ? { countPolicy: 'adaptive' } : undefined
 }
 
 /**
@@ -259,6 +264,8 @@ export async function buildFastTicketRequest(
   }
   // NLP 只执行一次，后续所有字段都从同一份版本化分析结果派生，保证事件可重放。
   const analysis = await config.analyzer.analyze(rawQuery, config.signal)
+  const conditions = compileUserConditions(rawQuery, analysis.entities, config.now ?? new Date(),
+    config.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)
   const keywordTerms = [...analysis.keywords]
   const queryLogic = explicitLogic(analysis)
   // 未识别到显式 OR 时按 AND 查找包含全部关键词的工单；向量文本始终逐字保留用户输入。
@@ -272,9 +279,11 @@ export async function buildFastTicketRequest(
     } }),
     vector: { text: rawQuery },
   }
-  const requestedCount = analysis.requestedCount
+  // A CARDINAL followed by a classifier can be a duration (两个月), so only result-count syntax is authoritative.
+  const result = compileUserResultPolicy(rawQuery)
+  const requestedCount = result?.requestedCount
   const target = taskTarget(rawQuery)
-  const countPolicy = resultCountPolicy(rawQuery, requestedCount)
+  const countPolicy = result?.countPolicy ?? 'adaptive'
   // normalized 只用于契约比较和通用检索视图，不替代 fastQuery.vector.text 中的原始 query。
   const normalized = rawQuery.normalize('NFKC').trim().replace(/\s+/gu, ' ')
   const analyzerVersion = [
@@ -285,7 +294,7 @@ export async function buildFastTicketRequest(
     analysis.analyzer.lexiconVersion,
   ].join(':')
   const queryContract: TicketQueryContract = {
-    schemaVersion: 7,
+    schemaVersion: 8,
     original: rawQuery,
     normalized,
     task: target,
@@ -296,7 +305,8 @@ export async function buildFastTicketRequest(
     domain: 'telecom_ticket',
     language: language(analysis.language),
     entities: keywordEntities(keywordTerms),
-    constraints: [],
+    constraints: conditions.filters,
+    userRequirements: conditions.userRequirements,
     ...(queryLogic === undefined ? {} : { logic: queryLogic }),
     fastQuery,
     // 保存完整 spaCy provenance，后续可以解释关键词来自哪个 token、词性、依存关系和词典版本。
@@ -328,8 +338,8 @@ export async function buildFastTicketRequest(
       })),
       triples: analysis.triples.map(triple => ({ ...triple })),
     },
-    ambiguities: [],
-    interpretationBasis: 'deterministic_syntax',
+    ambiguities: conditions.ambiguities,
+    interpretationBasis: conditions.ambiguities.length > 0 ? 'clarification_required' : 'deterministic_syntax',
     compilerVersion: `${ASSEMBLER_VERSION}:${analyzerVersion}`,
   }
   return {
@@ -338,6 +348,9 @@ export async function buildFastTicketRequest(
     retrievalQuery: normalized,
     ...(requestedCount === undefined ? {} : { requestedCount }),
     countPolicy,
+    filters: conditions.filters,
+    ambiguities: conditions.ambiguities,
+    ...(conditions.filters.some(filter => filter.field === 'displayId') ? { retrievalIntent: 'known_item' as const } : {}),
     fastQuery,
     queryContract,
   }

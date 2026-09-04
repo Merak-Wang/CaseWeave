@@ -43,6 +43,7 @@ export function candidateL0(record: NormalizedTicketRecord): TicketL0 {
 
 function filterValue(record: NormalizedTicketRecord, field: string): string | readonly string[] | undefined {
   switch (field) {
+    case 'displayId': return record.displayId
     case 'type': return record.type
     case 'category': return record.category
     case 'priority': return record.priority
@@ -66,6 +67,12 @@ export function matchesFilter(record: NormalizedTicketRecord, filter: TicketFilt
   if (typeof actual !== 'string') return filter.op === 'neq'
   if (filter.op === 'eq') return actual.toLocaleLowerCase() === filter.value.toLocaleLowerCase()
   if (filter.op === 'neq') return actual.toLocaleLowerCase() !== filter.value.toLocaleLowerCase()
+  if (['createdAt', 'updatedAt', 'resolvedAt'].includes(filter.field)) {
+    const timestamp = Date.parse(actual)
+    const boundary = Date.parse(filter.value)
+    return Number.isFinite(timestamp) && Number.isFinite(boundary)
+      && (filter.op === 'gte' ? timestamp >= boundary : timestamp <= boundary)
+  }
   if (filter.op === 'gte') return actual >= filter.value
   if (filter.op === 'lte') return actual <= filter.value
   return false

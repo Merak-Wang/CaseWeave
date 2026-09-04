@@ -3,6 +3,7 @@ import {
   RetrievalId,
   RetrievalStateId,
   TicketCandidateRef,
+  TicketEvidenceId,
   makeRetrievalEvent,
   type RetrievalState,
   type TicketCandidate,
@@ -58,8 +59,8 @@ function state(revision: number, candidates: readonly TicketCandidate[], previou
     excludedCandidateRefs: [], selectedCandidateRefs: [], promotedEvidence: [], gaps: [],
     allowedActions: [{ kind: 'assess', candidateAllowlist: refs, fieldAllowlist: [], maxTokens: 0 }],
     budget: {
-      maxRounds: 8, maxSearches: 2_500, maxPromotions: 3, maxEvidenceTokens: 1_500, maxLatencyMs: 120_000,
-      roundsUsed: 0, searchesUsed: revision, promotionsUsed: 0, evidenceTokensUsed: 0, latencyMs: revision,
+      maxRounds: 8, maxSearches: 2_500, maxLatencyMs: 120_000,
+      modelStepsUsed: 0, searchesUsed: revision, wallClockElapsedMs: revision,
     },
     progress: { newCandidateRefs: refs.slice(-20), rankOverlap: 1, newDecisiveEvidence: false, resolvedGaps: [], noProgressStreak: 0 },
     termination: 'active',
@@ -102,4 +103,35 @@ describe('incremental retrieval state replay', () => {
     const patch = { ...createRetrievalStatePatch(first, next), fromRevision: 9 }
     expect(() => applyRetrievalStatePatch(first, patch)).toThrow(/revision/u)
   })
+  it('migrates field meaning and old counters before a current Session continuation without inheriting access', () => {
+    const base = state(0, [candidate(1)])
+    const legacy = {
+      ...base,
+      snapshot: { fieldCatalog: [
+        { key: 'summary', accessLevel: 'L2', valueKind: 'text' },
+        { key: 'source.raw', accessLevel: 'L3', valueKind: 'raw_json' },
+      ] },
+      selectedCandidateRefs: [candidate(1).ref],
+      promotedEvidence: [{ evidenceId: TicketEvidenceId('old-summary'), candidateRef: candidate(1).ref,
+        displayId: 'TKT-00001', sourceVersion: 'source-v1', contentHash: 'hash-1', field: 'summary',
+        text: '工单摘要', start: 0, end: 4, estimatedTokens: 4, trust: 'untrusted_ticket_evidence', truncated: false }],
+      budget: { maxRounds: 8, maxSearches: 100, maxLatencyMs: 1000, roundsUsed: 2, searchesUsed: 1,
+        latencyMs: 13, maxPromotions: 3, maxEvidenceTokens: 1500, promotionsUsed: 1, evidenceTokensUsed: 4 },
+    } as unknown as RetrievalState
+    const checkpoint = { ...makeRetrievalEvent({ eventId: 'old-state', retrievalId, sequence: 0,
+      occurredAt: base.updatedAt, type: 'retrieval/state-recorded', data: { state: legacy } }), schemaVersion: 11 as const }
+    const restored = foldRetrievalEvents([checkpoint], retrievalId)!
+    expect(restored).toMatchObject({ accessValidation: 'required', selectedCandidateRefs: [],
+      candidates: [{ evidenceLevel: 'L1' }], promotedEvidence: [{ field: 'summary', evidenceLevel: 'L1', readers: ['provider'] }],
+      budget: { modelStepsUsed: 2, wallClockElapsedMs: 13 } })
+    expect(restored.budget).not.toHaveProperty('maxPromotions')
+    const resumed: RetrievalState = { ...restored, stateId: RetrievalStateId('resumed'), previousStateId: restored.stateId,
+      revision: 1, accessValidation: 'current' }
+    const continuation = makeRetrievalEvent({ eventId: 'resumed-state', retrievalId, sequence: 1, occurredAt: resumed.updatedAt,
+      type: 'retrieval/state-patched', data: { patch: createRetrievalStatePatch(restored, resumed) } })
+    expect(foldRetrievalEvents([checkpoint, continuation], retrievalId)).toEqual(resumed)
+    const rawCheckpoint = { ...checkpoint, data: { state: { ...legacy, promotedEvidence: legacy.promotedEvidence.map(item => ({ ...item, field: 'source.raw' })) } } }
+    expect(() => foldRetrievalEvents([rawCheckpoint], retrievalId)).toThrow(/无法安全迁移为受控正文/u)
+  })
+
 })

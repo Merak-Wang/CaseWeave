@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { TicketCandidateRef, type RetrievalState } from '@retrieval-agent/contracts'
+import { TicketCandidateRef, TicketEvidenceId, type RetrievalState } from '@retrieval-agent/contracts'
 import { EvidenceContextPolicy } from './context.js'
 
 function stateWithFieldCatalog(): RetrievalState {
@@ -38,8 +38,8 @@ function stateWithFieldCatalog(): RetrievalState {
       { kind: 'repair_search', candidateAllowlist: [], fieldAllowlist: [], maxTokens: 0 },
     ],
     budget: {
-      maxRounds: 8, maxSearches: 4, maxPromotions: 3, maxEvidenceTokens: 1_500, maxLatencyMs: 120_000,
-      roundsUsed: 1, searchesUsed: 1, promotionsUsed: 0, evidenceTokensUsed: 0, latencyMs: 0,
+      maxRounds: 8, maxSearches: 4, maxLatencyMs: 120_000,
+      modelStepsUsed: 1, searchesUsed: 1, wallClockElapsedMs: 0,
     },
     progress: {
       newCandidateRefs: [], newEvidenceIds: [], rankOverlap: 1,
@@ -95,5 +95,63 @@ describe('EvidenceContextPolicy', () => {
 
     expect(context.estimatedTokens).toBeLessThanOrEqual(1_500)
     expect(context.includedCandidateRefs).toEqual([candidateRef])
+  })
+
+  it('delivers newly inspected tail evidence with stable aliases after earlier evidence filled the window', () => {
+    const state = stateWithFieldCatalog()
+    const candidates = Array.from({ length: 8 }, (_, index) => ({
+      ref: TicketCandidateRef(`candidate-${index + 1}`), displayId: `TKT-${index + 1}`, rank: index + 1,
+      title: `工单 ${index + 1}`, summary: '摘要尚不足以确认处理过程。', l0: {},
+      matchSignals: { channels: ['keyword'], keywordTerms: ['处理'] },
+    }))
+    const promotedEvidence = Array.from({ length: 16 }, (_, index) => ({
+      evidenceId: TicketEvidenceId(`evidence-${index + 1}`), candidateRef: candidates[Math.floor(index / 2)]!.ref,
+      field: 'answer', text: `工单处理正文 ${index + 1}`, trust: 'untrusted', truncated: false,
+    }))
+    const latest = promotedEvidence.slice(12).map(evidence => evidence.evidenceId)
+    const inspectedState = { ...state, candidates, candidateHistory: candidates, promotedEvidence,
+      modelVisibleEvidenceIds: promotedEvidence.slice(0, 12).map(evidence => evidence.evidenceId),
+      progress: { ...state.progress, newEvidenceIds: latest },
+    } as unknown as RetrievalState
+
+    const context = new EvidenceContextPolicy().select(inspectedState)
+
+    expect(context.includedEvidenceIds.slice(0, 4)).toEqual(latest)
+    for (const index of [13, 14, 15, 16]) {
+      expect(context.rendered).toContain(`"alias":"e${index}"`)
+      expect(context.rendered).toContain(`工单处理正文 ${index}`)
+    }
+    expect(context.includedEvidenceIds).toHaveLength(12)
+    expect(context.excluded.filter(item => item.reason === 'not_selected')).toHaveLength(4)
+    expect(context.rendered).toContain('"availableSegments":16')
+    expect(context.rendered).toContain('"nextWindowAction":"inspect next_window"')
+    const afterVisibilityWrite = { ...inspectedState, modelVisibleEvidenceIds: [
+      ...inspectedState.modelVisibleEvidenceIds!, ...context.includedEvidenceIds,
+    ] }
+    expect(new EvidenceContextPolicy().select(afterVisibilityWrite).includedEvidenceIds).toEqual(context.includedEvidenceIds)
+  })
+
+  it('offers a further evidence window when one read returns more segments than the context can show', () => {
+    const state = stateWithFieldCatalog()
+    const ref = TicketCandidateRef('candidate-long-read')
+    const candidate = { ref, displayId: 'TKT-LONG', rank: 1, title: '多阶段处理', summary: '需要核实全部处理记录。',
+      l0: {}, matchSignals: { channels: ['keyword'], keywordTerms: [] } }
+    const promotedEvidence = Array.from({ length: 16 }, (_, index) => ({
+      evidenceId: TicketEvidenceId(`long-read-${index + 1}`), candidateRef: ref,
+      field: 'answer', text: `处理阶段 ${index + 1}`, trust: 'untrusted', truncated: false,
+    }))
+    const policy = new EvidenceContextPolicy()
+    const readState = { ...state, candidates: [candidate], candidateHistory: [candidate], promotedEvidence,
+      progress: { ...state.progress, newEvidenceIds: promotedEvidence.map(item => item.evidenceId) },
+    } as unknown as RetrievalState
+    const first = policy.select(readState)
+    const delivered = { ...readState, modelVisibleEvidenceIds: first.includedEvidenceIds }
+    expect(policy.select(delivered).includedEvidenceIds).toEqual(first.includedEvidenceIds)
+
+    const offset = policy.nextEvidenceWindowOffset(delivered)
+    expect(offset).toBe(12)
+    const next = policy.select({ ...delivered, evidenceWindowOffset: offset })
+    expect(next.includedEvidenceIds).toEqual(promotedEvidence.slice(12).map(item => item.evidenceId))
+    expect(next.rendered).toContain('"alias":"e16"')
   })
 })

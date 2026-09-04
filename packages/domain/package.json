@@ -12,16 +12,20 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["lib", "README.md"],
+  "files": [
+    "lib",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@retrieval-agent/contracts": "workspace:*",
-    "@retrieval-agent/retrieval-replay": "workspace:*",
-    "@retrieval-agent/retrieval-policy": "workspace:*"
+    "@retrieval-agent/retrieval-replay": "workspace:*"
   },
-  "publishConfig": { "access": "public" },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT"
 }

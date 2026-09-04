@@ -11,7 +11,6 @@ import uvicorn
 
 from . import PROTOCOL_VERSION, SERVICE_VERSION
 from .errors import ServiceError
-from .policy import plan_knowledge_assessment, update_candidate_ranking
 from .ranking import RAG_PROTOCOL_VERSION, RetrievalRankingBackend
 
 
@@ -202,30 +201,6 @@ def create_app(backend: Any, ranking_backend: RetrievalRankingBackend | None = N
             "protocolVersion": RAG_PROTOCOL_VERSION,
             "requestId": request_id,
             "result": result,
-            "elapsedMs": max(0.0, (time.perf_counter() - started) * 1000),
-        }
-
-    @app.post("/v1/policy/candidate-ranking")
-    def candidate_ranking(value: dict[str, Any], request: Request) -> dict[str, Any]:
-        started = time.perf_counter()
-        request_id = _request_id(value, request, RAG_PROTOCOL_VERSION)
-        result = update_candidate_ranking(value.get("input"))
-        return {
-            "protocolVersion": RAG_PROTOCOL_VERSION,
-            "requestId": request_id,
-            "result": result,
-            "elapsedMs": max(0.0, (time.perf_counter() - started) * 1000),
-        }
-
-    @app.post("/v1/policy/knowledge-assessment")
-    def knowledge_assessment(value: dict[str, Any], request: Request) -> dict[str, Any]:
-        started = time.perf_counter()
-        request_id = _request_id(value, request, RAG_PROTOCOL_VERSION)
-        result = plan_knowledge_assessment(value.get("state"), value.get("assessment"), value.get("config"))
-        return {
-            "protocolVersion": RAG_PROTOCOL_VERSION,
-            "requestId": request_id,
-            **result,
             "elapsedMs": max(0.0, (time.perf_counter() - started) * 1000),
         }
 

@@ -8,7 +8,6 @@ import {
   assertTrustedPrincipal,
   type DetailReadRequest,
   type EvidenceReadRequest,
-  type L3DetailsReadRequest,
   type NormalizedTicketRecord,
   type ProviderCallOptions,
   type TicketCandidate,
@@ -19,7 +18,6 @@ import {
   type TicketFieldDescriptor,
   type TicketFilter,
   type TicketProviderStatus,
-  type TicketL3DetailsResult,
   type TicketRetrievalProvider,
   type TicketRetrievalRequest,
   type TicketRetrievalSpec,
@@ -38,14 +36,14 @@ import { sha256, shortOpaque, stableJson } from './hash.js'
 import { canRead, principalBinding } from './authorization.js'
 import { evidenceFieldValues, LEGACY_FIELD_CATALOG } from './fields.js'
 import { candidateL0, matchFragment, matchesFilter, rankingDocuments } from './search-projection.js'
-import { tokenize, truncateToEstimatedTokens } from './text.js'
-import { l3DetailsResult } from './l3-details.js'
+import { estimateTokens, tokenize, truncateToEstimatedTokens } from './text.js'
 
 export interface LocalTicketProviderConfig {
   readonly providerId?: string
   readonly indexVersion?: string
   readonly queryPolicyVersion?: string
-  readonly maxRequestedCount?: number
+  /** Resource capacity for one search response; never a user result-count limit. */
+  readonly maxPageSize?: number
   readonly snapshotTtlMs?: number
   readonly now?: () => Date
   readonly ranker?: RetrievalRanker
@@ -71,7 +69,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
   readonly #records: readonly NormalizedTicketRecord[]
   readonly #indexVersion: string
   readonly #queryPolicyVersion: string
-  readonly #maxRequestedCount: number
+  readonly #maxPageSize: number
   readonly #snapshotTtlMs: number
   readonly #now: () => Date
   readonly #fieldCatalog: readonly TicketFieldDescriptor[]
@@ -90,7 +88,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     const sourceIndexVersion = config.indexVersion ?? sha256(records.map(record => `${record.ticketId}:${record.contentHash}`).sort().join('\n'))
     this.#indexVersion = sha256(`${sourceIndexVersion}:${this.#ranker.profileVersion}`)
     this.#queryPolicyVersion = config.queryPolicyVersion ?? 'query-policy-v1'
-    this.#maxRequestedCount = config.maxRequestedCount ?? 20
+    this.#maxPageSize = config.maxPageSize ?? 100
     this.#snapshotTtlMs = config.snapshotTtlMs ?? 15 * 60_000
     this.#now = config.now ?? (() => new Date())
     const catalog = new Map<string, TicketFieldDescriptor>()
@@ -103,9 +101,9 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     }
     this.#fieldCatalog = [...catalog.values()].sort((left, right) => left.key.localeCompare(right.key))
     this.#filterFields = new Map(this.#fieldCatalog.filter(field => field.filterOperators.length > 0).map(field => [field.key, field]))
-    this.#evidenceFields = new Set(this.#fieldCatalog.filter(field => field.accessLevel === 'L2').map(field => field.key))
-    this.#detailFields = new Set(this.#fieldCatalog.filter(field => field.accessLevel === 'L2').map(field => field.key))
-    if (!Number.isSafeInteger(this.#maxRequestedCount) || this.#maxRequestedCount < 1) throw new TypeError('maxRequestedCount must be positive')
+    this.#evidenceFields = new Set(this.#fieldCatalog.filter(field => ['L1', 'L2'].includes(field.accessLevel) && field.valueKind !== 'raw_json').map(field => field.key))
+    this.#detailFields = new Set(this.#fieldCatalog.filter(field => ['L1', 'L2'].includes(field.accessLevel) && field.valueKind !== 'raw_json').map(field => field.key))
+    if (!Number.isSafeInteger(this.#maxPageSize) || this.#maxPageSize < 1) throw new TypeError('maxPageSize must be positive')
     if (!Number.isSafeInteger(this.#snapshotTtlMs) || this.#snapshotTtlMs < 1) throw new TypeError('snapshotTtlMs must be positive')
   }
 
@@ -113,9 +111,6 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     assertTicketRetrievalRequest(request)
     this.#assertFiltersSupported(request.filters ?? [])
     const requestedCount = request.requestedCount
-    if (requestedCount !== undefined && requestedCount > this.#maxRequestedCount) {
-      throw new RetrievalError('INVALID_REQUEST', `用户级结果数量不能超过 ${this.#maxRequestedCount}。`)
-    }
     const countPolicy = request.countPolicy ?? 'adaptive'
     return {
       target: request.target,
@@ -170,8 +165,6 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
         pagination: true,
         evidencePromotion: true,
         detailRead: true,
-        l3DetailsRead: records.some(record => record.rawSource !== undefined)
-          && this.#fieldCatalog.some(field => field.accessLevel === 'L3' && field.valueKind === 'raw_json'),
         exportRead: true,
         keywordSearch: true,
         denseSearch: this.#ranker.capabilities.dense,
@@ -193,7 +186,9 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     abortIfNeeded(options)
     const entry = this.#authorizeSnapshot(principal, snapshotId)
     this.#assertFiltersSupported(query.filters)
-    if (!Number.isSafeInteger(options.topK) || options.topK < 1 || options.topK > this.#maxRequestedCount) throw new RetrievalError('INVALID_REQUEST', 'topK 无效。')
+    if (!Number.isSafeInteger(options.topK) || options.topK < 1 || options.topK > this.#maxPageSize) {
+      throw new RetrievalError('INVALID_REQUEST', `单页候选数量必须在 1 到 ${this.#maxPageSize} 之间。`)
+    }
     if (!Number.isSafeInteger(options.maxScan) || options.maxScan < 1) throw new RetrievalError('INVALID_REQUEST', 'maxScan 无效。')
     const queryFingerprint = sha256(stableJson(query))
     const offset = this.#decodeCursor(options.cursor, snapshotId, queryFingerprint)
@@ -251,9 +246,8 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       || ranked.hits.some(hit => !byId.has(hit.documentId))) {
       throw new RetrievalError('PROTOCOL_MISMATCH', '排名器返回了未授权或重复的文档。')
     }
-    const resultHits = query.countPolicy === 'explicit'
-      ? ranked.hits.slice(0, query.requestedCount)
-      : ranked.hits
+    // Candidate ranks are not semantic acceptance. Later pages must remain reachable after exclusions.
+    const resultHits = ranked.hits
     const pageHits = resultHits.slice(offset, offset + options.topK)
     const candidates = pageHits.map((hit, index): TicketCandidate => {
       const record = byId.get(hit.documentId)!
@@ -267,7 +261,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
         sourceVersion: record.sourceVersion,
         snapshotId,
         contentHash: record.contentHash,
-        evidenceLevel: 'L2',
+        evidenceLevel: 'L1',
         rank: offset + index + 1,
         title: record.title,
         summary: record.summary,
@@ -342,7 +336,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
           if (remaining <= 0) break
           const selected = truncateToEstimatedTokens(value, remaining)
           if (selected.text.length === 0) continue
-          const evidenceId = TicketEvidenceId(shortOpaque('ev', request.snapshotId, ref, field, String(part), record.contentHash))
+          const evidenceId = TicketEvidenceId(shortOpaque('ev', request.snapshotId, ref, field, String(part), record.contentHash, String(selected.text.length), String(selected.truncated)))
           evidence.push({
             evidenceId,
             candidateRef: ref,
@@ -356,6 +350,10 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
             estimatedTokens: selected.tokens,
             trust: 'untrusted_ticket_evidence',
             truncated: selected.truncated,
+            evidenceLevel: ['title', 'summary'].includes(field) ? 'L1' : 'L2',
+            readers: ['provider'], snapshotId: request.snapshotId,
+            authorizationVersion: entry.snapshot.authorizationVersion,
+            principalBindingHash: entry.snapshot.principalBindingHash,
           })
           remaining -= selected.tokens
           tokensUsed += selected.tokens
@@ -382,6 +380,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     const entry = this.#authorizeSnapshot(principal, request.snapshotId)
     for (const field of request.fields) if (!this.#detailFields.has(field)) throw new RetrievalError('FIELD_NOT_ALLOWED', '请求了不允许的详情字段。')
     const details: TicketDetail[] = []
+    const evidence: TicketEvidenceResult['evidence'][number][] = []
     const rejected: typeof request.candidateRefs[number][] = []
     for (const ref of request.candidateRefs) {
       abortIfNeeded(options)
@@ -396,6 +395,15 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
         const values = evidenceFieldValues(record, field)
         if (values.length === 0) unavailableFields.push(field)
         else fields[field] = [...values]
+        for (const [part, text] of values.entries()) evidence.push({
+          evidenceId: TicketEvidenceId(shortOpaque('ev', request.snapshotId, ref, field, String(part), record.contentHash, String(text.length), 'false')),
+          candidateRef: ref, displayId: record.displayId, sourceVersion: record.sourceVersion, contentHash: record.contentHash,
+          field, text, start: 0, end: text.length, estimatedTokens: estimateTokens(text),
+          trust: 'untrusted_ticket_evidence', truncated: false,
+          evidenceLevel: ['title', 'summary'].includes(field) ? 'L1' : 'L2', readers: ['provider'],
+          snapshotId: request.snapshotId, authorizationVersion: entry.snapshot.authorizationVersion,
+          principalBindingHash: entry.snapshot.principalBindingHash,
+        })
       }
       details.push({
         candidateRef: ref,
@@ -408,17 +416,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
         unavailableFields,
       })
     }
-    return { snapshotId: request.snapshotId, details, rejectedCandidateRefs: rejected, warnings: [] }
-  }
-
-  async readL3Details(
-    principal: TrustedPrincipalContext,
-    request: L3DetailsReadRequest,
-    options?: ProviderCallOptions,
-  ): Promise<TicketL3DetailsResult> {
-    abortIfNeeded(options)
-    const entry = this.#authorizeSnapshot(principal, request.snapshotId)
-    return l3DetailsResult(request, entry.candidateRefs, principal)
+    return { snapshotId: request.snapshotId, details, evidence, rejectedCandidateRefs: rejected, warnings: [] }
   }
 
   async status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus> {

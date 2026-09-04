@@ -6,29 +6,27 @@ import type {
   TicketCandidateRef,
   TicketDetail,
   TicketEvidenceField,
-  TicketRetrievalRequest,
 } from '@retrieval-agent/contracts'
 
 export const EXPORT_CANDIDATES_ENDPOINT = '/api/retrieval-agent/export' as const
 export const READ_TICKET_DETAIL_ENDPOINT = '/api/retrieval-agent/detail' as const
 export const CONTINUE_RETRIEVAL_ENDPOINT = '/api/retrieval-agent/continue' as const
+export const READ_RETRIEVAL_ENDPOINT = '/api/retrieval-agent/presentation' as const
 
 /** JSON payloads exposed by the trusted Product BFF. */
-export interface StartRetrievalParams {
-  readonly request: TicketRetrievalRequest
-}
-
-export interface StartRetrievalResponse {
-  readonly retrievalId: RetrievalId
-  readonly node: TicketCandidateNode
-}
-
 export interface ReadRetrievalParams {
+  readonly sessionId: string
   readonly retrievalId: RetrievalId
 }
 
 export interface ReadRetrievalResponse {
   readonly node: TicketCandidateNode
+}
+
+export interface ReadRetrievalErrorResponse {
+  readonly code: string
+  readonly message: string
+  readonly retryable: boolean
 }
 
 export interface ContinueRetrievalParams {
@@ -88,14 +86,4 @@ export interface ExportCandidatesErrorResponse {
   readonly code: string
   readonly message: string
   readonly retryable: boolean
-}
-
-export interface CandidateNodeNotification {
-  readonly retrievalId: RetrievalId
-  readonly node: TicketCandidateNode
-}
-
-export interface RetrievalStoppedNotification {
-  readonly retrievalId: RetrievalId
-  readonly node: TicketCandidateNode
 }

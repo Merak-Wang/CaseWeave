@@ -13,6 +13,7 @@ import type {
   TicketFilter,
   TicketQueryLogic,
   TicketQueryContract,
+  TicketQueryDelta,
   TicketRetrievalSpec,
   TicketSearchPage,
   TicketSnapshot,
@@ -43,7 +44,7 @@ export interface RetrievalGap {
 export type RetrievalKnowledgeDecision = 'present_current_top_k' | 'accept_current_top_k' | 'return_partial' | 'no_result' | 'needs_clarification' | 'continue'
 export type RetrievalNextAction = 'present_current_top_k' | 'accept_current_top_k' | 'finish_partial' | 'finish_no_result' | 'continue_ranking' | 'keyword_search' | 'vector_search' | 'read_l3_details' | 'clarify'
 
-/** Strict semantic judgment proposed by the model and admitted by Harness. */
+/** Pre-v12 assessment shape retained only to decode historical Session events. */
 export interface RetrievalKnowledgeAssessment {
   readonly decision: RetrievalKnowledgeDecision
   readonly selectedCandidateRefs: readonly TicketCandidateRef[]
@@ -52,6 +53,26 @@ export interface RetrievalKnowledgeAssessment {
   readonly nextAction: RetrievalNextAction
   readonly evaluator: 'model' | 'system'
   readonly model?: string
+}
+
+/** A judgment is supported only by evidence actually delivered to this model. */
+export interface RetrievalCandidateJudgment {
+  readonly candidateRef: TicketCandidateRef
+  readonly verdict: 'accept' | 'exclude' | 'undetermined'
+  readonly evidenceRefs: readonly string[]
+  readonly reason: string
+}
+
+/** One public model submission: judgments, remaining gaps, and one executable action. */
+export interface RetrievalDecision {
+  readonly stateId: RetrievalStateId
+  readonly judgments: readonly RetrievalCandidateJudgment[]
+  readonly gaps: readonly RetrievalGap[]
+  readonly action:
+    | { readonly kind: 'search'; readonly mode?: 'keyword' | 'dense'; readonly delta?: TicketQueryDelta; readonly continueRanking?: boolean }
+    | { readonly kind: 'inspect'; readonly candidateRefs?: readonly TicketCandidateRef[]; readonly fields?: readonly TicketEvidenceField[]; readonly nextWindow?: boolean; readonly tokenBudget?: number }
+    | { readonly kind: 'clarify'; readonly question: string; readonly candidateRefs: readonly TicketCandidateRef[]; readonly evidenceRefs: readonly string[]; readonly facet?: string; readonly options?: readonly string[] }
+    | { readonly kind: 'finish'; readonly reason?: 'satisfied' | 'no_result' | 'incomplete'; readonly explanation: string }
 }
 
 /** One immutable ranking observation; active ranking is derived across observations. */
@@ -67,7 +88,6 @@ export type RetrievalActionKind =
   | 'search_next'
   | 'repair_search'
   | 'assess'
-  | 'read_l3_details'
   | 'request_clarification'
   | 'answer_clarification'
   | 'freeze'
@@ -84,21 +104,15 @@ export interface RetrievalAllowedAction {
 export interface RetrievalBudgetState {
   readonly maxRounds: number
   readonly maxSearches: number
-  readonly maxPromotions: number
-  readonly maxEvidenceTokens: number
   readonly maxLatencyMs: number
-  readonly roundsUsed: number
   readonly searchesUsed: number
-  readonly promotionsUsed: number
-  readonly evidenceTokensUsed: number
-  readonly latencyMs: number
   /** Actual conversation-model requests admitted by the Harness. */
-  readonly modelStepsUsed?: number
+  readonly modelStepsUsed: number
   readonly successfulToolCalls?: number
   readonly failedToolCalls?: number
   readonly providerLatencyMs?: number
   readonly modelLatencyMs?: number
-  readonly wallClockElapsedMs?: number
+  readonly wallClockElapsedMs: number
   readonly serializationBytes?: number
   readonly totalInputTokens?: number
   readonly totalOutputTokens?: number
@@ -146,7 +160,7 @@ export interface FrozenEvidencePack {
     readonly displayId: string
     readonly sourceVersion: string
     readonly contentHash: string
-    readonly evidenceLevel: 'L1' | 'L2' | 'L3'
+    readonly evidenceLevel: 'L1' | 'L2'
     readonly evidenceIds: readonly TicketEvidenceId[]
   }[]
   readonly stoppingReason: Exclude<RetrievalTermination, 'active' | 'needs_clarification'>
@@ -168,8 +182,8 @@ export interface FrozenEvidencePack {
 
 /**
  * The only terminal product value. It is a deterministic collection, never a
- * model-authored natural-language answer. `tickets` is the exact frozen
- * allowlist (or empty when the retrieval stopped before a set could be frozen).
+ * model-authored natural-language answer. `tickets` contains the accepted
+ * current candidates; valid candidates lacking a decision are separate.
  */
 export interface TicketResultCollection {
   readonly type: 'ticket_collection'
@@ -188,6 +202,9 @@ export interface TicketResultCollection {
   readonly resultMayBeIncomplete: boolean
   readonly nextPageAvailable: boolean
   readonly tickets: readonly TicketCandidate[]
+  /** Valid candidates that were not accepted or excluded; never confirmed results. */
+  readonly undeterminedCandidates?: readonly TicketCandidate[]
+  readonly explanation?: string
   readonly evidence: readonly TicketEvidenceSegment[]
   readonly remainingGapKinds: readonly RetrievalGapKind[]
 }
@@ -215,10 +232,25 @@ export interface RetrievalState {
   /** Append-only acquisition history, distinct from the revisable active ranking. */
   readonly candidateHistory: readonly TicketCandidate[]
   readonly rankingHistory: readonly RetrievalRankingObservation[]
+  readonly activeRankingStart?: number
   readonly excludedCandidateRefs: readonly TicketCandidateRef[]
   readonly selectedCandidateRefs: readonly TicketCandidateRef[]
+  readonly judgments?: readonly RetrievalCandidateJudgment[]
+  /** Accumulated actual model visibility, invalidated when hard conditions change. */
+  readonly modelVisibleCandidateRefs?: readonly TicketCandidateRef[]
+  readonly modelVisibleEvidenceIds?: readonly TicketEvidenceId[]
+  /** State IDs in this same semantic generation before measurement-only revisions. */
+  readonly measurementStateIds?: readonly RetrievalStateId[]
+  readonly candidateWindowOffset?: number
+  readonly evidenceWindowOffset?: number
+  readonly stopExplanation?: string
+  readonly userFeedback?: readonly { readonly text: string; readonly receivedAt: string }[]
+  /** Waiting time is excluded from the online execution limit. */
+  readonly executionClock?: { readonly waitingSince?: string; readonly totalWaitingMs: number }
+  /** Historical replay is a fact source, not a current access grant. */
+  readonly accessValidation?: 'current' | 'required'
   readonly lastAssessment?: RetrievalKnowledgeAssessment | undefined
-  readonly lastPage?: TicketSearchPage
+  readonly lastPage?: TicketSearchPage | undefined
   readonly promotedEvidence: readonly TicketEvidenceSegment[]
   readonly gaps: readonly RetrievalGap[]
   readonly allowedActions: readonly RetrievalAllowedAction[]
@@ -230,8 +262,10 @@ export interface RetrievalState {
     readonly question: string
     readonly candidateRefs: readonly TicketCandidateRef[]
     readonly answer?: string
+    readonly evidenceRefs?: readonly string[]
+    readonly options?: readonly string[]
   }
-  readonly frozenEvidence?: FrozenEvidencePack
+  readonly frozenEvidence?: FrozenEvidencePack | undefined
   readonly provenance: RetrievalStateProvenance
 }
 
@@ -290,6 +324,8 @@ export interface TicketCandidateNode {
   readonly retrievalId: RetrievalId
   readonly version: number
   readonly querySummary: string
+  readonly confirmedConstraints?: readonly TicketFilter[]
+  readonly selectedCandidateRefs?: readonly TicketCandidateRef[]
   readonly queryLogic?: TicketQueryLogic
   readonly snapshotShortId?: string
   readonly completeness: 'pending' | TicketSearchPage['completeness']

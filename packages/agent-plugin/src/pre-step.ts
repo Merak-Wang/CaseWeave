@@ -6,7 +6,8 @@ import type {
   RetrievalState,
   TicketRetrievalRequest,
 } from '@retrieval-agent/contracts'
-import { buildFastTicketRequest } from '@retrieval-agent/query-understanding'
+import type { RetrievalClarificationAnswer } from '@retrieval-agent/domain'
+import { buildFastTicketRequest, compileUserConditions, compileUserResultPolicy } from '@retrieval-agent/query-understanding'
 import type { TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
 
 const PLUGIN_NAME = 'retrieval-agent'
@@ -15,6 +16,10 @@ const SNAPSHOT_SECTION = 'retrieval-agent:state'
 export interface AutomaticRetrievalApplication {
   currentOrUndefined(agent: Agent): RetrievalState | undefined
   start(agent: Agent, request: TicketRetrievalRequest, signal?: AbortSignal): Promise<RetrievalState>
+  resumeClarification(agent: Agent, answer: RetrievalClarificationAnswer, signal?: AbortSignal): Promise<RetrievalState>
+  applyUserFeedback(agent: Agent, answer: RetrievalClarificationAnswer, signal?: AbortSignal): Promise<RetrievalState>
+  cancel(agent: Agent): Promise<RetrievalState>
+  ensureModelAccess(agent: Agent, signal?: AbortSignal): Promise<RetrievalState | undefined>
   projectContext(agent: Agent): EvidenceContextSelection
 }
 
@@ -77,20 +82,51 @@ export function installAutomaticRetrievalStart(
     const decision = await next()
     if (decision.kind === 'reject' || signal.aborted) return decision
 
+    const restored = application.currentOrUndefined(agent)?.accessValidation === 'required'
+    const authorized = await application.ensureModelAccess(agent, signal)
+    if (restored && authorized?.phase === 'stopped' && ['permission_blocked', 'snapshot_invalid', 'backend_error'].includes(authorized.termination)) {
+      persistCompletedPreStep(agent, decision.messages)
+      return { kind: 'enter', messages: [] }
+    }
     const direct = acceptedDirectMessages(proposed, decision.messages)
     const query = originalQuery(direct)
     if (query === undefined) return decision
 
     const current = application.currentOrUndefined(agent)
-    if (current !== undefined && current.phase !== 'stopped') return decision
+    const active = current !== undefined && current.phase !== 'stopped'
+    if (active && /^(?:取消|停止|算了|cancel|stop)[。.!！\s]*$/iu.test(query.trim())) {
+      await application.cancel(agent)
+      persistCompletedPreStep(agent, decision.messages)
+      return { kind: 'enter', messages: [] }
+    }
 
     // 在首次模型请求之前完成 spaCy 分析和固定 Hybrid 计划，模型只能在看到首轮知识状态后决定是否修复查询。
-    const request = await buildFastTicketRequest(query, {
-      analyzer: config.analyzer,
-      signal,
-    })
-    const state = await application.start(agent, request, signal)
+    // An explicit new-task marker ends the active task; ordinary free-form replies
+    // return to the original state for semantic interpretation by the model.
+    const newTask = active && /^(?:新任务|另一个任务|重新检索|new task)\s*[:：]?/iu.test(query.trim())
+    if (newTask) await application.cancel(agent)
+    const feedback = active && !newTask
+      ? {
+          accepted: true, answer: query,
+          ...(() => {
+            const conditions = compileUserConditions(query, [], new Date(), Intl.DateTimeFormat().resolvedOptions().timeZone)
+            const result = compileUserResultPolicy(query)
+            return { filters: conditions.filters, requirements: conditions.userRequirements, ambiguities: conditions.ambiguities,
+              ...(result?.countPolicy === undefined ? {} : { result: { ...result, countPolicy: result.countPolicy } }),
+            }
+          })(),
+        } : undefined
+    const state = feedback === undefined
+      ? await application.start(agent, await buildFastTicketRequest(query, { analyzer: config.analyzer, signal }), signal)
+      : current?.termination === 'needs_clarification'
+        ? await application.resumeClarification(agent, feedback, signal)
+        : await application.applyUserFeedback(agent, feedback, signal)
     if (signal.aborted) return decision
+
+    if (state.phase === 'stopped' && ['permission_blocked', 'snapshot_invalid', 'backend_error'].includes(state.termination)) {
+      persistCompletedPreStep(agent, decision.messages)
+      return { kind: 'enter', messages: [] }
+    }
 
     const selection = application.projectContext(agent)
     const snapshot = createUserMessage({

@@ -6,10 +6,12 @@ import type {
   TicketCandidateNode,
   TicketCandidateRef,
   TicketDetail,
+  TicketFilter,
 } from '@retrieval-agent/contracts'
 import css from './CandidatePanel.module.css'
 import { continueFailureMessage, continueRetrieval } from './continue.js'
 import { detailFailureMessage, readTicketDetail } from './detail.js'
+import { readRetrievalPresentation } from './presentation.js'
 
 export type CandidatePanelProps = PropsRuntime<'conversation.chat.node', 'ticket-candidates'>
 
@@ -54,6 +56,12 @@ function displayDate(value: string | undefined): string | undefined {
   return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat('zh-CN', {
     year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(date)
+}
+
+function constraintText(filter: TicketFilter): string {
+  const labels: Readonly<Record<string, string>> = { region: '区域', status: '状态', category: '类别', type: '类型', product: '产品', component: '组件', createdAt: '创建时间', updatedAt: '更新时间', priority: '优先级' }
+  const operators = { eq: '为', neq: '不为', gte: '不早于', lte: '不晚于', contains: '包含' }
+  return `${labels[filter.field] ?? filter.field}${operators[filter.op]}${filter.value}`
 }
 
 function boundaryText(data: TicketCandidateNode): string {
@@ -128,7 +136,40 @@ function DetailBody({
 }
 
 /** Deterministic collection renderer. Detail clicks always go through the trusted Product Host. */
-export function CandidatePanel({ node, sessionId }: CandidatePanelProps) {
+export function CandidatePanel(props: CandidatePanelProps) {
+  const { node, sessionId } = props
+  const [presentation, setPresentation] = useState<{
+    readonly key: string; readonly data?: TicketCandidateNode; readonly error?: string
+  }>()
+  const key = `${sessionId}:${node.data.retrievalId}:${node.data.version}`
+  const [retry, setRetry] = useState(0)
+  useEffect(() => {
+    const abort = new AbortController()
+    void readRetrievalPresentation(String(sessionId), node.data.retrievalId, abort.signal)
+      .then(data => { if (!abort.signal.aborted) setPresentation({ key, data }) })
+      .catch((error: unknown) => {
+        if (!abort.signal.aborted) setPresentation({ key, error: error instanceof Error ? error.message : '无法重新授权当前工单集合。' })
+      })
+    return () => { abort.abort() }
+  }, [key, retry])
+  if (presentation?.key === key && presentation.error !== undefined) {
+    return <section className={css.panel} aria-label="工单检索结果">
+      <p role="alert">{presentation.error}</p>
+      <button type="button" onClick={() => { setPresentation(undefined); setRetry(value => value + 1) }}>重新授权</button>
+    </section>
+  }
+  return <AuthorizedCandidatePanel
+    {...props}
+    node={{ ...node, data: presentation?.data ?? node.data }}
+    accessPending={presentation?.key !== key || presentation.data === undefined}
+    onReauthorize={() => { setPresentation(undefined); setRetry(value => value + 1) }}
+  />
+}
+
+/** Pure renderer used only after the Host has reauthorized this presentation. */
+export function AuthorizedCandidatePanel({ node, sessionId, accessPending = false, onReauthorize }: CandidatePanelProps & {
+  readonly accessPending?: boolean; readonly onReauthorize?: () => void
+}) {
   const data = node.data
   const [collectionExpanded, setCollectionExpanded] = useState(false)
   const [visibleCount, setVisibleCount] = useState(5)
@@ -188,8 +229,12 @@ export function CandidatePanel({ node, sessionId }: CandidatePanelProps) {
       return next
     })
     const detailState = detailStates.get(ref)
-    if (opening && detailState?.status !== 'loaded' && detailState?.status !== 'loading') void loadDetail(ref)
+    if (opening && detailState?.status !== 'loading') void loadDetail(ref)
   }
+
+  if (accessPending) return <section className={css.panel} aria-label="工单检索结果">
+    <p role="status">正在按当前身份重新授权工单集合…</p>
+  </section>
 
   return (
     <section className={css.panel} aria-label="工单检索结果" data-retrieval-status={data.status}>
@@ -199,7 +244,10 @@ export function CandidatePanel({ node, sessionId }: CandidatePanelProps) {
         aria-expanded={collectionExpanded}
         aria-controls={collectionId}
         disabled={data.candidates.length === 0 && !terminal}
-        onClick={() => { setCollectionExpanded(value => !value) }}
+        onClick={() => {
+          if (!collectionExpanded) onReauthorize?.()
+          setCollectionExpanded(value => !value)
+        }}
       >
         <div className={css.headingLine}>
           <div>
@@ -222,17 +270,24 @@ export function CandidatePanel({ node, sessionId }: CandidatePanelProps) {
         {data.queryAmbiguities === undefined || data.queryAmbiguities.length === 0 ? null : (
           <p className={css.noticeInline}>待确认：{data.queryAmbiguities.map(item => item.text).join('；')}</p>
         )}
+        {(data.confirmedConstraints ?? []).length === 0 ? null : <p className={css.noticeInline}>
+          当前条件：{data.confirmedConstraints!.map(constraintText).join('；')}
+        </p>}
         <div className={css.context} aria-label="检索上下文">
           <span>{boundaryText(data)}</span>
+          {data.result === undefined ? null : <span>
+            已确认 {data.result.tickets.length} 条 · 待判定 {data.result.undeterminedCandidates?.length ?? 0} 条
+          </span>}
         </div>
       </button>
 
+      {data.message === undefined ? null : (
+        <p className={data.status === 'error' ? css.error : css.notice} role={data.status === 'error' ? 'alert' : 'status'}>
+          {data.message}
+        </p>
+      )}
+
       {!collectionExpanded ? null : <div id={collectionId} className={css.collectionBody}>
-        {data.message === undefined ? null : (
-          <p className={data.status === 'error' ? css.error : css.notice} role={data.status === 'error' ? 'alert' : 'status'}>
-            {data.message}
-          </p>
-        )}
         {data.candidates.length === 0 ? <p className={css.empty}>集合中没有工单。</p> : null}
         <ol className={css.list}>
           {data.candidates.slice(0, visibleCount).map(candidate => {
@@ -252,6 +307,7 @@ export function CandidatePanel({ node, sessionId }: CandidatePanelProps) {
                 <span className={css.rowContent}>
                   <span className={css.identityLine}>
                     <span className={css.ticketId}>工单编号 {candidate.displayId}</span>
+                    <span>{(data.selectedCandidateRefs ?? data.result?.tickets.map(item => item.ref) ?? []).includes(candidate.ref) ? '已确认' : '待判定'}</span>
                     <span className={css.detailAction}>{detailState?.status === 'loading'
                       ? '正在查询…'
                       : isExpanded ? '收起详细信息' : '查询详细信息'}</span>
@@ -264,6 +320,12 @@ export function CandidatePanel({ node, sessionId }: CandidatePanelProps) {
                     {metadata.map(item => <span key={`${item.label}-${item.value}`}><b>{item.label}</b>{item.value}</span>)}
                   </span>}
                   <span className={css.source} title={candidate.sourceVersion}>来源 {compactVersion(candidate.sourceVersion)}</span>
+                  {data.alreadyReadEvidence.filter(evidence => evidence.candidateRef === candidate.ref).map(evidence => (
+                    <span key={evidence.evidenceId} className={css.source}>
+                      {evidence.evidenceLevel ?? (['title', 'summary'].includes(evidence.field) ? 'L1' : 'L2')} · {evidence.evidenceId} ·
+                      {evidence.readers === undefined ? '读取者未记录' : evidence.readers.map(reader => reader === 'model' ? '模型已读' : reader === 'user' ? '用户已读' : '来源已提供').join('、')}
+                    </span>
+                  ))}
                 </span>
                 <span className={css.rowChevron}>{isExpanded ? <IconChevronUpOutline14 /> : <IconChevronDownOutline14 />}</span>
               </button>

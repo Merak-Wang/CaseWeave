@@ -21,15 +21,15 @@ export function advanceRetrievalState(
   const revision = state.revision + 1
   const next: RetrievalState = {
     ...state,
+    measurementStateIds: [],
     ...patch,
     stateId: retrievalStateId(state.retrievalId, revision, id()),
     previousStateId: state.stateId,
     revision,
     updatedAt: now().toISOString(),
   }
-  if (next.lastAssessment !== undefined) return next
-  const { lastAssessment: _lastAssessment, ...serializable } = next
-  return serializable
+  // Explicitly cleared optional properties must become JSON removals in durable patches.
+  return Object.fromEntries(Object.entries(next).filter(([, value]) => value !== undefined)) as unknown as RetrievalState
 }
 
 export function recordRetrievalState(
@@ -56,7 +56,8 @@ export function recordMeasuredBudget(
 ): RetrievalState {
   const next = advanceRetrievalState(
     state,
-    { budget, provenance: { ...state.provenance, sourceEventIds: [eventId] } },
+    { budget, measurementStateIds: [...(state.measurementStateIds ?? []), state.stateId],
+      provenance: { ...state.provenance, sourceEventIds: [eventId] } },
     now,
     id,
   )

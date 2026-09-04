@@ -228,6 +228,7 @@ try {
   const probe = join(profile, 'artifact-probe.mjs')
   await writeFile(probe, `
 import { readFile } from 'node:fs/promises'
+import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createServer as createHttpServer } from 'node:http'
 import { join } from 'node:path'
@@ -241,6 +242,7 @@ import { MODEL_SERVICE_PROTOCOL_VERSION, ModelServiceClient } from '@retrieval-a
 import { LocalTicketProvider, parseTicketDatasetJsonl } from '@retrieval-agent/provider-local'
 import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
 import { FixturePrincipalProviderService, LocalTicketProviderService } from '@retrieval-agent/bundle'
+import { CandidateDetailService, InMemoryDetailReadAuditSink, projectTicketCandidateState } from '@retrieval-agent/product-api'
 
 installDshSessionCompatibility()
 const session = Session.create(SessionId('clean-install-session'))
@@ -306,7 +308,7 @@ const modelServer = createHttpServer(async (request, response) => {
         dtype: 'float32', device: 'test', maxTokens: 12000, dimensions, pooling: 'last_token', normalization: 'l2',
       }],
       limits: { maxBatchSize: 128, maxTotalTokens: 100000, maxRerankCandidates: 20 },
-      rag: { protocolVersion: 'retrieval-agent.rag.v1', ranking: true, policy: true },
+      rag: { protocolVersion: 'retrieval-agent.rag.v1', ranking: true },
     })
     return
   }
@@ -402,32 +404,6 @@ const modelServer = createHttpServer(async (request, response) => {
     })
     return
   }
-  if (request.method === 'POST' && request.url === '/v1/policy/candidate-ranking') {
-    const body = await requestBody(request)
-    const input = body.input
-    const history = [...new Map([...input.previousHistory, ...input.page].map(candidate => [candidate.ref, candidate])).values()]
-    const nextObservation = {
-      searchEventId: input.searchEventId, stage: input.stage, queryFingerprint: input.queryFingerprint,
-      ranking: input.page.map(candidate => ({ ref: candidate.ref, rank: candidate.rank })),
-    }
-    const observations = [...input.previousObservations, nextObservation]
-    const scores = new Map()
-    for (const observation of observations) {
-      const weight = observation.stage === 'repair_search' ? 1.25 : 1
-      for (const row of observation.ranking) scores.set(row.ref, (scores.get(row.ref) ?? 0) + weight / (60 + row.rank))
-    }
-    const excluded = new Set(input.excludedRefs)
-    const firstSeen = new Map(history.map((candidate, index) => [candidate.ref, index]))
-    const active = history.filter(candidate => !excluded.has(candidate.ref))
-      .sort((left, right) => (scores.get(right.ref) ?? 0) - (scores.get(left.ref) ?? 0)
-        || firstSeen.get(left.ref) - firstSeen.get(right.ref))
-      .map((candidate, index) => ({ ...candidate, rank: index + 1 }))
-    send(200, {
-      protocolVersion: 'retrieval-agent.rag.v1', requestId: body.requestId,
-      result: { version: 'candidate-ranking-v1', history, observations, active }, elapsedMs: 0,
-    })
-    return
-  }
   send(404, { error: { code: 'NOT_FOUND', message: 'not found', retryable: false } })
 })
 await new Promise((resolvePromise, rejectPromise) => {
@@ -454,15 +430,51 @@ try {
     embeddingRevision: 'clean-install-revision-v1',
     embeddingDimensions: dimensions,
   })
-  await serviceCtx.plugin(RetrievalAgentService, { retrievalPolicyBaseUrl: modelServiceBaseUrl })
+  await serviceCtx.plugin(RetrievalAgentService)
   const serviceAgent = { session: Session.create(SessionId('clean-install-cordis-agent')) }
-  const serviceState = await serviceCtx.retrievalAgent.start(serviceAgent, {
+  let serviceState = await serviceCtx.retrievalAgent.start(serviceAgent, {
     target: 'ranked_cases', query: '主副卡解绑后仍共享流量', requestedCount: 5, countPolicy: 'explicit',
   })
   if (serviceState.candidates.length === 0
     || serviceState.candidates.some(candidate => !candidate.displayId.startsWith('ESFT-SUMMARY-TRAIN-'))) {
     throw new Error('packed Cordis service path did not return ESFT development candidates')
   }
+  const detailFields = serviceState.snapshot.fieldCatalog.filter(field => field.accessLevel === 'L2' && field.valueKind !== 'raw_json')
+    .map(field => field.key)
+  if (detailFields.length === 0) throw new Error('installed Provider has no controlled detail field')
+  const detailPrincipal = await serviceCtx.retrievalAgent.principal(serviceAgent, 'detail_read')
+  const detailRead = await new CandidateDetailService(serviceCtx.ticketRetrievalProvider, new InMemoryDetailReadAuditSink())
+    .readDetails(detailPrincipal, serviceState, [serviceState.candidates[0].ref], detailFields)
+  assert.ok(detailRead.result.evidence?.length > 0, 'installed controlled detail read returned no evidence')
+  await serviceCtx.retrievalAgent.recordDetailRead(serviceAgent, detailRead.receipt, detailRead.result)
+  serviceState = serviceCtx.retrievalAgent.current(serviceAgent)
+  assert.ok(serviceState.promotedEvidence.length > 0, 'installed detail did not enter the authoritative knowledge state')
+  assert.ok(serviceState.promotedEvidence.every(evidence => evidence.readers.includes('user')),
+    'installed detail did not record the actual user reader')
+
+  const restoredAgent = { session: Session.create(SessionId('clean-install-cordis-restored'), serviceAgent.session.events) }
+  const restoredEvents = new SessionRetrievalEventJournal(restoredAgent.session).read(serviceState.retrievalId)
+  assert.deepStrictEqual(foldRetrievalEvents(restoredEvents), JSON.parse(JSON.stringify(serviceState)),
+    'packed Seed replay changed the full durable knowledge state')
+  const restoredState = serviceCtx.retrievalAgent.current(restoredAgent)
+  assert.deepStrictEqual(restoredState, { ...JSON.parse(JSON.stringify(serviceState)), accessValidation: 'required' },
+    'restored service must preserve evidence while requiring a new authorization grant')
+  assert.throws(() => serviceCtx.retrievalAgent.projectContext(restoredAgent), { code: 'UNAUTHORIZED' },
+    'restored evidence must not be presented before current Provider authorization')
+  const authorizedState = await serviceCtx.retrievalAgent.authorizePresentation(restoredAgent, serviceState.retrievalId)
+  assert.equal(authorizedState.accessValidation, 'current', 'installed Provider did not reauthorize the restored evidence')
+  assert.notEqual(authorizedState.stateId, serviceState.stateId, 'reauthorization must record a new state identity')
+  assert.deepStrictEqual(authorizedState, { ...JSON.parse(JSON.stringify(serviceState)),
+    stateId: authorizedState.stateId, previousStateId: serviceState.stateId, revision: serviceState.revision + 1,
+    updatedAt: authorizedState.updatedAt, accessValidation: 'current' },
+    'reauthorization must only add its state transition and preserve the original evidence and task')
+  const presentation = projectTicketCandidateState(authorizedState, authorizedState.retrievalId)
+  assert.deepStrictEqual(presentation.alreadyReadEvidence, serviceState.promotedEvidence,
+    'authorized presentation changed the restored evidence identities or readers')
+  const reauthorizedSeed = Session.create(SessionId('clean-install-cordis-reauthorized-seed'), restoredAgent.session.events)
+  assert.deepStrictEqual(foldRetrievalEvents(new SessionRetrievalEventJournal(reauthorizedSeed).read(serviceState.retrievalId)),
+    JSON.parse(JSON.stringify(authorizedState)), 'reauthorization did not persist a valid replay state chain')
+  console.log('packed restored access verified: full Seed equality, pre-authorization denial, Local Provider reauthorization, evidence identity and reader equality')
 } finally {
   await serviceCtx.fiber.dispose()
 }
@@ -483,7 +495,7 @@ let serial = 0
 const nextId = () => 'clean-' + serial++
 const journal = new SessionRetrievalEventJournal(session, { now: () => now, eventId: nextId })
 const controller = new RetrievalController(provider, journal, undefined, {
-  now: () => now, id: nextId, retrievalPolicyBaseUrl: modelServiceBaseUrl,
+  now: () => now, id: nextId,
 })
 const state = await controller.start(principal, { target: 'ranked_cases', query: '主副卡解绑后仍共享流量' })
 if (state.candidates.length === 0
@@ -494,14 +506,17 @@ if (journal.read(RetrievalId(state.retrievalId)).length === 0) throw new Error('
 const replayedSession = Session.create(SessionId('clean-install-replayed'), session.events)
 const replayedEvents = new SessionRetrievalEventJournal(replayedSession).read(RetrievalId(state.retrievalId))
 const replayedState = foldRetrievalEvents(replayedEvents)
-if (replayedState === undefined || JSON.stringify(replayedState) !== JSON.stringify(state)) {
-  throw new Error('packed DSH Session replay did not reconstruct the same retrieval state')
+assert.deepStrictEqual(replayedState, JSON.parse(JSON.stringify(state)),
+  'packed DSH Session replay did not reconstruct the full durable retrieval state')
+if (JSON.stringify(replayedState) !== JSON.stringify(state)) {
+  console.log('packed replay strict equality passed; JSON object key insertion order differs after incremental patches')
 }
 } finally {
   await new Promise(resolvePromise => modelServer.close(resolvePromise))
 }
 `, 'utf8')
-  run(process.execPath, [probe], { cwd: profile, env: { ...process.env, DSH_HOME: home } })
+  const probeOutput = run(process.execPath, [probe], { cwd: profile, env: { ...process.env, DSH_HOME: home } })
+  process.stdout.write(probeOutput)
 
   const installedPreset = await readFile(join(home, '.agent-presets', 'retrieval-agent', 'agent.cordis.yml'), 'utf8')
   if (!installedPreset.includes('@retrieval-agent/bundle/agent')) throw new Error('installed preset is incomplete')

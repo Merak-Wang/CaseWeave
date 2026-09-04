@@ -6,6 +6,7 @@ import {
   type RetrievalState,
 } from '@retrieval-agent/contracts'
 import { applyRetrievalStatePatch } from './patch.js'
+import { migrateLegacyRetrievalState } from './migrate.js'
 
 function validateState(state: RetrievalState, event: RetrievalDomainEvent, previous: RetrievalState | undefined): void {
   if (state.retrievalId !== event.retrievalId) throw new RetrievalError('PROTOCOL_MISMATCH', '状态与事件的检索身份不一致。')
@@ -21,6 +22,7 @@ function validateState(state: RetrievalState, event: RetrievalDomainEvent, previ
 /** Replay legacy cumulative checkpoints and v9/v10 incremental state patches. */
 export function foldRetrievalEvents(events: readonly RetrievalDomainEvent[], expectedRetrievalId?: RetrievalId): RetrievalState | undefined {
   let state: RetrievalState | undefined
+  let stateSchemaVersion: number | undefined
   let expectedSequence = 0
   const eventIds = new Set<string>()
   for (const event of events) {
@@ -41,15 +43,18 @@ export function foldRetrievalEvents(events: readonly RetrievalDomainEvent[], exp
         throw new RetrievalError('PROTOCOL_MISMATCH', 'v9 只允许为 revision 0 写完整状态。')
       }
       state = next
+      stateSchemaVersion = event.schemaVersion
     } else if (event.type === 'retrieval/state-patched') {
-      if (![9, 10, 11].includes(event.schemaVersion) || state === undefined) {
+      if (![9, 10, 11, 12].includes(event.schemaVersion) || state === undefined) {
         throw new RetrievalError('PROTOCOL_MISMATCH', '状态增量缺少 v9/v10 基线状态。')
       }
+      if (event.schemaVersion === 12 && stateSchemaVersion !== 12) state = migrateLegacyRetrievalState(state)
       state = applyRetrievalStatePatch(state, event.data.patch)
+      stateSchemaVersion = event.schemaVersion
       if (state.retrievalId !== event.retrievalId) {
         throw new RetrievalError('PROTOCOL_MISMATCH', '状态增量改变了检索身份。')
       }
     }
   }
-  return state
+  return state !== undefined && stateSchemaVersion !== 12 ? migrateLegacyRetrievalState(state) : state
 }

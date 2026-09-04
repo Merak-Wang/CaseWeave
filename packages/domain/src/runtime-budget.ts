@@ -17,13 +17,11 @@ export interface ModelResponseMeasurement {
 }
 
 export function modelRequestBudget(budget: RetrievalBudgetState, input: ModelRequestMeasurement): RetrievalBudgetState {
-  const used = budget.modelStepsUsed ?? budget.roundsUsed
+  const used = budget.modelStepsUsed
   const increment = input.accepted ? 1 : 0
   return {
     ...budget,
-    roundsUsed: used + increment,
     modelStepsUsed: used + increment,
-    latencyMs: Math.max(budget.latencyMs, input.wallClockElapsedMs),
     wallClockElapsedMs: Math.max(budget.wallClockElapsedMs ?? 0, input.wallClockElapsedMs),
     serializationBytes: (budget.serializationBytes ?? 0) + (input.accepted ? input.serializationBytes : 0),
     totalInputTokens: (budget.totalInputTokens ?? 0) + (input.accepted ? input.estimatedInputTokens : 0),
@@ -33,7 +31,6 @@ export function modelRequestBudget(budget: RetrievalBudgetState, input: ModelReq
 export function modelResponseBudget(budget: RetrievalBudgetState, input: ModelResponseMeasurement): RetrievalBudgetState {
   return {
     ...budget,
-    latencyMs: Math.max(budget.latencyMs, input.wallClockElapsedMs),
     wallClockElapsedMs: Math.max(budget.wallClockElapsedMs ?? 0, input.wallClockElapsedMs),
     modelLatencyMs: (budget.modelLatencyMs ?? 0) + input.modelLatencyMs,
     totalOutputTokens: (budget.totalOutputTokens ?? 0) + input.outputTokens,

@@ -14,6 +14,10 @@
       "types": "./lib/protocol.d.ts",
       "default": "./lib/protocol.js"
     },
+    "./presentation": {
+      "types": "./lib/presentation.d.ts",
+      "default": "./lib/presentation.js"
+    },
     "./package.json": "./package.json"
   },
   "files": ["lib", "README.md"],
@@ -22,7 +26,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@retrieval-agent/contracts": "workspace:*"
+    "@retrieval-agent/contracts": "workspace:*",
+    "@retrieval-agent/ticket-collection": "workspace:*"
   },
   "publishConfig": { "access": "public" },
   "license": "MIT"

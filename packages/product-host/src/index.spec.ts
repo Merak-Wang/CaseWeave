@@ -9,7 +9,7 @@ import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { InMemoryDetailReadAuditSink, InMemoryExportAuditSink } from '@retrieval-agent/product-api'
 import { RetrievalId } from '@retrieval-agent/contracts'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   continueRetrievalForAgent,
   exportCandidatesForAgent,
@@ -17,13 +17,20 @@ import {
   parseExportCandidatesParams,
   parseReadTicketDetailParams,
   readTicketDetailsForAgent,
+  parseReadRetrievalParams,
+  readRetrievalForAgent,
 } from './index.js'
 
 const ISOLATED_SERVICES_FIXTURE = `
 const candidateRef = 'candidate-isolated-1'
 const state = {
   retrievalId: 'retrieval-isolated-1',
+  revision: 1,
+  termination: 'active',
+  accessValidation: 'current',
   phase: 'assessed',
+  task: { target: 'ranked_cases', countPolicy: 'adaptive' },
+  gaps: [],
   query: { original: '隔离服务导出' },
   snapshot: {
     snapshotId: 'snapshot-isolated-1', shortId: 'snap-isolated',
@@ -43,6 +50,7 @@ const state = {
     matchFragments: [],
   }],
   candidateHistory: [],
+  selectedCandidateRefs: [], excludedCandidateRefs: [],
   promotedEvidence: [],
   lastPage: { completeness: 'bounded' },
 }
@@ -56,6 +64,7 @@ const principal = {
 }
 const retrievalAgent = {
   currentOrUndefined: () => state,
+  authorizePresentation: async () => state,
   continueRanking: async () => ({
     ...state,
     candidates: [...state.candidates, { ...state.candidates[0], ref: 'candidate-isolated-2', rank: 2 }],
@@ -205,7 +214,7 @@ describe('DSH product Host adapter', () => {
     }
   })
 
-  it('reads detail through the isolated Provider and records only an audit receipt', async () => {
+  it('reads detail through the isolated Provider and hands its receipt and evidence to authoritative state', async () => {
     const harness = await isolatedPresetHarness()
     try {
       const params = parseReadTicketDetailParams({
@@ -215,6 +224,7 @@ describe('DSH product Host adapter', () => {
         fields: ['problemDescription'],
       })
       const audit = new InMemoryDetailReadAuditSink()
+      const record = vi.spyOn(harness.ctx.agentPresets.serviceFor(harness.agent, 'retrievalAgent')!, 'recordDetailRead')
       const response = await readTicketDetailsForAgent(harness.ctx, harness.agent, params, audit)
 
       expect(response.details).toHaveLength(1)
@@ -227,6 +237,43 @@ describe('DSH product Host adapter', () => {
         fields: ['problemDescription'],
       })
       expect(audit.records).toHaveLength(1)
+      expect(record).toHaveBeenCalledWith(harness.agent, response.receipt, expect.objectContaining({ details: response.details }))
+    } finally {
+      await harness.ctx.fiber.dispose()
+      await rm(harness.root, { recursive: true, force: true })
+    }
+  })
+
+  it('requires fresh presentation authorization through the isolated live service and propagates revocation', async () => {
+    const harness = await isolatedPresetHarness()
+    try {
+      const params = parseReadRetrievalParams({ sessionId: 'session-isolated-1', retrievalId: 'retrieval-isolated-1' })
+      const service = harness.ctx.agentPresets.serviceFor(harness.agent, 'retrievalAgent')!
+      const authorize = vi.spyOn(service, 'authorizePresentation')
+      const response = await readRetrievalForAgent(harness.ctx, harness.agent, params)
+      expect(response.node.candidates[0]?.displayId).toBe('TKT-ISO-1')
+      expect(authorize).toHaveBeenCalledWith(harness.agent, params.retrievalId, undefined)
+      authorize.mockRejectedValueOnce(new Error('当前身份已被撤销'))
+      await expect(readRetrievalForAgent(harness.ctx, harness.agent, params)).rejects.toThrow('当前身份已被撤销')
+      expect(() => parseReadRetrievalParams({ ...params, principal: { subjectId: 'forged' } })).toThrow(/未知字段/u)
+    } finally {
+      await harness.ctx.fiber.dispose()
+      await rm(harness.root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not return retained historical content when authorization could not complete', async () => {
+    const harness = await isolatedPresetHarness()
+    try {
+      const params = parseReadRetrievalParams({ sessionId: 'session-isolated-1', retrievalId: 'retrieval-isolated-1' })
+      const service = harness.ctx.agentPresets.serviceFor(harness.agent, 'retrievalAgent')!
+      const state = service.currentOrUndefined(harness.agent)!
+      vi.spyOn(service, 'authorizePresentation').mockResolvedValueOnce({
+        ...state, accessValidation: 'required', termination: 'backend_error', phase: 'stopped',
+      })
+      await expect(readRetrievalForAgent(harness.ctx, harness.agent, params)).rejects.toMatchObject({
+        code: 'PROVIDER_UNAVAILABLE', publicMessage: expect.stringContaining('重新授权'),
+      })
     } finally {
       await harness.ctx.fiber.dispose()
       await rm(harness.root, { recursive: true, force: true })

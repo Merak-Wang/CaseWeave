@@ -27,8 +27,7 @@
   "dependencies": {
     "@retrieval-agent/contracts": "workspace:*",
     "@retrieval-agent/product-api": "workspace:*",
-    "@retrieval-agent/retrieval-replay": "workspace:*",
-    "@retrieval-agent/ticket-collection": "workspace:*"
+    "@retrieval-agent/retrieval-replay": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",

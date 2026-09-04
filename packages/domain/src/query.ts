@@ -3,6 +3,7 @@ import {
   assertTicketFilter,
   assertTicketFilterField,
   type TicketFilter,
+  type RetrievalState,
   type TicketQueryChange,
   type TicketQueryDelta,
   type TicketRetrievalSpec,
@@ -101,5 +102,22 @@ function applyQueryChange(spec: TicketRetrievalSpec, delta: TicketQueryChange): 
     }
     default:
       return delta satisfies never
+  }
+}
+
+/** Retrieval reformulation may refine a user constraint, never remove or weaken it. */
+export function requireUserConstraints(state: RetrievalState, next: TicketRetrievalSpec): void {
+  const required = state.query.contract?.userRequirements?.filter(requirement => requirement.status === 'compiled')
+    .flatMap(requirement => requirement.filters) ?? state.query.confirmedConstraints
+  for (const filter of required) {
+    const preserved = next.filters.some(candidate => {
+      if (candidate.field !== filter.field || candidate.op !== filter.op) return false
+      if (candidate.value === filter.value) return true
+      if (filter.op !== 'gte' && filter.op !== 'lte') return false
+      const previousValue = Date.parse(filter.value); const nextValue = Date.parse(candidate.value)
+      if (!Number.isFinite(previousValue) || !Number.isFinite(nextValue)) return false
+      return filter.op === 'gte' ? nextValue >= previousValue : nextValue <= previousValue
+    })
+    if (!preserved) throw new RetrievalError('INVALID_REQUEST', `查询修改移除或放宽了用户明确要求：${filter.field} ${filter.op} ${filter.value}。请先取得用户修订。`)
   }
 }

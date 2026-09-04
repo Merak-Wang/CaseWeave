@@ -3,12 +3,14 @@ import {
   RetrievalId,
   RetrievalStateId,
   TicketCandidateRef,
+  TicketEvidenceId,
   TicketSnapshotId,
   type RetrievalState,
   type TicketRetrievalProvider,
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
 import { CandidateExportService, InMemoryExportAuditSink } from './service.js'
+import { CandidateDetailService, InMemoryDetailReadAuditSink } from './detail.js'
 
 const CANDIDATE_REF = TicketCandidateRef('cand-export-1')
 const SNAPSHOT_ID = TicketSnapshotId('snapshot-export-1')
@@ -41,7 +43,6 @@ function retrievalState(): RetrievalState {
       pagination: true,
       evidencePromotion: true,
       detailRead: true,
-      l3DetailsRead: false,
       exportRead: true,
       keywordSearch: true,
       denseSearch: false,
@@ -134,7 +135,7 @@ function retrievalState(): RetrievalState {
     promotedEvidence: [],
     gaps: [],
     allowedActions: [],
-    budget: { maxRounds: 2, maxSearches: 1, maxPromotions: 1, maxEvidenceTokens: 50, maxLatencyMs: 1000, roundsUsed: 1, searchesUsed: 1, promotionsUsed: 0, evidenceTokensUsed: 0, latencyMs: 1 },
+    budget: { maxRounds: 2, maxSearches: 1, maxLatencyMs: 1000, modelStepsUsed: 1, searchesUsed: 1, wallClockElapsedMs: 1 },
     progress: { newCandidateRefs: [CANDIDATE_REF], rankOverlap: 0, newDecisiveEvidence: false, resolvedGaps: ['coverage'], noProgressStreak: 0 },
     termination: 'active',
     provenance: { rulesVersion: 'rules-v1', promptVersion: 'prompt-v1', contextPolicyVersion: 'context-v1', sourceEventIds: [] },
@@ -176,6 +177,30 @@ function provider(options: { readonly reject?: boolean; readonly snapshotValid?:
 }
 
 describe('CandidateExportService', () => {
+  it('keeps an unjudged valid candidate exportable after a bounded stop with its evidence identity and reader', async () => {
+    const current = retrievalState()
+    const state: RetrievalState = {
+      ...current,
+      phase: 'stopped',
+      termination: 'budget_exhausted',
+      promotedEvidence: [{
+        evidenceId: TicketEvidenceId('evidence-user-detail'), candidateRef: CANDIDATE_REF,
+        displayId: 'INC-1', sourceVersion: 'source-v1', contentHash: 'hash-v1',
+        field: 'problemDescription', text: '用户点开查看的问题描述', start: 0, end: 12,
+        estimatedTokens: 8, trust: 'untrusted_ticket_evidence', truncated: false,
+        evidenceLevel: 'L2', readers: ['user'],
+      }],
+    }
+    const result = await new CandidateExportService(provider(), new InMemoryExportAuditSink())
+      .exportCsv(PRINCIPAL, state)
+    expect(result.receipt.rowCount).toBe(1)
+    expect(result.content).toContain('judgment')
+    expect(result.content).toContain('undetermined')
+    expect(result.content).toContain('evidence-user-detail')
+    expect(result.content).toContain('user')
+    expect(result.content).not.toContain('model')
+  })
+
   it('reauthorizes every candidate, emits a safe CSV, and persists an audit receipt', async () => {
     const source = provider()
     const audit = new InMemoryExportAuditSink()
@@ -204,5 +229,28 @@ describe('CandidateExportService', () => {
       .rejects.toMatchObject({ code: 'UNAUTHORIZED' })
     await expect(new CandidateExportService(provider(), new InMemoryExportAuditSink()).exportCsv(PRINCIPAL, state, [TicketCandidateRef('forged')]))
       .rejects.toMatchObject({ code: 'CANDIDATE_NOT_FOUND' })
+  })
+})
+
+describe('CandidateDetailService', () => {
+  it.each(['snapshot', 'candidate', 'raw-field'] as const)('rejects a Provider response outside the authorized %s scope', async mismatch => {
+    const current = retrievalState()
+    const state: RetrievalState = { ...current, snapshot: { ...current.snapshot!, fieldCatalog: [
+      { key: 'resolution', label: '处理结果', accessLevel: 'L2', valueKind: 'text', filterOperators: [], sensitivity: 'source_controlled' },
+    ] } }
+    const source = provider()
+    source.readDetails.mockResolvedValueOnce({
+      snapshotId: mismatch === 'snapshot' ? TicketSnapshotId('another-snapshot') : SNAPSHOT_ID,
+      details: [{
+        candidateRef: mismatch === 'candidate' ? TicketCandidateRef('another-candidate') : CANDIDATE_REF,
+        displayId: 'INC-1', sourceVersion: 'source-v1', title: '登录问题', summary: '工单摘要', l0: {},
+        fields: mismatch === 'raw-field' ? { 'source.raw': ['不允许的完整原始载荷'] } : { resolution: ['重新同步后恢复'] },
+        unavailableFields: [],
+      }], rejectedCandidateRefs: [], warnings: [],
+    })
+    const audit = new InMemoryDetailReadAuditSink()
+    await expect(new CandidateDetailService(source, audit).readDetails(PRINCIPAL, state, [CANDIDATE_REF], ['resolution']))
+      .rejects.toMatchObject({ code: 'PROTOCOL_MISMATCH' })
+    expect(audit.records).toEqual([])
   })
 })

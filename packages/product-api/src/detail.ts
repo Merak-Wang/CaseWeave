@@ -93,6 +93,19 @@ export class CandidateDetailService {
     if (result.rejectedCandidateRefs.length > 0 || result.details.length !== candidates.length) {
       throw new RetrievalError('UNAUTHORIZED', '工单详情重新授权失败，请重新检索。')
     }
+    const returnedRefs = new Set(result.details.map(detail => detail.candidateRef))
+    if (result.snapshotId !== state.snapshot.snapshotId || returnedRefs.size !== candidates.length
+      || candidates.some(candidate => !returnedRefs.has(candidate.ref))) {
+      throw new RetrievalError('PROTOCOL_MISMATCH', 'Provider 返回了不同快照或候选的详情。')
+    }
+    for (const detail of result.details) {
+      const candidate = candidates.find(item => item.ref === detail.candidateRef)!
+      if (detail.displayId !== candidate.displayId || detail.sourceVersion !== candidate.sourceVersion
+        || Object.keys(detail.fields).some(field => !selectedFields.includes(field))
+        || detail.unavailableFields.some(field => !selectedFields.includes(field))) {
+        throw new RetrievalError('PROTOCOL_MISMATCH', 'Provider 返回的工单身份、来源版本或详情字段超出本次授权请求。')
+      }
+    }
     const readAt = this.#now().toISOString()
     const readId = this.#id()
     const auditId = this.#id()

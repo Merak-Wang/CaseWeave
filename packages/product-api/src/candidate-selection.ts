@@ -7,17 +7,18 @@ import {
 
 /**
  * Resolve untrusted browser references against the current visible allowlist.
- * Once a retrieval stops, only the frozen selection remains readable/exportable.
+ * Current valid unjudged candidates remain readable after stopping; history and
+ * excluded candidates never broaden the visible allowlist.
  */
 export function hostAuthorizedCandidates(
   state: RetrievalState,
   refs: readonly TicketCandidateRef[],
 ): TicketCandidate[] {
-  const frozenRefs = state.frozenEvidence?.candidates.map(candidate => candidate.ref)
-  const allowedRefs = new Set(state.phase === 'stopped' ? frozenRefs ?? [] : state.candidates.map(candidate => candidate.ref))
+  const inaccessible = ['permission_blocked', 'snapshot_invalid'].includes(state.termination)
+  const excluded = new Set(state.excludedCandidateRefs)
   const candidates = new Map(
-    [...state.candidateHistory, ...state.candidates]
-      .filter(candidate => allowedRefs.has(candidate.ref))
+    (inaccessible ? [] : state.candidates)
+      .filter(candidate => !excluded.has(candidate.ref))
       .map(candidate => [candidate.ref, candidate]),
   )
   const unique = [...new Set(refs)]

@@ -2,12 +2,10 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type {
   DetailReadRequest,
   EvidenceReadRequest,
-  L3DetailsReadRequest,
   PrincipalResolutionRequest,
   ProviderCallOptions,
   TicketDetailResult,
   TicketEvidenceResult,
-  TicketL3DetailsResult,
   TicketProviderStatus,
   TicketRetrievalProvider,
   TicketRetrievalRequest,
@@ -41,7 +39,6 @@ export abstract class TicketRetrievalProviderService extends Service implements 
   abstract search(principal: TrustedPrincipalContext, snapshotId: TicketSnapshotId, spec: TicketRetrievalSpec, options: TicketSearchOptions): Promise<TicketSearchPage>
   abstract readEvidence(principal: TrustedPrincipalContext, request: EvidenceReadRequest, options?: ProviderCallOptions): Promise<TicketEvidenceResult>
   abstract readDetails(principal: TrustedPrincipalContext, request: DetailReadRequest, options?: ProviderCallOptions): Promise<TicketDetailResult>
-  abstract readL3Details(principal: TrustedPrincipalContext, request: L3DetailsReadRequest, options?: ProviderCallOptions): Promise<TicketL3DetailsResult>
   abstract status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus>
 }
 

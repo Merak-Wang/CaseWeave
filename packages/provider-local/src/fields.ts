@@ -6,6 +6,7 @@ import type {
 import { estimateTokens } from './text.js'
 
 export const LEGACY_FIELD_CATALOG: readonly TicketFieldDescriptor[] = [
+  { key: 'displayId', label: '工单编号', valueKind: 'keyword', accessLevel: 'L0', filterOperators: ['eq', 'neq'], sensitivity: 'non_sensitive' },
   ...['type', 'category', 'priority', 'status', 'language', 'region', 'product', 'component'].map(key => ({
     key, label: key, valueKind: 'keyword' as const, accessLevel: 'L0' as const,
     filterOperators: ['eq', 'neq'] as const, sensitivity: 'non_sensitive' as const,
@@ -19,7 +20,7 @@ export const LEGACY_FIELD_CATALOG: readonly TicketFieldDescriptor[] = [
     key, label: key, valueKind: 'text' as const, accessLevel: 'L2' as const,
     filterOperators: [] as const, sensitivity: 'source_controlled' as const,
   })),
-  { key: 'summary', label: '摘要', valueKind: 'text', accessLevel: 'L2', filterOperators: [], sensitivity: 'source_controlled' },
+  { key: 'summary', label: '摘要', valueKind: 'text', accessLevel: 'L1', filterOperators: [], sensitivity: 'source_controlled' },
 ]
 
 export function evidenceFieldValues(record: NormalizedTicketRecord, field: TicketEvidenceField): readonly string[] {

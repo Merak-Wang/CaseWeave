@@ -4,7 +4,6 @@ import {
   type CandidateExportReceipt,
   type RetrievalState,
   type TicketCandidateRef,
-  type TicketEvidenceField,
   type TicketRetrievalProvider,
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
@@ -51,11 +50,12 @@ export interface CandidateExportServiceConfig {
 const HEADERS = [
   'query', 'exported_at', 'snapshot', 'completeness', 'rank', 'ticket', 'title', 'summary',
   'type', 'category', 'product', 'component', 'region', 'status', 'priority', 'created_at',
-  'source_version', 'evidence_level',
+  'source_version', 'evidence_level', 'judgment', 'judgment_reason', 'evidence_ids', 'evidence_readers',
 ] as const
 
 function readEvidenceLevel(state: RetrievalState, ref: TicketCandidateRef): 'L1' | 'L2' {
-  return state.promotedEvidence.some(evidence => evidence.candidateRef === ref) ? 'L2' : 'L1'
+  return state.promotedEvidence.some(evidence => evidence.candidateRef === ref
+    && (evidence.evidenceLevel ?? (['title', 'summary'].includes(evidence.field) ? 'L1' : 'L2')) === 'L2') ? 'L2' : 'L1'
 }
 
 /** Trusted-host application service; every detail/export operation re-enters the Provider. */
@@ -83,8 +83,8 @@ export class CandidateExportService {
     signal?: AbortSignal,
   ): Promise<CandidateExport> {
     if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '检索快照不存在。')
-    const selectedRefs = refs ?? state.frozenEvidence?.candidates.map(candidate => candidate.ref)
-      ?? state.candidates.map(candidate => candidate.ref)
+    const excluded = new Set(state.excludedCandidateRefs)
+    const selectedRefs = refs ?? state.candidates.filter(candidate => !excluded.has(candidate.ref)).map(candidate => candidate.ref)
     const candidates = hostAuthorizedCandidates(state, selectedRefs)
     if (candidates.length > this.#maxRows) throw new RetrievalError('EXPORT_LIMIT_EXCEEDED', '候选数量超过单次导出限制。')
     const status = await this.#provider.status(principal, state.snapshot.snapshotId)
@@ -103,6 +103,12 @@ export class CandidateExportService {
     const rows = candidates.map(candidate => {
       const detail = detailByRef.get(candidate.ref)
       if (detail === undefined) throw new RetrievalError('UNAUTHORIZED', '候选在导出重新授权时不可用。')
+      if (detail.sourceVersion !== candidate.sourceVersion) {
+        throw new RetrievalError('SNAPSHOT_INVALID', '工单来源版本已变化，请重新检索后导出。')
+      }
+      const evidence = state.promotedEvidence.filter(item => item.candidateRef === candidate.ref
+        && item.sourceVersion === candidate.sourceVersion && item.contentHash === candidate.contentHash)
+      const judgment = state.judgments?.find(item => item.candidateRef === candidate.ref)
       return [
         state.query.original,
         generatedAt,
@@ -122,6 +128,10 @@ export class CandidateExportService {
         detail.l0.createdAt ?? '',
         detail.sourceVersion,
         readEvidenceLevel(state, candidate.ref),
+        state.selectedCandidateRefs.includes(candidate.ref) ? 'confirmed' : 'undetermined',
+        judgment?.reason ?? '',
+        JSON.stringify(evidence.map(item => item.evidenceId)),
+        JSON.stringify(Object.fromEntries(evidence.map(item => [item.evidenceId, item.readers ?? ['unknown']]))),
       ]
     })
     const content = encodeCsv(HEADERS, rows)
@@ -161,16 +171,4 @@ export class CandidateExportService {
       receipt,
     }
   }
-}
-
-/** Build detail rows only from evidence already present in state; performs no Provider call. */
-export function alreadyReadEvidence(state: RetrievalState, ref: TicketCandidateRef): Readonly<Partial<Record<TicketEvidenceField, readonly string[]>>> {
-  const result: Partial<Record<TicketEvidenceField, string[]>> = {}
-  for (const evidence of state.promotedEvidence) {
-    if (evidence.candidateRef !== ref) continue
-    const values = result[evidence.field] ?? []
-    values.push(evidence.text)
-    result[evidence.field] = values
-  }
-  return result
 }

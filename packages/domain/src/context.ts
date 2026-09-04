@@ -1,4 +1,5 @@
 import {
+  RetrievalError,
   type EvidenceContextSelection,
   type RetrievalState,
   type TicketCandidate,
@@ -47,13 +48,30 @@ export class EvidenceContextPolicy {
   readonly #estimate: (text: string) => number
 
   constructor(config: EvidenceContextPolicyConfig = {}) {
-    this.version = config.version ?? 'evidence-context-v3'
+    this.version = config.version ?? 'evidence-context-v4'
     this.#maxCandidates = config.maxCandidates ?? 8
     this.#maxEvidenceSegments = config.maxEvidenceSegments ?? 12
     this.#estimate = config.estimateTokens ?? defaultEstimate
   }
 
+  #orderedEvidence(state: RetrievalState): readonly TicketEvidenceSegment[] {
+    const active = new Set(state.candidates.map(candidate => candidate.ref))
+    const latest = new Set(state.progress.newEvidenceIds ?? [])
+    const offset = state.candidateWindowOffset ?? 0
+    const window = new Set(state.candidates.slice(offset, offset + this.#maxCandidates).map(candidate => candidate.ref))
+    const priority = (item: TicketEvidenceSegment): number => latest.has(item.evidenceId) ? 0 : window.has(item.candidateRef) ? 1 : 2
+    // Visibility writes must not reorder the selected window between selection and delivery.
+    return state.promotedEvidence.filter(item => active.has(item.candidateRef))
+      .sort((left, right) => priority(left) - priority(right))
+  }
+
+  nextEvidenceWindowOffset(state: RetrievalState): number {
+    const visible = new Set(state.modelVisibleEvidenceIds ?? [])
+    return this.#orderedEvidence(state).findIndex(evidence => !visible.has(evidence.evidenceId))
+  }
+
   select(state: RetrievalState, tokenBudget?: number): EvidenceContextSelection {
+    if (state.accessValidation === 'required') throw new RetrievalError('UNAUTHORIZED', '历史证据尚未重新授权，不能进入模型上下文。')
     if (tokenBudget !== undefined && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1)) throw new TypeError('tokenBudget must be a positive integer when configured')
     const rendered: string[] = []
     const includedCandidateRefs: TicketCandidate['ref'][] = []
@@ -61,12 +79,21 @@ export class EvidenceContextPolicy {
     const excluded: EvidenceContextSelection['excluded'][number][] = []
     let used = 0
     const aliases = new Map(state.candidateHistory.map((candidate, index) => [candidate.ref, `c${index + 1}`]))
-    const queryContract = state.query.contract ?? {
-        original: state.query.original,
-        normalized: state.query.spec.normalizedQuery,
-        task: state.task.target,
-        ...(state.task.requestedCount === undefined ? {} : { resultLimit: state.task.requestedCount }),
-      }
+    // NLP token/parse traces remain durable evidence of compilation, not repeated model instructions.
+    const queryContract = {
+      original: state.query.original, normalized: state.query.spec.normalizedQuery,
+      task: state.task.target, countPolicy: state.task.countPolicy, resultLimit: state.task.requestedCount,
+      keyword: state.query.spec.keywordQuery, semanticQuery: state.query.spec.semanticQuery,
+      confirmedConstraints: state.query.confirmedConstraints, unresolvedConstraints: state.query.unresolvedConstraints,
+      userRequirements: state.query.contract?.userRequirements,
+    }
+    const evidenceAliases = new Map(state.promotedEvidence.map((evidence, index) => [evidence.evidenceId as string, `e${index + 1}`]))
+    const orderedEvidence = this.#orderedEvidence(state)
+    const evidenceWindowOffset = state.evidenceWindowOffset ?? 0
+    const evidenceWindow = { offset: evidenceWindowOffset, maximumSegments: this.#maxEvidenceSegments,
+      availableSegments: orderedEvidence.length, moreUnseenEvidence: this.nextEvidenceWindowOffset(state) >= 0,
+      nextWindowAction: 'inspect next_window', priority: 'latest_inspection_then_current_candidates' }
+    const alias = (ref: string): string => aliases.get(ref as TicketCandidate['ref']) ?? evidenceAliases.get(ref) ?? ref
     const pageBoundary = state.lastPage?.boundary
     const resultPagesExhausted = pageBoundary?.resultPagesExhausted
       ?? (state.lastPage?.completeness === 'exhaustive' && state.lastPage.nextCursor === undefined)
@@ -83,16 +110,23 @@ export class EvidenceContextPolicy {
         valueKind: field.valueKind,
         operators: field.filterOperators,
       })) ?? []
-    const callableToolsNow = [ ...(state.allowedActions.some(action => action.kind === 'assess') ? ['ticket_assess_state'] : []),
-      ...(state.allowedActions.some(action => action.kind === 'repair_search') ? ['ticket_bm25_search', 'ticket_rag_search'] : []),
-      ...(state.allowedActions.some(action => action.kind === 'read_l3_details') ? ['ticket_read_details'] : []) ]
+    const callableToolsNow = state.phase === 'stopped' || state.phase === 'awaiting_clarification' ? [] : ['ticket_decide']
     const fullHeader = JSON.stringify({
       knowledgeState: {
         sufficiencyJudgement: {
           requiredEveryRound: true,
-          question: '当前候选的 L1 标题、L2 摘要、已读取的 L3 原始载荷与检索边界是否足以回答用户请求？',
+          question: '当前候选的 L1 标题和摘要、已读取的受控 L2 正文字段与检索边界是否足以回答用户请求？',
         },
+        stateId: state.stateId,
         queryContract,
+        userFeedback: state.userFeedback?.map(item => item.text),
+        clarification: state.clarification === undefined ? undefined : {
+          question: state.clarification.question, answer: state.clarification.answer,
+          candidateAliases: state.clarification.candidateRefs.map(alias), options: state.clarification.options,
+        },
+        judgments: state.judgments?.map(judgment => ({ candidateAlias: alias(judgment.candidateRef),
+          verdict: judgment.verdict, evidenceAliases: judgment.evidenceRefs.map(alias), reason: judgment.reason })),
+        candidateWindowOffset: state.candidateWindowOffset ?? 0,
         retrievalObservation: {
           stage: state.lastPage?.trace.stage,
           channels: state.lastPage?.trace.channels.map(channel => ({
@@ -116,14 +150,15 @@ export class EvidenceContextPolicy {
         },
         evidenceState: {
           activeCandidateCount: state.candidates.length,
+          evidenceWindow,
           gaps: state.gaps.map(gap => ({
             kind: gap.kind,
             status: gap.status,
             evaluator: gap.evaluator,
             description: gap.description,
           })),
-          l3DetailFields: state.snapshot?.fieldCatalog
-            .filter(field => field.accessLevel === 'L3' && field.valueKind === 'raw_json')
+          inspectFields: state.snapshot?.fieldCatalog
+            .filter(field => field.accessLevel === 'L2' && field.valueKind !== 'raw_json')
             .map(field => field.key) ?? [],
         },
         boundaryState: {
@@ -134,12 +169,13 @@ export class EvidenceContextPolicy {
           resultPagesExhausted,
           semanticRecallKnown: pageBoundary?.semanticRecallKnown ?? false,
           nextPageAvailable: state.lastPage?.nextCursor !== undefined,
-          budget: state.budget,
+          remainingModelSteps: Math.max(0, state.budget.maxRounds - state.budget.modelStepsUsed),
+          remainingExecutionMs: Math.max(0, state.budget.maxLatencyMs - state.budget.wallClockElapsedMs),
         },
         actionState: {
           callableToolsNow,
           filterCapabilities,
-          clarificationChannel: 'natural_language',
+          clarificationChannel: 'ticket_decide_then_user_message',
         },
       },
       snapshot: state.snapshot === undefined ? undefined : {
@@ -150,11 +186,10 @@ export class EvidenceContextPolicy {
     })
     const compactHeader = JSON.stringify({
       knowledgeState: {
-        query: { original: state.query.original, normalized: state.query.spec.normalizedQuery,
-          task: state.task.target, resultPolicy: state.query.contract?.resultPolicy },
+        stateId: state.stateId, query: queryContract,
         retrievalObservation: { stage: state.lastPage?.trace.stage,
           activeCandidateCount: state.candidates.length, cumulativeCandidateCount: state.candidateHistory.length },
-        evidenceState: { gaps: state.gaps.map(gap => ({
+        evidenceState: { evidenceWindow, gaps: state.gaps.map(gap => ({
           kind: gap.kind, status: gap.status, description: gap.description,
         })) },
         boundaryState: {
@@ -172,8 +207,9 @@ export class EvidenceContextPolicy {
         : this.#estimate(minimalHeader) <= tokenBudget ? minimalHeader : '{}'
     used += this.#estimate(header)
     rendered.push(`<ticket_knowledge_context>${header}</ticket_knowledge_context>`)
+    const offset = state.candidateWindowOffset ?? 0
     for (const [index, candidate] of state.candidates.entries()) {
-      if (index >= this.#maxCandidates) {
+      if (index < offset || index >= offset + this.#maxCandidates) {
         excluded.push({ ref: candidate.ref, reason: 'not_selected' })
         continue
       }
@@ -187,13 +223,17 @@ export class EvidenceContextPolicy {
       includedCandidateRefs.push(candidate.ref)
       rendered.push(`<untrusted_ticket_candidate>${text}</untrusted_ticket_candidate>`)
     }
-    for (const [index, evidence] of state.promotedEvidence.entries()) {
-      if (index >= this.#maxEvidenceSegments) {
+    const activeRefs = new Set(state.candidates.map(candidate => candidate.ref))
+    for (const evidence of state.promotedEvidence) {
+      if (!activeRefs.has(evidence.candidateRef)) excluded.push({ ref: evidence.evidenceId, reason: 'superseded' })
+    }
+    for (const [index, evidence] of orderedEvidence.entries()) {
+      if (index < evidenceWindowOffset || index >= evidenceWindowOffset + this.#maxEvidenceSegments) {
         excluded.push({ ref: evidence.evidenceId, reason: 'not_selected' })
         continue
       }
       const candidateAlias = aliases.get(evidence.candidateRef) ?? 'unknown'
-      const text = evidenceText(evidence, candidateAlias, `e${index + 1}`)
+      const text = evidenceText(evidence, candidateAlias, evidenceAliases.get(evidence.evidenceId)!)
       const cost = this.#estimate(text)
       if (tokenBudget !== undefined && used + cost > tokenBudget) {
         excluded.push({ ref: evidence.evidenceId, reason: 'token_budget' })

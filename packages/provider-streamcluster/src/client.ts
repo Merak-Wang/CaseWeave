@@ -1,16 +1,13 @@
 import {
   RetrievalError,
-  MAX_L3_DETAILS_PER_READ,
   assertTicketRetrievalRequest,
   assertTrustedPrincipal,
   type DetailReadRequest,
   type EvidenceReadRequest,
-  type L3DetailsReadRequest,
   type ProviderCallOptions,
   type RetrievalErrorCode,
   type TicketDetailResult,
   type TicketEvidenceResult,
-  type TicketL3DetailsResult,
   type TicketProviderStatus,
   type TicketRetrievalProvider,
   type TicketRetrievalRequest,
@@ -31,8 +28,6 @@ import {
   type ReadProviderStatusResponse,
   type ReadTicketDetailsParams,
   type ReadTicketDetailsResponse,
-  type ReadTicketL3DetailsParams,
-  type ReadTicketL3DetailsResponse,
   type SearchTicketsParams,
   type SearchTicketsResponse,
   type StreamClusterCapabilitiesResponse,
@@ -58,7 +53,7 @@ export interface StreamClusterProviderConfig {
   readonly authorization?: string
   readonly timeoutMs?: number
   readonly maxResponseBytes?: number
-  readonly maxRequestedCount?: number
+  readonly maxPageSize?: number
   readonly fetch?: typeof fetch
 }
 
@@ -67,7 +62,7 @@ interface ResolvedConfig {
   readonly authorization?: string
   readonly timeoutMs: number
   readonly maxResponseBytes: number
-  readonly maxRequestedCount: number
+  readonly maxPageSize: number
   readonly fetch: typeof fetch
 }
 
@@ -101,30 +96,6 @@ function assertDetails(value: unknown, snapshotId: TicketSnapshotId): TicketDeta
   return result
 }
 
-function assertL3Details(value: unknown, request: L3DetailsReadRequest): TicketL3DetailsResult {
-  const result = object(value, 'L3 details')
-  if (!Array.isArray(result.requestedCandidateRefs) || !Array.isArray(result.details)
-    || result.requestedCandidateRefs.length !== request.candidateRefs.length
-    || result.details.length !== request.candidateRefs.length
-    || !Array.isArray(result.warnings) || result.warnings.some(item => typeof item !== 'string')) {
-    throw new RetrievalError('PROTOCOL_MISMATCH', 'StreamCluster 批量 L3 原始详情响应无效。')
-  }
-  result.details.forEach((value, index) => {
-    const detail = object(value, 'L3 detail value')
-    const source = object(detail.source, 'L3 detail source')
-    object(detail.rawPayload, 'L3 raw payload')
-    if (result.snapshotId !== request.snapshotId
-      || (result.requestedCandidateRefs as unknown[])[index] !== request.candidateRefs[index]
-      || detail.candidateRef !== request.candidateRefs[index]
-      || typeof detail.displayId !== 'string' || typeof detail.sourceVersion !== 'string'
-      || typeof detail.contentHash !== 'string' || detail.trust !== 'untrusted_ticket_evidence'
-      || !['datasetId', 'datasetVersion', 'schemaVersion', 'recordId'].every(key => typeof source[key] === 'string')) {
-      throw new RetrievalError('PROTOCOL_MISMATCH', 'StreamCluster 批量 L3 结果的顺序或身份无效。')
-    }
-  })
-  return result as unknown as TicketL3DetailsResult
-}
-
 function resolveConfig(config: StreamClusterProviderConfig): ResolvedConfig {
   let parsed: URL
   try { parsed = new URL(config.baseUrl) }
@@ -134,12 +105,9 @@ function resolveConfig(config: StreamClusterProviderConfig): ResolvedConfig {
   }
   const timeoutMs = config.timeoutMs ?? 30_000
   const maxResponseBytes = config.maxResponseBytes ?? 2 * 1024 * 1024
-  const maxRequestedCount = config.maxRequestedCount ?? 20
-  for (const [label, value] of Object.entries({ timeoutMs, maxResponseBytes, maxRequestedCount })) {
+  const maxPageSize = config.maxPageSize ?? 100
+  for (const [label, value] of Object.entries({ timeoutMs, maxResponseBytes, maxPageSize })) {
     if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${label} must be a positive safe integer`)
-  }
-  if (maxRequestedCount > 100) {
-    throw new TypeError('StreamCluster requested-count limits are invalid')
   }
   if (config.authorization !== undefined && (/\r|\n/u.test(config.authorization) || config.authorization.trim().length === 0)) {
     throw new TypeError('StreamCluster authorization must be one non-empty header value')
@@ -149,7 +117,7 @@ function resolveConfig(config: StreamClusterProviderConfig): ResolvedConfig {
     ...(config.authorization === undefined ? {} : { authorization: config.authorization }),
     timeoutMs,
     maxResponseBytes,
-    maxRequestedCount,
+    maxPageSize,
     fetch: config.fetch ?? globalThis.fetch,
   }
 }
@@ -169,9 +137,6 @@ export class StreamClusterTicketProvider implements TicketRetrievalProvider {
     assertTicketRetrievalRequest(request)
     const normalizedQuery = (request.retrievalQuery ?? request.query).normalize('NFKC').trim().replace(/\s+/gu, ' ')
     const requestedCount = request.requestedCount
-    if (requestedCount !== undefined && (!Number.isSafeInteger(requestedCount) || requestedCount < 1 || requestedCount > this.#config.maxRequestedCount)) {
-      throw new RetrievalError('INVALID_REQUEST', `候选数量必须在 1 到 ${this.#config.maxRequestedCount} 之间。`)
-    }
     return {
       target: request.target,
       originalQuery: request.query,
@@ -214,6 +179,9 @@ export class StreamClusterTicketProvider implements TicketRetrievalProvider {
 
   async search(principal: TrustedPrincipalContext, snapshotId: TicketSnapshotId, query: TicketRetrievalSpec, options: TicketSearchOptions): Promise<TicketSearchPage> {
     assertTrustedPrincipal(principal)
+    if (!Number.isSafeInteger(options.topK) || options.topK < 1 || options.topK > this.#config.maxPageSize) {
+      throw new RetrievalError('INVALID_REQUEST', `单页候选数量必须在 1 到 ${this.#config.maxPageSize} 之间。`)
+    }
     const capabilities = await this.#ensureHandshake(options)
     const params: SearchTicketsParams = {
       protocolVersion: STREAMCLUSTER_PROTOCOL_VERSION,
@@ -259,24 +227,6 @@ export class StreamClusterTicketProvider implements TicketRetrievalProvider {
     const response = await this.#post<ReadTicketDetailsResponse>('/v1/ticket-retrieval/details', params, options)
     assertProtocol(response, 'details envelope')
     return assertDetails(response.result, request.snapshotId)
-  }
-
-  async readL3Details(principal: TrustedPrincipalContext, request: L3DetailsReadRequest, options?: ProviderCallOptions): Promise<TicketL3DetailsResult> {
-    assertTrustedPrincipal(principal)
-    if (request.candidateRefs.length === 0 || request.candidateRefs.length > MAX_L3_DETAILS_PER_READ
-      || new Set(request.candidateRefs).size !== request.candidateRefs.length) {
-      throw new RetrievalError('INVALID_REQUEST', `L3 批量读取必须包含 1–${MAX_L3_DETAILS_PER_READ} 个不重复候选。`)
-    }
-    await this.#ensureHandshake(options)
-    const params: ReadTicketL3DetailsParams = {
-      protocolVersion: STREAMCLUSTER_PROTOCOL_VERSION,
-      principal,
-      request,
-      ...(options?.traceId === undefined ? {} : { traceId: options.traceId }),
-    }
-    const response = await this.#post<ReadTicketL3DetailsResponse>('/v1/ticket-retrieval/l3-details', params, options)
-    assertProtocol(response, 'L3 details envelope')
-    return assertL3Details(response.result, request)
   }
 
   async status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus> {

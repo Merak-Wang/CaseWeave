@@ -58,8 +58,8 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
     && (request.retrievalQuery.trim().length === 0 || request.retrievalQuery.length > 4_000)) {
     throw new RetrievalError('INVALID_REQUEST', '结构化后的检索文本无效。')
   }
-  if (request.requestedCount !== undefined && (!Number.isSafeInteger(request.requestedCount) || request.requestedCount < 1 || request.requestedCount > 100)) {
-    throw new RetrievalError('INVALID_REQUEST', '候选数量无效。')
+  if (request.requestedCount !== undefined && (!Number.isSafeInteger(request.requestedCount) || request.requestedCount < 1)) {
+    throw new RetrievalError('INVALID_REQUEST', '用户结果数量必须是正安全整数。')
   }
   if (request.mode !== undefined && !['keyword', 'dense', 'hybrid'].includes(request.mode)) {
     throw new RetrievalError('INVALID_REQUEST', '检索模式无效。')
@@ -93,13 +93,13 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
         ? !legacyBoundedResultPolicy
         : legacyBoundedResultPolicy && contract.maxResults === request.requestedCount
           && Number.isSafeInteger(contract.maxResults) && contract.maxResults >= 1 && contract.maxResults <= 100)
-    const currentLimitValid = (contract.schemaVersion === 6 || contract.schemaVersion === 7)
+    const currentLimitValid = contract.schemaVersion >= 6
       && contract.maxResults === undefined
       && (contract.resultLimit === undefined
         ? effectiveCountPolicy !== 'explicit' && request.requestedCount === undefined
         : effectiveCountPolicy === 'explicit' && contract.resultLimit === request.requestedCount
-          && Number.isSafeInteger(contract.resultLimit) && contract.resultLimit >= 1 && contract.resultLimit <= 100)
-    if (![1, 2, 3, 4, 5, 6, 7].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
+          && Number.isSafeInteger(contract.resultLimit) && contract.resultLimit >= 1)
+    if (![1, 2, 3, 4, 5, 6, 7, 8].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
       || contract.normalized !== (request.retrievalQuery ?? request.query).normalize('NFKC').trim().replace(/\s+/gu, ' ')
       || !resultPolicyValid || contract.resultPolicy !== expectedResultPolicy
       || !['telecom_ticket', 'general_ticket'].includes(contract.domain)
@@ -111,6 +111,24 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
     if (JSON.stringify(contract.constraints) !== JSON.stringify(request.filters ?? [])
       || JSON.stringify(contract.ambiguities) !== JSON.stringify(request.ambiguities ?? [])) {
       throw new RetrievalError('INVALID_REQUEST', 'Query Contract 的约束或歧义与检索请求不一致。')
+    }
+    if (contract.schemaVersion >= 8 && !Array.isArray(contract.userRequirements)) {
+      throw new RetrievalError('INVALID_REQUEST', 'Query Contract 缺少用户条件来源。')
+    }
+    for (const requirement of contract.userRequirements ?? []) {
+      if (typeof requirement.text !== 'string' || requirement.text.trim().length === 0
+        || !contract.original.includes(requirement.text) || !['compiled', 'unresolved'].includes(requirement.status)
+        || !Array.isArray(requirement.filters)
+        || (requirement.status === 'compiled' && requirement.filters.length === 0)
+        || (requirement.status === 'unresolved' && (requirement.filters.length !== 0 || !requirement.reason?.trim()))) {
+        throw new RetrievalError('INVALID_REQUEST', '用户条件缺少原文依据、可执行条件或未解决原因。')
+      }
+      for (const filter of requirement.filters) {
+        assertTicketFilter(filter)
+        if (!contract.constraints.some(item => JSON.stringify(item) === JSON.stringify(filter))) {
+          throw new RetrievalError('INVALID_REQUEST', '已编译用户条件未应用到首轮检索。')
+        }
+      }
     }
     for (const entity of contract.entities) {
       if (!['business_object', 'ticket_id', 'topic'].includes(entity.type)
@@ -170,7 +188,7 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
           || triple.object.trim().length === 0 || triple.object.length > 200)
       )
       const spacyInvalid = nlp.schemaVersion === 2 && (
-        ![5, 6, 7].includes(contract.schemaVersion) || nlp.engine !== 'spacy'
+        ![5, 6, 7, 8].includes(contract.schemaVersion) || nlp.engine !== 'spacy'
         || [nlp.engineVersion, nlp.pipeline, nlp.pipelineVersion, nlp.lexiconVersion].some(value => value.trim().length === 0 || value.length > 200)
         || nlp.tokens.some((token, index) => token.surface.trim().length === 0 || token.surface.length > 200
           || !Number.isSafeInteger(token.start) || !Number.isSafeInteger(token.end) || token.start < 0 || token.end <= token.start

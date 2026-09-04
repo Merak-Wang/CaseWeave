@@ -8,7 +8,6 @@
     "schemaVersion",
     "packageScope",
     "forbiddenGenericPackageNames",
-    "maxModuleLines",
     "testConvention",
     "protocolConvention",
     "packages"
@@ -18,7 +17,6 @@
     "schemaVersion": { "const": 1 },
     "packageScope": { "type": "string", "minLength": 1 },
     "forbiddenGenericPackageNames": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-    "maxModuleLines": { "type": "integer", "minimum": 1 },
     "testConvention": {
       "type": "object",
       "additionalProperties": false,
@@ -43,14 +41,13 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["directory", "name", "kind", "capability", "allowedInternalDependencies", "maxSourceLines"],
+        "required": ["directory", "name", "kind", "capability", "allowedInternalDependencies"],
         "properties": {
           "directory": { "type": "string", "minLength": 1 },
           "name": { "type": "string", "minLength": 1 },
           "kind": { "type": "string", "minLength": 1 },
           "capability": { "type": "string", "minLength": 1 },
-          "allowedInternalDependencies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-          "maxSourceLines": { "type": "integer", "minimum": 1 }
+          "allowedInternalDependencies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
         }
       }
     }

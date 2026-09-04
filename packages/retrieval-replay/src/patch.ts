@@ -133,7 +133,9 @@ function applyOperation(root: unknown, operation: RetrievalStatePatchOperation):
 export function applyRetrievalStatePatch(previous: RetrievalState, patch: RetrievalStatePatch): RetrievalState {
   if (patch.fromStateId !== previous.stateId || patch.fromRevision !== previous.revision
     || patch.toRevision !== previous.revision + 1) fail('状态增量与当前 replay revision 不匹配。')
-  const next = structuredClone(previous) as RetrievalState
+  // Session checkpoints are JSON values: two fields may share an in-memory array,
+  // but patching one JSON path must never mutate another path through that alias.
+  const next = JSON.parse(JSON.stringify(previous)) as RetrievalState
   for (const operation of patch.operations) applyOperation(next, operation)
   assertStateEdge(previous, next)
   if (next.stateId !== patch.toStateId || next.revision !== patch.toRevision) {

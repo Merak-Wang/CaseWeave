@@ -8,7 +8,6 @@ import { LocalTicketProvider, parseFixtureJsonl } from '@retrieval-agent/provide
 import { CandidateExportService, InMemoryExportAuditSink } from '@retrieval-agent/product-api'
 import { projectTicketCandidateNode } from '@retrieval-agent/ui-ticket-results'
 import { testHybridRanker } from './support/fake-model-gateway.js'
-import { testRetrievalPolicy } from './support/retrieval-policy.js'
 
 const NOW = new Date('2026-08-27T04:00:00.000Z')
 const LEGACY_REGRESSION_FIXTURE = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'tickets', 'synthetic', 'legacy-bronze-v1.jsonl')
@@ -28,7 +27,7 @@ function ids(prefix: string): () => string {
 }
 
 describe('fixture vertical slice', () => {
-  it('searches summary-bearing candidates, reads L3 details, replays UI, and reauthorizes export', async () => {
+  it('searches summary-bearing candidates, reads controlled body evidence, replays UI, and reauthorizes export', async () => {
     const records = parseFixtureJsonl(await readFile(LEGACY_REGRESSION_FIXTURE, 'utf8'))
     const provider = new LocalTicketProvider(records, {
       now: () => NOW,
@@ -39,11 +38,9 @@ describe('fixture vertical slice', () => {
     const controllerIds = ids('domain')
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: eventIds })
     const controller = new RetrievalController(provider, journal, undefined, {
-      policy: testRetrievalPolicy(),
       now: () => NOW,
       id: controllerIds,
       searchTopK: 10,
-      maxEvidenceTokens: 100,
     })
 
     let state = await controller.start(PRINCIPAL, {
@@ -54,18 +51,22 @@ describe('fixture vertical slice', () => {
     expect(state.candidates[0]?.displayId).toBe('TKT-0029')
 
     const selected = state.candidates[0]!
-    state = await controller.assess(state, {
-      decision: 'accept_current_top_k',
-      evaluator: 'model',
-      selectedCandidateRefs: [selected.ref],
-      excludedCandidateRefs: [],
-      gaps: [{ kind: 'depth', status: 'resolved', evidenceRefs: [selected.ref], evaluator: 'model' }],
-      nextAction: 'accept_current_top_k',
+    state = controller.recordContextSelection(state, controller.projectContext(state))
+    state = await controller.decide(PRINCIPAL, state, { stateId: state.stateId, judgments: [],
+      gaps: [{ kind: 'depth', status: 'open', evidenceRefs: [selected.ref], evaluator: 'model', description: 'Need the documented handling steps.' }],
+      action: { kind: 'inspect', candidateRefs: [selected.ref], fields: ['answer'] },
     })
-    state = controller.freeze(state, [selected.ref])
+    state = controller.recordContextSelection(state, controller.projectContext(state))
+    const evidence = state.promotedEvidence.find(item => item.candidateRef === selected.ref)!
+    expect(evidence).toBeDefined()
+    state = await controller.decide(PRINCIPAL, state, { stateId: state.stateId,
+      judgments: [{ candidateRef: selected.ref, verdict: 'accept', evidenceRefs: [evidence.evidenceId], reason: 'The documented steps resolve the unbinding/sharing issue.' }],
+      gaps: [{ kind: 'depth', status: 'resolved', evidenceRefs: [evidence.evidenceId], evaluator: 'model' }],
+      action: { kind: 'finish', explanation: 'The controlled steps provide a supported resolution case.' },
+    })
     const node = projectTicketCandidateNode(journal.read(state.retrievalId), state.retrievalId)
     expect(node).toMatchObject({ status: 'results', completeness: 'bounded', exportEnabled: true })
-    expect(node.alreadyReadEvidence).toHaveLength(0)
+    expect(node.alreadyReadEvidence.map(item => item.evidenceId)).toContain(evidence.evidenceId)
     expect(node.result).toMatchObject({
       type: 'ticket_collection',
       complete: false,
@@ -74,7 +75,8 @@ describe('fixture vertical slice', () => {
       stoppingReason: 'top_k_accepted',
       tickets: [{ displayId: selected.displayId }],
     })
-    expect(node.candidates.map(candidate => candidate.ref)).toEqual([selected.ref])
+    expect(node.result?.tickets.map(candidate => candidate.ref)).toEqual([selected.ref])
+    expect(node.result?.undeterminedCandidates?.map(candidate => candidate.ref)).toEqual(state.candidates.filter(candidate => candidate.ref !== selected.ref).map(candidate => candidate.ref))
 
     const audit = new InMemoryExportAuditSink()
     const exportIds = ['export-fixture', 'audit-fixture']

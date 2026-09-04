@@ -35,9 +35,6 @@ importers:
       '@retrieval-agent/query-understanding':
         specifier: workspace:*
         version: link:packages/query-understanding
-      '@retrieval-agent/retrieval-policy':
-        specifier: workspace:*
-        version: link:packages/retrieval-policy
       '@retrieval-agent/retrieval-ranking':
         specifier: workspace:*
         version: link:packages/retrieval-ranking
@@ -101,9 +98,6 @@ importers:
       '@retrieval-agent/query-understanding':
         specifier: workspace:*
         version: link:../query-understanding
-      '@retrieval-agent/ticket-collection':
-        specifier: workspace:*
-        version: link:../ticket-collection
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.1
@@ -129,6 +123,9 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 0.1.1-rc.2
         version: 0.1.1-rc.2(119bc70f73f8eddebfaa6b47561adeb3)
+      '@retrieval-agent/ticket-collection':
+        specifier: workspace:*
+        version: link:../ticket-collection
 
   packages/bundle:
     dependencies:
@@ -165,9 +162,6 @@ importers:
       '@retrieval-agent/query-understanding':
         specifier: workspace:*
         version: link:../query-understanding
-      '@retrieval-agent/retrieval-policy':
-        specifier: workspace:*
-        version: link:../retrieval-policy
       '@retrieval-agent/retrieval-ranking':
         specifier: workspace:*
         version: link:../retrieval-ranking
@@ -195,9 +189,6 @@ importers:
       '@retrieval-agent/contracts':
         specifier: workspace:*
         version: link:../contracts
-      '@retrieval-agent/retrieval-policy':
-        specifier: workspace:*
-        version: link:../retrieval-policy
       '@retrieval-agent/retrieval-replay':
         specifier: workspace:*
         version: link:../retrieval-replay
@@ -219,6 +210,9 @@ importers:
       '@retrieval-agent/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@retrieval-agent/ticket-collection':
+        specifier: workspace:*
+        version: link:../ticket-collection
 
   packages/product-host:
     dependencies:
@@ -273,12 +267,6 @@ importers:
         version: link:../contracts
 
   packages/query-understanding:
-    dependencies:
-      '@retrieval-agent/contracts':
-        specifier: workspace:*
-        version: link:../contracts
-
-  packages/retrieval-policy:
     dependencies:
       '@retrieval-agent/contracts':
         specifier: workspace:*
@@ -340,9 +328,6 @@ importers:
       '@retrieval-agent/retrieval-replay':
         specifier: workspace:*
         version: link:../retrieval-replay
-      '@retrieval-agent/ticket-collection':
-        specifier: workspace:*
-        version: link:../ticket-collection
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.1

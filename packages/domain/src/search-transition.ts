@@ -9,8 +9,8 @@ import {
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
 import type { RetrievalEventJournal } from './journal.js'
-import type { RetrievalPolicyGateway } from '@retrieval-agent/retrieval-policy'
-import { applyQueryDelta } from './query.js'
+import { updateCandidateRanking } from './policy.js'
+import { applyQueryDelta, requireUserConstraints } from './query.js'
 import {
   allowedAction as action,
   candidateRankOverlap as rankOverlap,
@@ -21,7 +21,6 @@ import {
 export interface SearchTransitionInput {
   readonly provider: TicketRetrievalProvider
   readonly journal: RetrievalEventJournal
-  readonly policy: RetrievalPolicyGateway
   readonly principal: TrustedPrincipalContext
   readonly state: RetrievalState
   readonly stage: TicketSearchStage
@@ -61,11 +60,15 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
   }
   if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '当前检索没有有效快照。')
   if (state.budget.searchesUsed >= state.budget.maxSearches
-    || (state.budget.modelStepsUsed ?? state.budget.roundsUsed) >= state.budget.maxRounds
-    || (state.budget.wallClockElapsedMs ?? state.budget.latencyMs) >= state.budget.maxLatencyMs) {
+    || state.budget.modelStepsUsed >= state.budget.maxRounds
+    || state.budget.wallClockElapsedMs >= state.budget.maxLatencyMs) {
     throw new RetrievalError('BUDGET_EXHAUSTED', '检索预算已耗尽。')
   }
   const updated = applyQueryDelta(state.query.spec, input.delta)
+  requireUserConstraints(state, updated)
+  const hardConditionsChanged = JSON.stringify(updated.filters) !== JSON.stringify(state.query.spec.filters)
+    || (state.lastPage === undefined && state.candidateHistory.length > 0)
+  const activeRankingStart = hardConditionsChanged ? state.rankingHistory.length : state.activeRankingStart ?? 0
   const spec = input.stage === 'repair_search' ? { ...updated, mode: input.mode! } : updated
   const page = await input.provider.search(input.principal, state.snapshot.snapshotId, spec, {
     topK: input.topK,
@@ -85,15 +88,17 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
   const searched = input.journal.append(state.retrievalId, 'retrieval/search-completed', { stage: input.stage, spec, page })
   const previousRefs = state.candidates.map(candidate => candidate.ref)
   const pageRefs = page.candidates.map(candidate => candidate.ref)
-  const ranking = await input.policy.updateCandidateRanking({
+  const ranking = updateCandidateRanking({
     previousHistory: state.candidateHistory,
+    previousActive: state.candidates,
+    resetEligibility: hardConditionsChanged,
+    observationStart: activeRankingStart,
     previousObservations: state.rankingHistory,
     page: page.candidates,
     searchEventId: searched.eventId,
     stage: input.stage,
     queryFingerprint: page.queryFingerprint,
-    excludedRefs: state.excludedCandidateRefs,
-  }, input.signal)
+  })
   const candidates = ranking.active
   const newRefs = pageRefs.filter(ref => !previousRefs.includes(ref))
   const overlap = rankOverlap(previousRefs, candidates.map(candidate => candidate.ref))
@@ -105,8 +110,8 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
   }
   const candidateRefs = candidates.map(candidate => candidate.ref)
   const searchOpen = budget.searchesUsed < budget.maxSearches
-    && (budget.modelStepsUsed ?? budget.roundsUsed) < budget.maxRounds
-    && (budget.wallClockElapsedMs ?? budget.latencyMs) < budget.maxLatencyMs
+    && budget.modelStepsUsed < budget.maxRounds
+    && budget.wallClockElapsedMs < budget.maxLatencyMs
   const allowedActions: RetrievalAllowedAction[] = [
     action('assess', candidateRefs),
     ...(searchOpen && page.nextCursor !== undefined ? [action('search_next')] : []),
@@ -131,9 +136,13 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
         confirmedConstraints: [...spec.filters],
       },
       candidates,
+      evidenceWindowOffset: 0,
       candidateHistory: ranking.history,
       rankingHistory: ranking.observations,
-      selectedCandidateRefs: [],
+      activeRankingStart,
+      excludedCandidateRefs: hardConditionsChanged ? [] : state.excludedCandidateRefs,
+      selectedCandidateRefs: hardConditionsChanged ? [] : state.selectedCandidateRefs,
+      ...(hardConditionsChanged ? { judgments: [], modelVisibleCandidateRefs: [], modelVisibleEvidenceIds: [], candidateWindowOffset: 0 } : {}),
       lastAssessment: undefined,
       lastPage: page,
       gaps,

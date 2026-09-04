@@ -70,7 +70,6 @@ export interface QueryAnalysisResponse {
   readonly tokens: readonly SpacyTokenResponse[]
   readonly entities: readonly SpacyEntityResponse[]
   readonly triples: readonly SpacyTripleResponse[]
-  readonly requestedCount?: number
   readonly boolean?: {
     readonly operator: 'and' | 'or'
     readonly terms: readonly string[]

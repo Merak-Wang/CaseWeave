@@ -96,7 +96,7 @@ export function assertCapabilities(value: unknown, providerId: string): Validate
     mismatch('StreamCluster 只读 Provider 握手失败。')
   }
   const capabilities = object(envelope.capabilities, 'capabilities')
-  for (const name of ['snapshot', 'search', 'evidenceRead', 'detailRead', 'l3DetailsRead', 'status'] as const) {
+  for (const name of ['snapshot', 'search', 'evidenceRead', 'detailRead', 'status'] as const) {
     if (capabilities[name] !== true) mismatch('StreamCluster 缺少必需的只读能力。')
   }
   if (capabilities.keywordSearch !== true || capabilities.rankingTrace !== true
@@ -127,7 +127,7 @@ function assertFieldCatalog(value: unknown): readonly TicketFieldDescriptor[] {
     if (seen.has(key)) mismatch('StreamCluster 字段目录包含重复 key。')
     seen.add(key)
     if (!['keyword', 'datetime', 'text', 'string_list', 'raw_json'].includes(String(field.valueKind))
-      || !['L0', 'L2', 'L3'].includes(String(field.accessLevel))
+      || !['L0', 'L1', 'L2', 'L3'].includes(String(field.accessLevel))
       || !['non_sensitive', 'source_controlled'].includes(String(field.sensitivity))
       || !Array.isArray(field.filterOperators)
       || field.filterOperators.some(operator => !FILTER_OPERATORS.includes(operator as typeof FILTER_OPERATORS[number]))
@@ -138,7 +138,7 @@ function assertFieldCatalog(value: unknown): readonly TicketFieldDescriptor[] {
       key,
       label,
       valueKind: field.valueKind as TicketFieldDescriptor['valueKind'],
-      accessLevel: field.accessLevel as TicketFieldDescriptor['accessLevel'],
+      accessLevel: (['title', 'summary'].includes(key) && field.accessLevel === 'L2' ? 'L1' : field.accessLevel) as TicketFieldDescriptor['accessLevel'],
       filterOperators: [...field.filterOperators] as TicketFieldDescriptor['filterOperators'],
       sensitivity: field.sensitivity as TicketFieldDescriptor['sensitivity'],
     }
@@ -158,7 +158,7 @@ export function assertSnapshot(
   const expiresAt = snapshot.expiresAt === undefined ? undefined : canonicalInstant(snapshot.expiresAt, 'snapshot.expiresAt')
   if (expiresAt !== undefined && Date.parse(expiresAt) <= Date.parse(createdAt)) mismatch('StreamCluster 快照过期时间无效。')
   const capabilities = object(snapshot.capabilities, 'snapshot capabilities')
-  for (const name of ['exhaustive', 'pagination', 'evidencePromotion', 'detailRead', 'l3DetailsRead', 'exportRead', 'denseSearch', 'hybridFusion', 'reranking'] as const) {
+  for (const name of ['exhaustive', 'pagination', 'evidencePromotion', 'detailRead', 'exportRead', 'denseSearch', 'hybridFusion', 'reranking'] as const) {
     if (typeof capabilities[name] !== 'boolean') mismatch('StreamCluster 快照能力声明无效。')
   }
   if (capabilities.keywordSearch !== true || (capabilities.hybridFusion && !capabilities.denseSearch)) {
@@ -185,7 +185,6 @@ export function assertSnapshot(
       pagination: capabilities.pagination as boolean,
       evidencePromotion: capabilities.evidencePromotion as boolean,
       detailRead: capabilities.detailRead as boolean,
-      l3DetailsRead: capabilities.l3DetailsRead as boolean,
       exportRead: capabilities.exportRead as boolean,
       keywordSearch: true,
       denseSearch: capabilities.denseSearch as boolean,
@@ -197,7 +196,7 @@ export function assertSnapshot(
 
 function assertCandidate(value: unknown, snapshotId: TicketSnapshotId): TicketCandidate {
   const candidate = object(value, 'candidate')
-  if (candidate.snapshotId !== snapshotId || candidate.evidenceLevel !== 'L2') mismatch('StreamCluster 候选身份无效。')
+  if (candidate.snapshotId !== snapshotId || !['L1', 'L2'].includes(String(candidate.evidenceLevel))) mismatch('StreamCluster 候选身份无效。')
   const l0 = object(candidate.l0, 'candidate.l0')
   for (const name of ['createdAt', 'updatedAt', 'resolvedAt', 'type', 'category', 'product', 'component', 'region', 'status', 'priority', 'language'] as const) {
     optionalText(l0[name], `candidate.l0.${name}`, 2_048)
@@ -230,7 +229,22 @@ function assertCandidate(value: unknown, snapshotId: TicketSnapshotId): TicketCa
   text(candidate.title, 'candidate.title')
   text(candidate.summary, 'candidate.summary')
   positiveInteger(candidate.rank, 'candidate.rank')
-  return candidate as unknown as TicketCandidate
+  // The search endpoint authorizes title/summary, not arbitrary source payload keys.
+  const safeL0 = Object.fromEntries(['createdAt', 'updatedAt', 'resolvedAt', 'type', 'category', 'product', 'component', 'region', 'status', 'priority', 'language']
+    .filter(key => l0[key] !== undefined).map(key => [key, l0[key]]))
+  if (Array.isArray(l0.additionalFields)) safeL0.additionalFields = l0.additionalFields.map(item => {
+    const field = item as Record<string, unknown>
+    return { key: field.key, label: field.label, value: field.value, sourcePath: field.sourcePath }
+  })
+  return {
+    ref: candidate.ref, displayId: candidate.displayId, sourceVersion: candidate.sourceVersion,
+    snapshotId, contentHash: candidate.contentHash, evidenceLevel: 'L1', rank: candidate.rank,
+    title: candidate.title, summary: candidate.summary, l0: safeL0,
+    matchFragments: candidate.matchFragments.map(item => {
+      const fragment = item as Record<string, unknown>
+      return { field: fragment.field, text: fragment.text, truncated: fragment.truncated }
+    }),
+  } as unknown as TicketCandidate
 }
 
 function assertAppliedFilters(value: unknown, expected: readonly TicketFilter[]): readonly TicketFilter[] {
@@ -390,11 +404,6 @@ export function assertSearchPage(
   }
   if (!['exhaustive', 'bounded', 'unknown'].includes(String(page.completeness))) mismatch('StreamCluster 搜索完整性无效。')
   const nextCursor = optionalText(page.nextCursor, 'search nextCursor', 8_192)
-  if (query.countPolicy === 'explicit' && (query.requestedCount === undefined
-    || candidates.some(candidate => candidate.rank > query.requestedCount!)
-    || (nextCursor !== undefined && candidates.at(-1)?.rank === query.requestedCount))) {
-    mismatch('StreamCluster 搜索响应越过了用户显式 Top-K 结果边界。')
-  }
   const appliedFilters = assertAppliedFilters(page.appliedFilters, query.filters)
   const warnings = stringArray(page.warnings, 'search warnings')
   const trace = assertTrace(page.trace, query, options.stage, candidates, remote)

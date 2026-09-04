@@ -41,7 +41,7 @@
         dataPath: !!js process.env.RETRIEVAL_AGENT_DATA_PATH ?? dshHomePath('retrieval-agent', 'data', 'default.jsonl')
         additionalDataPaths: []
         providerId: local-dataset-v1
-        maxRequestedCount: 20
+        maxPageSize: 100
         snapshotTtlMs: 900000
         retrievalMode: hybrid
         modelServiceBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
@@ -64,16 +64,11 @@
         maxRounds: 8
         # 跨动作总页预算覆盖关键词全集与 Dense Top-15 的融合候选；单动作仍至多推进一页，且它不是最终结果条数上限。
         maxSearches: 2500
-        maxPromotions: 3
-        maxEvidenceTokens: 1500
         maxLatencyMs: 120000
-        noProgressLimit: 2
         searchTopK: 20
         searchMaxScan: 50000
         queryAnalysisBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
         queryAnalysisDeadlineMs: 5000
-        retrievalPolicyBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
-        retrievalPolicyDeadlineMs: 5000
 
 - id: compaction
   name: cordis:group

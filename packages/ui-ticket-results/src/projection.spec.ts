@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   RetrievalId,
   RetrievalStateId,
+  TicketCandidateRef,
+  TicketSnapshotId,
   makeRetrievalEvent,
   type RetrievalState,
 } from '@retrieval-agent/contracts'
@@ -30,8 +32,8 @@ function state(termination: RetrievalState['termination']): RetrievalState {
     candidates: [], candidateHistory: [], rankingHistory: [], excludedCandidateRefs: [], selectedCandidateRefs: [],
     lastAssessment: undefined, promotedEvidence: [], gaps: [], allowedActions: [],
     budget: {
-      maxRounds: 8, maxSearches: 4, maxPromotions: 3, maxEvidenceTokens: 1000, maxLatencyMs: 10000,
-      roundsUsed: 1, searchesUsed: 1, promotionsUsed: 0, evidenceTokensUsed: 0, latencyMs: 1,
+      maxRounds: 8, maxSearches: 4, maxLatencyMs: 10000,
+      modelStepsUsed: 1, searchesUsed: 1, wallClockElapsedMs: 1,
     },
     progress: { newCandidateRefs: [], rankOverlap: 0, newDecisiveEvidence: false, resolvedGaps: [], noProgressStreak: 0 },
     termination,
@@ -40,6 +42,33 @@ function state(termination: RetrievalState['termination']): RetrievalState {
 }
 
 describe('candidate node projection', () => {
+  it('retains valid unjudged candidates separately after execution stops and never revives history', () => {
+    const candidate = (ref: string) => ({
+      ref: TicketCandidateRef(ref), displayId: ref, sourceVersion: 'source-v1',
+      snapshotId: TicketSnapshotId('snapshot-v1'), contentHash: ref, evidenceLevel: 'L1' as const,
+      rank: 1, title: ref, summary: ref, l0: {}, matchFragments: [],
+    })
+    const accepted = candidate('accepted')
+    const waiting = candidate('undetermined')
+    const excluded = candidate('excluded')
+    const historical = candidate('historical')
+    const stopped: RetrievalState = {
+      ...state('budget_exhausted'), candidates: [accepted, waiting, excluded],
+      candidateHistory: [accepted, waiting, excluded, historical],
+      selectedCandidateRefs: [accepted.ref], excludedCandidateRefs: [excluded.ref],
+      stopExplanation: '执行时间已到，剩余候选尚未判断。',
+    }
+    const event = makeRetrievalEvent({
+      eventId: 'event-bounded-stop', retrievalId, sequence: 0, occurredAt: stopped.updatedAt,
+      type: 'retrieval/state-recorded', data: { state: stopped },
+    })
+    const projected = projectTicketCandidateNode([event], retrievalId)
+    expect(projected.result?.tickets.map(item => item.ref)).toEqual([accepted.ref])
+    expect(projected.result?.undeterminedCandidates?.map(item => item.ref)).toEqual([waiting.ref])
+    expect(projected.candidates.map(item => item.ref)).toEqual([accepted.ref, waiting.ref])
+    expect(projected.message).toBe(stopped.stopExplanation)
+  })
+
   it('projects an explicit empty result instead of fabricating candidates', () => {
     const event = makeRetrievalEvent({
       eventId: 'event-0', retrievalId, sequence: 0, occurredAt: '2026-08-27T00:00:00.000Z',

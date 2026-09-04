@@ -12,7 +12,7 @@ const PRINCIPAL: TrustedPrincipalContext = {
 }
 
 describe('source-native public snapshot adapter', () => {
-  it('keeps unknown raw keys inside the Provider and exposes them only through declared L3 detail access', async () => {
+  it('keeps unknown raw keys inside the Provider and rejects raw evidence and detail reads', async () => {
     const record = normalizePublicSnapshotTicket({
       ticket_id: 'PUBLIC-1', source_dataset: 'example/full', source_version: 'v1', source_kind: 'real',
       title: 'Router photon fault', summary: 'A customer reports a photon fault.', queue: 'network',
@@ -34,12 +34,12 @@ describe('source-native public snapshot adapter', () => {
       fields: ['source.raw'],
       purpose: 'inline_detail',
     })).rejects.toThrow(/不允许的详情字段/u)
-    const raw = await provider.readL3Details(PRINCIPAL, {
+    await expect(provider.readEvidence(PRINCIPAL, {
       snapshotId: snapshot.snapshotId,
       candidateRefs: [page.candidates[0]!.ref],
-      purpose: 'model_ticket_load',
-    })
-    expect(JSON.stringify(raw.details[0]!.rawPayload)).toContain('unmapped-photon-extension')
+      fields: ['source.raw'], tokenBudget: 100,
+    })).rejects.toMatchObject({ code: 'FIELD_NOT_ALLOWED' })
+    expect(record.rawSource?.payload).toHaveProperty('custom_note', 'unmapped-photon-extension')
   })
 
   it('rejects dynamic filters that the source catalog did not declare', () => {

@@ -9,7 +9,6 @@ import { LocalTicketProvider, parseFixtureJsonl } from '@retrieval-agent/provide
 import { testHybridRanker } from './support/fake-model-gateway.js'
 import { buildFastTicketRequest } from '@retrieval-agent/query-understanding'
 import { fixtureQueryAnalyzer } from './support/query-analyzer.js'
-import { testRetrievalPolicy } from './support/retrieval-policy.js'
 
 const NOW = new Date('2026-08-27T04:00:00.000Z')
 const LEGACY_REGRESSION_FIXTURE = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'tickets', 'synthetic', 'legacy-bronze-v1.jsonl')
@@ -80,7 +79,7 @@ describe('fixed first-pass Hybrid retrieval', () => {
     let serial = 0
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: () => `hybrid-event-${serial++}` })
     const controller = new RetrievalController(provider, journal, undefined, {
-      policy: testRetrievalPolicy(), now: () => NOW, id: () => `hybrid-domain-${serial++}`, searchTopK: 5,
+      now: () => NOW, id: () => `hybrid-domain-${serial++}`, searchTopK: 5,
     })
     let state = await controller.start(PRINCIPAL, {
       target: 'ranked_cases', query: '主副卡解绑后仍共享流量', requestedCount: 5, countPolicy: 'explicit',
@@ -88,12 +87,11 @@ describe('fixed first-pass Hybrid retrieval', () => {
     expect(state.lastPage?.trace).toMatchObject({ stage: 'initial_hybrid', requestedMode: 'hybrid', executedMode: 'hybrid' })
     expect(state.lastPage?.trace.channels.map(channel => channel.channel)).toEqual(['keyword', 'vector'])
     expect(await controller.finalizeExhaustedEmptyResult(state)).toBe(state)
-    state = await controller.assess(state, {
-      decision: 'accept_current_top_k', evaluator: 'model',
-      selectedCandidateRefs: state.candidates.map(candidate => candidate.ref), excludedCandidateRefs: [],
-      gaps: [], nextAction: 'accept_current_top_k',
+    state = controller.recordContextSelection(state, controller.projectContext(state))
+    state = await controller.decide(PRINCIPAL, state, { stateId: state.stateId,
+      judgments: state.candidates.map(candidate => ({ candidateRef: candidate.ref, verdict: 'accept', evidenceRefs: [candidate.ref], reason: 'Controlled fixture assessment accepts this displayed retrieval candidate.' })),
+      gaps: [], action: { kind: 'finish', explanation: 'Five displayed candidates were assessed by the fixture.' },
     })
-    state = controller.freeze(state, state.selectedCandidateRefs)
 
     const collection = createTicketResultCollection(state)
     expect(collection).toMatchObject({ type: 'ticket_collection', stoppingReason: 'top_k_accepted' })

@@ -1,7 +1,7 @@
 import type { RetrievalId, TicketCandidateRef, TicketEvidenceId } from './brand.js'
 import type {
   TicketEvidenceSegment,
-  TicketL3Detail,
+  LegacyRawDetail,
   TicketQueryContract,
   TicketRetrievalSpec,
   TicketSearchPage,
@@ -13,6 +13,7 @@ import type {
   EvidenceContextSelection,
   FrozenEvidencePack,
   RetrievalKnowledgeAssessment,
+  RetrievalDecision,
   RetrievalState,
   RetrievalStatePatch,
   RetrievalTaskContract,
@@ -20,8 +21,8 @@ import type {
 } from './retrieval-state.js'
 import type { TicketSearchStage } from './ranking.js'
 
-export const RETRIEVAL_EVENT_SCHEMA_VERSION = 11 as const
-export const SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS = Object.freeze([5, 6, 7, 8, 9, 10, 11] as const)
+export const RETRIEVAL_EVENT_SCHEMA_VERSION = 12 as const
+export const SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS = Object.freeze([5, 6, 7, 8, 9, 10, 11, 12] as const)
 
 /**
  * Durable UI placement is deliberately separate from retrieval-domain state.
@@ -48,13 +49,15 @@ export interface RetrievalEventDataMap {
   'retrieval/snapshot-opened': { readonly snapshot: TicketSnapshot }
   'retrieval/search-completed': { readonly stage: TicketSearchStage; readonly spec: TicketRetrievalSpec; readonly page: TicketSearchPage }
   'retrieval/knowledge-assessed': { readonly assessment: RetrievalKnowledgeAssessment }
+  'retrieval/decision-submitted': { readonly decision: RetrievalDecision }
   /** Revision-zero checkpoint and the legacy v5-v8 cumulative state event. */
   'retrieval/state-recorded': { readonly state: RetrievalState }
-  /** Revision one and later use a bounded transition in v9-v11 instead of another cumulative snapshot. */
+  /** Revision one and later use a bounded transition in v9-v12 instead of another cumulative snapshot. */
   'retrieval/state-patched': { readonly patch: RetrievalStatePatch }
   'retrieval/evidence-promoted': { readonly evidence: readonly TicketEvidenceSegment[]; readonly tokensUsed: number }
   'retrieval/clarification-requested': { readonly facet: string; readonly question: string; readonly candidateRefs: readonly TicketCandidateRef[] }
   'retrieval/clarification-answered': { readonly facet: string; readonly accepted: boolean; readonly answer?: string }
+  'retrieval/user-feedback-received': { readonly text: string }
   'retrieval/context-projected': { readonly selection: EvidenceContextSelection }
   'retrieval/model-request-measured': {
     readonly estimatedInputTokens: number
@@ -74,8 +77,8 @@ export interface RetrievalEventDataMap {
   'retrieval/stopped': { readonly reason: RetrievalTermination; readonly remainingGapKinds: readonly string[] }
   'retrieval/detail-read': { readonly receipt: CandidateDetailReadReceipt }
   /** Legacy v9 single-ticket L3 event retained for replay. */
-  'retrieval/l3-detail-read': { readonly detail: TicketL3Detail }
-  'retrieval/l3-details-read': { readonly details: readonly TicketL3Detail[] }
+  'retrieval/l3-detail-read': { readonly detail: LegacyRawDetail }
+  'retrieval/l3-details-read': { readonly details: readonly LegacyRawDetail[] }
   'retrieval/exported': { readonly receipt: CandidateExportReceipt }
 }
 export type RetrievalEventType = keyof RetrievalEventDataMap
@@ -97,11 +100,13 @@ export const REQUIRED_RETRIEVAL_EVENT_TYPES = Object.freeze([
   'retrieval/snapshot-opened',
   'retrieval/search-completed',
   'retrieval/knowledge-assessed',
+  'retrieval/decision-submitted',
   'retrieval/state-recorded',
   'retrieval/state-patched',
   'retrieval/evidence-promoted',
   'retrieval/clarification-requested',
   'retrieval/clarification-answered',
+  'retrieval/user-feedback-received',
   'retrieval/context-projected',
   'retrieval/model-request-measured',
   'retrieval/model-response-measured',

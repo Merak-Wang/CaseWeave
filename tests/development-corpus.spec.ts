@@ -42,7 +42,7 @@ describe('complete captured development corpus', () => {
     })).toBe(true)
 
     const provider = new LocalTicketProvider(records, {
-      now: () => new Date('2026-08-27T01:00:00.000Z'), maxRequestedCount: 50, ranker: testHybridRanker(),
+      now: () => new Date('2026-08-27T01:00:00.000Z'), maxPageSize: 50, ranker: testHybridRanker(),
     })
     const snapshot = await provider.openSnapshot(ADMIN)
     expect(snapshot.fieldCatalog.map(field => field.key)).toContain('source.raw')

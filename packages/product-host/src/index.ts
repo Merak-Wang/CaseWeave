@@ -16,6 +16,7 @@ import {
   CandidateExportService,
   InMemoryDetailReadAuditSink,
   InMemoryExportAuditSink,
+  projectTicketCandidateState,
   type DetailReadAuditSink,
   type ExportAuditSink,
 } from '@retrieval-agent/product-api'
@@ -23,6 +24,7 @@ import {
   CONTINUE_RETRIEVAL_ENDPOINT,
   EXPORT_CANDIDATES_ENDPOINT,
   READ_TICKET_DETAIL_ENDPOINT,
+  READ_RETRIEVAL_ENDPOINT,
   type ContinueRetrievalErrorResponse,
   type ContinueRetrievalParams,
   type ContinueRetrievalResponse,
@@ -32,6 +34,9 @@ import {
   type ReadTicketDetailErrorResponse,
   type ReadTicketDetailParams,
   type ReadTicketDetailResponse,
+  type ReadRetrievalParams,
+  type ReadRetrievalResponse,
+  type ReadRetrievalErrorResponse,
 } from '@retrieval-agent/product-api/protocol'
 
 const MAX_REQUEST_BYTES = 64 * 1024
@@ -88,19 +93,27 @@ export function parseReadTicketDetailParams(value: unknown): ReadTicketDetailPar
   }
 }
 
-export function parseContinueRetrievalParams(value: unknown): ContinueRetrievalParams {
+function parseRetrievalIdentity(value: unknown, operation: string): ContinueRetrievalParams {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new RetrievalError('INVALID_REQUEST', '继续检索请求格式无效。')
+    throw new RetrievalError('INVALID_REQUEST', `${operation}请求格式无效。`)
   }
   const record = value as Record<string, unknown>
   if (Object.keys(record).some(key => !['sessionId', 'retrievalId'].includes(key))) {
-    throw new RetrievalError('INVALID_REQUEST', '继续检索请求包含未知字段。')
+    throw new RetrievalError('INVALID_REQUEST', `${operation}请求包含未知字段。`)
   }
   if (typeof record.sessionId !== 'string' || record.sessionId.trim().length === 0 || record.sessionId.length > 512
     || typeof record.retrievalId !== 'string') {
     throw new RetrievalError('INVALID_REQUEST', '会话或检索引用无效。')
   }
   return { sessionId: record.sessionId.trim(), retrievalId: RetrievalId(record.retrievalId) }
+}
+
+export function parseContinueRetrievalParams(value: unknown): ContinueRetrievalParams {
+  return parseRetrievalIdentity(value, '继续检索')
+}
+
+export function parseReadRetrievalParams(value: unknown): ReadRetrievalParams {
+  return parseRetrievalIdentity(value, '重新授权')
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
@@ -149,6 +162,7 @@ function writeJson(
   status: number,
   body: ExportCandidatesResponse | ExportCandidatesErrorResponse
     | ReadTicketDetailResponse | ReadTicketDetailErrorResponse
+    | ReadRetrievalResponse | ReadRetrievalErrorResponse
     | ContinueRetrievalResponse | ContinueRetrievalErrorResponse,
 ): void {
   response.writeHead(status, {
@@ -157,6 +171,29 @@ function writeJson(
     'x-content-type-options': 'nosniff',
   })
   response.end(JSON.stringify(body))
+}
+
+/** Session events identify a retrieval; only a current Provider grant allows presentation. */
+export async function readRetrievalForAgent(
+  ctx: Context,
+  agent: Agent,
+  params: ReadRetrievalParams,
+  signal?: AbortSignal,
+): Promise<ReadRetrievalResponse> {
+  const retrievalAgent = ctx.agentPresets.serviceFor(agent, 'retrievalAgent')
+  if (retrievalAgent === undefined) {
+    throw new RetrievalError('PROVIDER_UNAVAILABLE', '当前会话未加载工单检索能力。', { retryable: true })
+  }
+  const state = await retrievalAgent.authorizePresentation(agent, params.retrievalId, signal)
+  if (state.accessValidation !== 'current') {
+    if (state.termination === 'backend_error') {
+      throw new RetrievalError('PROVIDER_UNAVAILABLE', '工单来源暂时不可用，无法完成重新授权；请稍后重试。', { retryable: true })
+    }
+    if (state.termination === 'snapshot_invalid') throw new RetrievalError('SNAPSHOT_INVALID', '历史快照已失效，请重新检索。')
+    if (state.termination === 'cancelled') throw new RetrievalError('CANCELLED', '重新授权已取消，请重试。')
+    throw new RetrievalError('UNAUTHORIZED', '当前身份未获得历史工单的重新授权。')
+  }
+  return { node: projectTicketCandidateState(state, state.retrievalId) }
 }
 
 /** Continue only the Provider-issued cursor belonging to this live authorized retrieval. */
@@ -243,7 +280,7 @@ export async function readTicketDetailsForAgent(
   const principal = await retrievalAgent.principal(agent, 'detail_read', signal)
   const read = await new CandidateDetailService(provider, audit)
     .readDetails(principal, state, params.candidateRefs, params.fields, signal)
-  retrievalAgent.recordDetailRead(agent, read.receipt)
+  await retrievalAgent.recordDetailRead(agent, read.receipt, read.result)
   return {
     details: read.result.details,
     rejectedCandidateRefs: read.result.rejectedCandidateRefs,
@@ -269,109 +306,53 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }
   const audit = new InMemoryExportAuditSink()
   const detailAudit = new InMemoryDetailReadAuditSink()
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact',
-    path: EXPORT_CANDIDATES_ENDPOINT,
-    handler: async (request, response) => {
-      if (request.method !== 'POST') {
-        response.setHeader('allow', 'POST')
-        writeJson(response, 405, { code: 'METHOD_NOT_ALLOWED', message: '只允许 POST。', retryable: false })
-        return
-      }
-      if (!sameOrigin(request)) {
-        writeJson(response, 403, { code: 'ORIGIN_REJECTED', message: '请求来源不受信任。', retryable: false })
-        return
-      }
-      const abort = new AbortController()
-      const onAbort = (): void => { abort.abort() }
-      request.once('aborted', onAbort)
-      try {
-        const params = parseExportCandidatesParams(await readJson(request))
-        const agent = ctx.agents.get(SessionId(params.sessionId))
-        if (agent === undefined) {
-          writeJson(response, 409, { code: 'SESSION_NOT_ACTIVE', message: '会话当前不可用，请重新打开后重试。', retryable: true })
+  const register = <Params>(
+    path: string,
+    parse: (value: unknown) => Params & { readonly sessionId: string },
+    execute: (agent: Agent, params: Params, signal: AbortSignal) => Promise<Parameters<typeof writeJson>[2]>,
+    failureMessage: string,
+  ): void => {
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'exact', path,
+      handler: async (request, response) => {
+        if (request.method !== 'POST') {
+          response.setHeader('allow', 'POST')
+          writeJson(response, 405, { code: 'METHOD_NOT_ALLOWED', message: '只允许 POST。', retryable: false })
           return
         }
-        writeJson(response, 200, await exportCandidatesForAgent(ctx, agent, params, audit, abort.signal))
-      } catch (error) {
-        if (error instanceof RetrievalError) {
-          writeJson(response, statusOf(error), { code: error.code, message: error.publicMessage, retryable: error.retryable })
-        } else {
-          writeJson(response, 500, { code: 'INTERNAL', message: '导出失败。', retryable: false })
-        }
-      } finally {
-        request.off('aborted', onAbort)
-      }
-    },
-  }), 'retrieval-product-host: export route')
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact',
-    path: READ_TICKET_DETAIL_ENDPOINT,
-    handler: async (request, response) => {
-      if (request.method !== 'POST') {
-        response.setHeader('allow', 'POST')
-        writeJson(response, 405, { code: 'METHOD_NOT_ALLOWED', message: '只允许 POST。', retryable: false })
-        return
-      }
-      if (!sameOrigin(request)) {
-        writeJson(response, 403, { code: 'ORIGIN_REJECTED', message: '请求来源不受信任。', retryable: false })
-        return
-      }
-      const abort = new AbortController()
-      const onAbort = (): void => { abort.abort() }
-      request.once('aborted', onAbort)
-      try {
-        const params = parseReadTicketDetailParams(await readJson(request))
-        const agent = ctx.agents.get(SessionId(params.sessionId))
-        if (agent === undefined) {
-          writeJson(response, 409, { code: 'SESSION_NOT_ACTIVE', message: '会话当前不可用，请重新打开后重试。', retryable: true })
+        if (!sameOrigin(request)) {
+          writeJson(response, 403, { code: 'ORIGIN_REJECTED', message: '请求来源不受信任。', retryable: false })
           return
         }
-        writeJson(response, 200, await readTicketDetailsForAgent(ctx, agent, params, detailAudit, abort.signal))
-      } catch (error) {
-        if (error instanceof RetrievalError) {
-          writeJson(response, statusOf(error), { code: error.code, message: error.publicMessage, retryable: error.retryable })
-        } else {
-          writeJson(response, 500, { code: 'INTERNAL', message: '工单详情读取失败。', retryable: false })
+        const abort = new AbortController()
+        const onAbort = (): void => { abort.abort() }
+        request.once('aborted', onAbort)
+        try {
+          const params = parse(await readJson(request))
+          const agent = ctx.agents.get(SessionId(params.sessionId))
+          if (agent === undefined) {
+            writeJson(response, 409, { code: 'SESSION_NOT_ACTIVE', message: '会话当前不可用，请重新打开后重试。', retryable: true })
+            return
+          }
+          writeJson(response, 200, await execute(agent, params, abort.signal))
+        } catch (error) {
+          if (error instanceof RetrievalError) {
+            writeJson(response, statusOf(error), { code: error.code, message: error.publicMessage, retryable: error.retryable })
+          } else {
+            writeJson(response, 500, { code: 'INTERNAL', message: failureMessage, retryable: false })
+          }
+        } finally {
+          request.off('aborted', onAbort)
         }
-      } finally {
-        request.off('aborted', onAbort)
-      }
-    },
-  }), 'retrieval-product-host: detail route')
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact',
-    path: CONTINUE_RETRIEVAL_ENDPOINT,
-    handler: async (request, response) => {
-      if (request.method !== 'POST') {
-        response.setHeader('allow', 'POST')
-        writeJson(response, 405, { code: 'METHOD_NOT_ALLOWED', message: '只允许 POST。', retryable: false })
-        return
-      }
-      if (!sameOrigin(request)) {
-        writeJson(response, 403, { code: 'ORIGIN_REJECTED', message: '请求来源不受信任。', retryable: false })
-        return
-      }
-      const abort = new AbortController()
-      const onAbort = (): void => { abort.abort() }
-      request.once('aborted', onAbort)
-      try {
-        const params = parseContinueRetrievalParams(await readJson(request))
-        const agent = ctx.agents.get(SessionId(params.sessionId))
-        if (agent === undefined) {
-          writeJson(response, 409, { code: 'SESSION_NOT_ACTIVE', message: '会话当前不可用，请重新打开后重试。', retryable: true })
-          return
-        }
-        writeJson(response, 200, await continueRetrievalForAgent(ctx, agent, params, abort.signal))
-      } catch (error) {
-        if (error instanceof RetrievalError) {
-          writeJson(response, statusOf(error), { code: error.code, message: error.publicMessage, retryable: error.retryable })
-        } else {
-          writeJson(response, 500, { code: 'INTERNAL', message: '继续检索失败。', retryable: false })
-        }
-      } finally {
-        request.off('aborted', onAbort)
-      }
-    },
-  }), 'retrieval-product-host: continue route')
+      },
+    }), `retrieval-product-host: ${path}`)
+  }
+  register(EXPORT_CANDIDATES_ENDPOINT, parseExportCandidatesParams,
+    (agent, params, signal) => exportCandidatesForAgent(ctx, agent, params, audit, signal), '导出失败。')
+  register(READ_TICKET_DETAIL_ENDPOINT, parseReadTicketDetailParams,
+    (agent, params, signal) => readTicketDetailsForAgent(ctx, agent, params, detailAudit, signal), '工单详情读取失败。')
+  register(CONTINUE_RETRIEVAL_ENDPOINT, parseContinueRetrievalParams,
+    (agent, params, signal) => continueRetrievalForAgent(ctx, agent, params, signal), '继续检索失败。')
+  register(READ_RETRIEVAL_ENDPOINT, parseReadRetrievalParams,
+    (agent, params, signal) => readRetrievalForAgent(ctx, agent, params, signal), '无法重新授权当前工单集合。')
 }

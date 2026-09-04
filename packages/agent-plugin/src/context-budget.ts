@@ -22,7 +22,9 @@ export interface RetrievalRuntimeBudgetApplication {
 }
 
 function elapsedSince(state: RetrievalState): number {
-  return Math.max(0, Date.now() - Date.parse(state.createdAt))
+  const clock = state.executionClock
+  const waiting = clock?.waitingSince === undefined ? 0 : Date.now() - Date.parse(clock.waitingSince)
+  return Math.max(0, Date.now() - Date.parse(state.createdAt) - (clock?.totalWaitingMs ?? 0) - waiting)
 }
 
 function serializedBytes(value: unknown): number {

@@ -146,6 +146,7 @@ Usage:
 
 Source checkout:
   pnpm install --frozen-lockfile --ignore-scripts
+  pnpm data:sync             # explicit development corpus preparation
   pnpm build                 # once, and again only after source changes
   pnpm retrieval-agent web   # reuses built artifacts, profile and vector cache
 

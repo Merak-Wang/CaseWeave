@@ -7,7 +7,6 @@ import {
   type RetrievalTermination,
   type TicketCandidateRef,
   type TicketEvidenceField,
-  type TicketL0,
 } from '@retrieval-agent/contracts'
 
 export function stopReason(error: unknown): Extract<RetrievalTermination, 'budget_exhausted' | 'permission_blocked' | 'backend_error' | 'snapshot_invalid' | 'cancelled'> | undefined {
@@ -20,14 +19,10 @@ export function stopReason(error: unknown): Extract<RetrievalTermination, 'budge
   return undefined
 }
 
-export function emptyBudget(config: Pick<RetrievalBudgetState, 'maxRounds' | 'maxSearches' | 'maxPromotions' | 'maxEvidenceTokens' | 'maxLatencyMs'>): RetrievalBudgetState {
+export function emptyBudget(config: Pick<RetrievalBudgetState, 'maxRounds' | 'maxSearches' | 'maxLatencyMs'>): RetrievalBudgetState {
   return {
     ...config,
-    roundsUsed: 0,
     searchesUsed: 0,
-    promotionsUsed: 0,
-    evidenceTokensUsed: 0,
-    latencyMs: 0,
     modelStepsUsed: 0,
     successfulToolCalls: 0,
     failedToolCalls: 0,
@@ -53,18 +48,6 @@ export function requireAction(state: RetrievalState, kind: RetrievalActionKind):
   const allowed = state.allowedActions.find(candidate => candidate.kind === kind)
   if (allowed === undefined) throw new RetrievalError('INVALID_TRANSITION', `当前检索状态不允许动作 ${kind}。`)
   return allowed
-}
-
-export function taskCompletionSatisfied(
-  task: RetrievalState['task'],
-  candidateCount: number,
-  page: RetrievalState['lastPage'],
-  assessment?: RetrievalState['lastAssessment'],
-): boolean {
-  void task
-  void candidateCount
-  void page
-  return assessment?.decision === 'accept_current_top_k' || assessment?.decision === 'no_result'
 }
 
 export function coverageGaps(
@@ -106,22 +89,4 @@ export function validateCandidateRefs(state: RetrievalState, refs: readonly Tick
   const unique = [...new Set(refs)]
   if (unique.some(ref => !known.has(ref))) throw new RetrievalError('CANDIDATE_NOT_FOUND', '候选引用不属于当前检索快照。')
   return unique
-}
-
-function candidateFacetValue(l0: TicketL0, facet: string): string | undefined {
-  const declaredAdditionalValue = l0.additionalFields?.find(field => field.key === facet)?.value
-  if (declaredAdditionalValue !== undefined) return declaredAdditionalValue
-
-  const builtInValue = Reflect.get(l0, facet) as unknown
-  return typeof builtInValue === 'string' ? builtInValue : undefined
-}
-
-export function candidateFacetValues(state: RetrievalState, facet: string, refs: readonly TicketCandidateRef[]): Set<string> {
-  const values = new Set<string>()
-  for (const candidate of state.candidates) {
-    if (!refs.includes(candidate.ref)) continue
-    const value = candidateFacetValue(candidate.l0, facet)
-    if (typeof value === 'string' && value.trim().length > 0) values.add(value)
-  }
-  return values
 }

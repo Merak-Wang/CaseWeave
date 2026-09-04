@@ -22,11 +22,13 @@ declare module '@deepseek-ai/dsh-session/types' {
     'retrieval/snapshot-opened': { readonly event: RetrievalDomainEvent<'retrieval/snapshot-opened'> }
     'retrieval/search-completed': { readonly event: RetrievalDomainEvent<'retrieval/search-completed'> }
     'retrieval/knowledge-assessed': { readonly event: RetrievalDomainEvent<'retrieval/knowledge-assessed'> }
+    'retrieval/decision-submitted': { readonly event: RetrievalDomainEvent<'retrieval/decision-submitted'> }
     'retrieval/state-recorded': { readonly event: RetrievalDomainEvent<'retrieval/state-recorded'> }
     'retrieval/state-patched': { readonly event: RetrievalDomainEvent<'retrieval/state-patched'> }
     'retrieval/evidence-promoted': { readonly event: RetrievalDomainEvent<'retrieval/evidence-promoted'> }
     'retrieval/clarification-requested': { readonly event: RetrievalDomainEvent<'retrieval/clarification-requested'> }
     'retrieval/clarification-answered': { readonly event: RetrievalDomainEvent<'retrieval/clarification-answered'> }
+    'retrieval/user-feedback-received': { readonly event: RetrievalDomainEvent<'retrieval/user-feedback-received'> }
     'retrieval/context-projected': { readonly event: RetrievalDomainEvent<'retrieval/context-projected'> }
     'retrieval/model-request-measured': { readonly event: RetrievalDomainEvent<'retrieval/model-request-measured'> }
     'retrieval/model-response-measured': { readonly event: RetrievalDomainEvent<'retrieval/model-response-measured'> }
@@ -155,11 +157,13 @@ export function appendRetrievalSessionEvent(session: Session, event: RetrievalDo
     case 'retrieval/snapshot-opened': session.append(event.type, { event }); return
     case 'retrieval/search-completed': session.append(event.type, { event }); return
     case 'retrieval/knowledge-assessed': session.append(event.type, { event }); return
+    case 'retrieval/decision-submitted': session.append(event.type, { event }); return
     case 'retrieval/state-recorded': session.append(event.type, { event }); return
     case 'retrieval/state-patched': session.append(event.type, { event }); return
     case 'retrieval/evidence-promoted': session.append(event.type, { event }); return
     case 'retrieval/clarification-requested': session.append(event.type, { event }); return
     case 'retrieval/clarification-answered': session.append(event.type, { event }); return
+    case 'retrieval/user-feedback-received': session.append(event.type, { event }); return
     case 'retrieval/context-projected': session.append(event.type, { event }); return
     case 'retrieval/model-request-measured': session.append(event.type, { event }); return
     case 'retrieval/model-response-measured': session.append(event.type, { event }); return

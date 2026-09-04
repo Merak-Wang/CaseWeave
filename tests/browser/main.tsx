@@ -63,7 +63,7 @@ const fixtureNode = {
     candidates,
     alreadyReadEvidence: [
       {
-        evidenceId: 'evidence-tkt-0029-answer-0000000000000001',
+        evidenceId: 'evidence-tkt-0007-answer-0000000000000001',
         candidateRef: 'candidate-tkt-0007',
         displayId: 'TKT-0007',
         sourceVersion: 'legacy-smoke-v1',
@@ -75,6 +75,7 @@ const fixtureNode = {
         estimatedTokens: 16,
         trust: 'untrusted_ticket_evidence',
         truncated: false,
+        evidenceLevel: 'L2', readers: ['provider', 'model'],
       },
     ],
     detailFields: [
@@ -97,7 +98,8 @@ const fixtureNode = {
       semanticRecallKnown: false,
       resultMayBeIncomplete: true,
       nextPageAvailable: false,
-      tickets: candidates,
+      tickets: [candidates[0]],
+      undeterminedCandidates: [candidates[1]],
       evidence: [],
       remainingGapKinds: [],
     },
@@ -105,9 +107,17 @@ const fixtureNode = {
 }
 
 const nativeFetch = window.fetch.bind(window)
+let presentationAuthorized = new URLSearchParams(window.location.search).get('authorization') !== 'revoked'
 window.fetch = async (input, init) => {
   const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-  if (new URL(url, window.location.href).pathname !== '/api/retrieval-agent/detail') return await nativeFetch(input, init)
+  const path = new URL(url, window.location.href).pathname
+  if (path === '/api/retrieval-agent/presentation') {
+    if (!presentationAuthorized) {
+      return new Response(JSON.stringify({ code: 'UNAUTHORIZED', message: '当前身份的工单权限已撤销。', retryable: false }), { status: 403 })
+    }
+    return new Response(JSON.stringify({ node: fixtureNode.data }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  if (path !== '/api/retrieval-agent/detail') return await nativeFetch(input, init)
   const params = JSON.parse(String(init?.body)) as { candidateRefs: string[] }
   const candidate = candidates.find(item => item.ref === params.candidateRefs[0])
   if (candidate === undefined) return new Response(JSON.stringify({ code: 'UNAUTHORIZED', message: '候选不可访问。', retryable: false }), { status: 403 })
@@ -145,6 +155,7 @@ function BrowserFixture() {
         <span>组件验收夹具</span>
         <span aria-hidden="true">·</span>
         <span>真实产品保留原始 DSH Web 外壳</span>
+        <button type="button" onClick={() => { presentationAuthorized = false }}>模拟撤销工单权限</button>
         <button type="button" aria-pressed={dark} onClick={() => { setDark(value => !value) }}>
           {dark ? '浅色' : '深色'}
         </button>

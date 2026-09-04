@@ -11,25 +11,6 @@ from .errors import ServiceError
 
 CONTENT_POS = frozenset({"NOUN", "PROPN", "VERB", "ADJ"})
 NOUN_POS = frozenset({"NOUN", "PROPN"})
-CHINESE_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-
-
-def _positive_integer(text: str) -> int | None:
-    """把阿拉伯数字或常见中文数字转换成受首轮 Top-K 上限约束的正整数。"""
-    if text.isdecimal():
-        value = int(text)
-    elif text == "十":
-        value = 10
-    elif "十" in text:
-        tens_text, ones_text = text.split("十", 1)
-        tens = 1 if not tens_text else CHINESE_DIGITS.get(tens_text)
-        ones = 0 if not ones_text else CHINESE_DIGITS.get(ones_text)
-        if tens is None or ones is None:
-            return None
-        value = tens * 10 + ones
-    else:
-        value = CHINESE_DIGITS.get(text, 0)
-    return value if 1 <= value <= 50 else None
 
 
 @dataclass(frozen=True)
@@ -216,11 +197,6 @@ class SpacyQueryAnalyzer:
             {"text": entity.text, "label": entity.label_, "start": entity.start_char, "end": entity.end_char}
             for entity in doc.ents
         ]
-        requested_count = next((
-            value for entity in doc.ents
-            if entity.label_ == "CARDINAL" and entity.end < len(doc) and doc[entity.end].tag_ == "M"
-            if (value := _positive_integer(entity.text)) is not None
-        ), None)
         visible_tokens = [token for token in doc if not token.is_space]
         # 将 spaCy 的全局 token.i 映射为响应 tokens 数组下标，使 TypeScript 可以独立校验 head 边界。
         visible_indexes = {token.i: index for index, token in enumerate(visible_tokens)}
@@ -242,6 +218,5 @@ class SpacyQueryAnalyzer:
             "tokens": tokens,
             "entities": entities,
             "triples": triples[:8],
-            **({"requestedCount": requested_count} if requested_count is not None else {}),
             **({"boolean": boolean} if boolean is not None else {}),
         }

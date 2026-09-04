@@ -31,6 +31,14 @@ export interface TicketQueryEntity {
   readonly canonical: string
 }
 
+/** An explicit requirement retains the user's surface even when it cannot yet be compiled. */
+export interface TicketUserRequirement {
+  readonly text: string
+  readonly status: 'compiled' | 'unresolved'
+  readonly filters: readonly TicketFilter[]
+  readonly reason?: string
+}
+
 /** Legacy deterministic NLP trace retained so persisted Query Contract v4 remains readable. */
 export interface TicketQueryNlpTraceV4 {
   readonly schemaVersion: 1
@@ -129,8 +137,8 @@ export type TicketFastQueryPlan =
  * language, domain, entities, constraints, and result-set policy it used.
  */
 export interface TicketQueryContract {
-  /** Versions 1-6 remain readable; version 7 makes task and result policy orthogonal. */
-  readonly schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7
+  /** Version 8 records sourced user requirements; older persisted contracts remain readable. */
+  readonly schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
   readonly original: string
   readonly normalized: string
   readonly task: TicketTaskTarget
@@ -142,8 +150,10 @@ export interface TicketQueryContract {
   readonly domain: 'telecom_ticket' | 'general_ticket'
   readonly language: 'zh' | 'en' | 'und'
   readonly entities: readonly TicketQueryEntity[]
-  /** Empty on the direct-user fast path; accepted adaptive repairs are copied here for replay. */
+  /** Current executable conditions, including clear requirements admitted before the first search. */
   readonly constraints: readonly TicketFilter[]
+  /** Required for v8. Search hypotheses cannot silently weaken these user requirements. */
+  readonly userRequirements?: readonly TicketUserRequirement[]
   readonly logic?: TicketQueryLogic
   readonly fastQuery?: TicketFastQueryPlan
   readonly nlp?: TicketQueryNlpTrace
@@ -182,7 +192,7 @@ export interface TicketRetrievalRequest {
   readonly target: TicketTaskTarget
   /** Exact direct-user text retained for provenance. */
   readonly query: string
-  /** Retrieval-only text after deterministic task/count directives; business filters are adaptive repairs. */
+  /** Normalized retrieval view; explicit business conditions are carried separately in filters. */
   readonly retrievalQuery?: string
   readonly retrievalIntent?: TicketRetrievalIntent
   /** User-level result policy. Omission means adaptive; it is independent from task target. */
@@ -242,7 +252,6 @@ export interface TicketSnapshot {
     /** Host-facing L2 detail projection. */
     readonly detailRead: boolean
     /** Dedicated, reauthorized single-ticket L3 source read. */
-    readonly l3DetailsRead: boolean
     readonly exportRead: boolean
     readonly keywordSearch: true
     readonly denseSearch: boolean
@@ -255,7 +264,7 @@ export interface TicketFieldDescriptor {
   readonly key: string
   readonly label: string
   readonly valueKind: 'keyword' | 'datetime' | 'text' | 'string_list' | 'raw_json'
-  readonly accessLevel: 'L0' | 'L2' | 'L3'
+  readonly accessLevel: 'L0' | 'L1' | 'L2' | 'L3'
   readonly filterOperators: readonly TicketFilterOperator[]
   readonly sensitivity: 'non_sensitive' | 'source_controlled'
 }
@@ -284,14 +293,14 @@ export interface TicketL0 {
   readonly additionalFields?: readonly TicketDisplayField[]
 }
 
-/** Authorized L1 title plus L2 summary projection returned as one candidate. */
+/** Authorized title and summary. Legacy L2 markers are migrated by field meaning. */
 export interface TicketCandidate {
   readonly ref: TicketCandidateRef
   readonly displayId: string
   readonly sourceVersion: string
   readonly snapshotId: TicketSnapshotId
   readonly contentHash: string
-  readonly evidenceLevel: 'L2'
+  readonly evidenceLevel: 'L1' | 'L2'
   readonly rank: number
   readonly title: string
   readonly summary: string
@@ -348,6 +357,12 @@ export interface TicketEvidenceSegment {
   readonly estimatedTokens: number
   readonly trust: 'untrusted_ticket_evidence'
   readonly truncated: boolean
+  readonly evidenceLevel?: 'L1' | 'L2'
+  /** Provider receipt, model delivery, and UI reading are separate observations. */
+  readonly readers?: readonly ('provider' | 'model' | 'user')[]
+  readonly snapshotId?: TicketSnapshotId
+  readonly authorizationVersion?: string
+  readonly principalBindingHash?: string
 }
 
 export interface TicketEvidenceResult {
@@ -373,17 +388,16 @@ export interface TicketDetail {
 }
 
 export interface TicketDetailResult {
+  /** Same Provider evidence identities as model reads, with complete authorized fields. */
+  readonly evidence?: readonly TicketEvidenceSegment[]
   readonly snapshotId: TicketSnapshotId
   readonly details: readonly TicketDetail[]
   readonly rejectedCandidateRefs: readonly TicketCandidateRef[]
   readonly warnings: readonly string[]
 }
 
-/**
- * Reauthorized L3 source value for exactly one current candidate. The source
- * envelope and payload stay out of L1 candidates and L2 evidence segments.
- */
-export interface TicketL3Detail {
+/** Historical event payload only; current Providers never return complete raw records. */
+export interface LegacyRawDetail {
   readonly candidateRef: TicketCandidateRef
   readonly displayId: string
   readonly sourceVersion: string
@@ -396,13 +410,6 @@ export interface TicketL3Detail {
   }
   readonly rawPayload: Readonly<Record<string, unknown>>
   readonly trust: 'untrusted_ticket_evidence'
-}
-
-export interface TicketL3DetailsResult {
-  readonly snapshotId: TicketSnapshotId
-  readonly requestedCandidateRefs: readonly TicketCandidateRef[]
-  readonly details: readonly TicketL3Detail[]
-  readonly warnings: readonly string[]
 }
 
 export interface TicketProviderStatus {

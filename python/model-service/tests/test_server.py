@@ -121,7 +121,7 @@ def test_rejects_protocol_drift_and_duplicate_rerank_ids() -> None:
     assert error.json()["error"]["code"] == "INVALID_REQUEST"
 
 
-def test_rag_ranking_and_policy_endpoints_use_a_separate_versioned_protocol() -> None:
+def test_rag_ranking_endpoint_uses_a_separate_versioned_protocol() -> None:
     profile = {
         "embeddingInstruction": "retrieve", "rerankerInstruction": "judge",
         "embeddingBatchSize": 16, "modelDeadlineMs": 5_000, "minimumDenseScore": 0.1, "denseTopK": 15,
@@ -141,19 +141,8 @@ def test_rag_ranking_and_policy_endpoints_use_a_separate_versioned_protocol() ->
     assert ranked.json()["protocolVersion"] == RAG_PROTOCOL_VERSION
     assert ranked.json()["result"]["hits"][0]["documentId"] == "ticket-1"
 
-    policy = call("POST", "/v1/policy/candidate-ranking", {
-        "protocolVersion": RAG_PROTOCOL_VERSION, "requestId": "policy-1",
-        "input": {
-            "previousHistory": [], "previousObservations": [],
-            "page": [{"ref": "c1", "rank": 1}], "searchEventId": "event-1",
-            "stage": "initial_hybrid", "queryFingerprint": "query-1", "excludedRefs": [],
-        },
-    })
-    assert policy.status_code == 200
-    assert policy.json()["result"]["active"] == [{"ref": "c1", "rank": 1}]
-
-    mismatch = call("POST", "/v1/policy/candidate-ranking", {
-        "protocolVersion": PROTOCOL_VERSION, "requestId": "bad-policy", "input": {},
+    mismatch = call("POST", "/v1/ranking/rank", {
+        "protocolVersion": PROTOCOL_VERSION, "requestId": "bad-ranking", "input": {},
     })
     assert mismatch.status_code == 409
     assert mismatch.json()["protocolVersion"] == RAG_PROTOCOL_VERSION

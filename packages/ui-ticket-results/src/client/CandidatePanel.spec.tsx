@@ -15,7 +15,7 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   IconChevronUpOutline14: () => null,
 }))
 
-import { CandidatePanel, type CandidatePanelProps } from './CandidatePanel.js'
+import { CandidatePanel, AuthorizedCandidatePanel, type CandidatePanelProps } from './CandidatePanel.js'
 
 const snapshotId = TicketSnapshotId('snapshot-ui-density')
 
@@ -96,8 +96,16 @@ function data(): TicketCandidateNode {
 }
 
 describe('CandidatePanel density', () => {
-  it('starts collapsed and shows only the user query plus extracted keywords', () => {
+  it('does not render any historical ticket or query before the Host grants current access', () => {
     const html = renderToStaticMarkup(<CandidatePanel {...({ node: { data: data() }, sessionId: 'session-ui' } as CandidatePanelProps)} />)
+    expect(html).toContain('正在按当前身份重新授权工单集合')
+    expect(html).not.toContain('副卡')
+    expect(html).not.toContain('工单标题')
+    expect(html).not.toContain('已读取的问题描述')
+  })
+
+  it('starts collapsed and shows only the user query plus extracted keywords', () => {
+    const html = renderToStaticMarkup(<AuthorizedCandidatePanel {...({ node: { data: data() }, sessionId: 'session-ui' } as CandidatePanelProps)} />)
     expect(html).toContain('候选工单 · 6 条')
     expect(html).toContain('aria-expanded="false"')
     expect(html).toContain('原始查询')
@@ -117,7 +125,7 @@ describe('CandidatePanel density', () => {
 
   it('labels an active page as loaded candidates rather than a fixed first batch', () => {
     const current = data()
-    const html = renderToStaticMarkup(<CandidatePanel {...({
+    const html = renderToStaticMarkup(<AuthorizedCandidatePanel {...({
       node: { data: { ...current, result: undefined } }, sessionId: 'session-ui',
     } as CandidatePanelProps)} />)
     expect(html).toContain('候选工单 · 已加载 6 条')

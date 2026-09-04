@@ -33,13 +33,13 @@ function snapshot() {
     queryPolicyVersion: 'query-v1',
     fieldCatalog: [
       { key: 'source.raw', label: '原始载荷', valueKind: 'raw_json', accessLevel: 'L3', filterOperators: [], sensitivity: 'source_controlled' },
+      { key: 'answer', label: '处理结果', valueKind: 'text', accessLevel: 'L2', filterOperators: [], sensitivity: 'source_controlled' },
     ],
     capabilities: {
       exhaustive: true,
       pagination: true,
       evidencePromotion: true,
       detailRead: true,
-      l3DetailsRead: true,
       exportRead: true,
       keywordSearch: true as const,
       denseSearch: true,
@@ -108,7 +108,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
     expect(spec).not.toHaveProperty('requestedCount')
   })
 
-  it('fails closed when a remote page crosses an explicit result boundary', () => {
+  it('accepts later candidate pages beyond the user result goal while enforcing page capacity', () => {
     const provider = new StreamClusterTicketProvider({ baseUrl: 'http://127.0.0.1:1' })
     const query = provider.resolve({
       target: 'ranked_cases', query: '主卡工单', requestedCount: 5, countPolicy: 'explicit',
@@ -122,7 +122,10 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
       snapshotId: 'snapshot-1', queryFingerprint: 'query-1',
       candidates: [candidate(rank)], completeness: nextCursor === undefined ? 'exhaustive' : 'bounded',
       ...(nextCursor === undefined ? {} : { nextCursor }),
-      scanned: rank, returned: 1, elapsedMs: 1, appliedFilters: [], warnings: [], trace: searchTrace(),
+      scanned: rank, returned: 1, elapsedMs: 1, appliedFilters: [], warnings: [], trace: {
+        ...searchTrace(), signals: [{ candidateRef: `candidate-${rank}`, finalRank: rank, fusedScore: 0.5,
+          channels: [{ channel: 'keyword', rank, score: 0.5 }] }],
+      },
       boundary: {
         authorizedCorpusSize: 10, documentsAfterStructuredFilters: 10, documentsEligibleForKeywordChannel: 10,
         rankedHits: 10, resultPagesExhausted: nextCursor === undefined, semanticRecallKnown: false,
@@ -134,9 +137,12 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
     } as const
 
     expect(() => assertSearchPage(page(6), TicketSnapshotId('snapshot-1'), query, options, capabilities))
-      .toThrow(/显式 Top-K/u)
+      .not.toThrow()
     expect(() => assertSearchPage(page(5, 'cursor-after-five'), TicketSnapshotId('snapshot-1'), query, options, capabilities))
-      .toThrow(/显式 Top-K/u)
+      .not.toThrow()
+    expect(() => assertSearchPage(page(6), TicketSnapshotId('snapshot-1'), query, { ...options, topK: 0 }, capabilities))
+      .toThrow(/计量字段/u)
+    expect(provider.resolve({ target: 'ranked_cases', query: '主卡', requestedCount: 150, countPolicy: 'explicit' }).requestedCount).toBe(150)
   })
 
   it('preserves NLP-selected surface terms and the original vector text in the remote spec', () => {
@@ -215,7 +221,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
           providerId: 'streamcluster-test',
           readOnly: true,
           capabilities: {
-            snapshot: true, search: true, evidenceRead: true, detailRead: true, l3DetailsRead: true, status: true,
+            snapshot: true, search: true, evidenceRead: true, detailRead: true, status: true,
             keywordSearch: true, denseSearch: true, hybridFusion: true, reranking: false, rankingTrace: true,
           },
         }))
@@ -232,37 +238,28 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
           },
         }))
       } else if (request.url === '/v1/ticket-retrieval/evidence') {
+        const input = (call.body as { request: { candidateRefs: string[]; fields: string[]; tokenBudget: number } }).request
+        if (input.fields.includes('source.raw')) {
+          response.statusCode = 403
+          response.end(JSON.stringify({ protocolVersion: STREAMCLUSTER_PROTOCOL_VERSION,
+            error: { code: 'FIELD_NOT_ALLOWED', message: '完整原始载荷不属于受控正文字段。', retryable: false } }))
+          return
+        }
         response.end(JSON.stringify({
           protocolVersion: STREAMCLUSTER_PROTOCOL_VERSION,
           result: {
-            snapshotId: 'snapshot-1', evidence: [], requestedCandidateRefs: ['candidate-1'],
-            rejectedCandidateRefs: ['candidate-1'], tokenBudget: 20, tokensUsed: 0, warnings: [],
+            snapshotId: 'snapshot-1', requestedCandidateRefs: input.candidateRefs,
+            evidence: input.candidateRefs.map(ref => ({ evidenceId: `evidence-${ref}-answer`, candidateRef: ref,
+              displayId: ref === 'candidate-1' ? 'TKT-1' : 'TKT-2', sourceVersion: 'source-v1', contentHash: `hash-${ref}`,
+              field: 'answer', text: '重新同步后恢复正常。', start: 0, end: 10, estimatedTokens: 10,
+              trust: 'untrusted_ticket_evidence', truncated: false })),
+            rejectedCandidateRefs: [], tokenBudget: input.tokenBudget, tokensUsed: input.candidateRefs.length * 10, warnings: [],
           },
         }))
       } else if (request.url === '/v1/ticket-retrieval/details') {
         response.end(JSON.stringify({
           protocolVersion: STREAMCLUSTER_PROTOCOL_VERSION,
           result: { snapshotId: 'snapshot-1', details: [], rejectedCandidateRefs: ['candidate-1'], warnings: [] },
-        }))
-      } else if (request.url === '/v1/ticket-retrieval/l3-details') {
-        response.end(JSON.stringify({
-          protocolVersion: STREAMCLUSTER_PROTOCOL_VERSION,
-          result: {
-            snapshotId: 'snapshot-1',
-            requestedCandidateRefs: ['candidate-2', 'candidate-1'],
-            details: [{
-              candidateRef: 'candidate-2', displayId: 'TKT-2', sourceVersion: 'source-v1', contentHash: 'hash-2',
-              source: { datasetId: 'tickets', datasetVersion: 'v1', schemaVersion: 'raw-v1', recordId: '2' },
-              rawPayload: { conversation: ['第二条原始用户消息', '第二条原始处理回复'] },
-              trust: 'untrusted_ticket_evidence',
-            }, {
-              candidateRef: 'candidate-1', displayId: 'TKT-1', sourceVersion: 'source-v1', contentHash: 'hash-1',
-              source: { datasetId: 'tickets', datasetVersion: 'v1', schemaVersion: 'raw-v1', recordId: '1' },
-              rawPayload: { conversation: ['第一条原始用户消息', '第一条原始处理回复'] },
-              trust: 'untrusted_ticket_evidence',
-            }],
-            warnings: [],
-          },
         }))
       } else {
         response.end(JSON.stringify({
@@ -292,25 +289,29 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
       fields: ['answer'],
       purpose: 'inline_detail',
     })
-    const l3 = await provider.readL3Details(principal, {
+    const batch = await provider.readEvidence(principal, {
       snapshotId: opened.snapshotId,
       candidateRefs: [TicketCandidateRef('candidate-2'), TicketCandidateRef('candidate-1')],
-      purpose: 'model_ticket_load',
+      fields: ['answer'], tokenBudget: 100,
     })
+    await expect(provider.readEvidence(principal, {
+      snapshotId: opened.snapshotId, candidateRefs: [TicketCandidateRef('candidate-1')], fields: ['source.raw'], tokenBudget: 100,
+    })).rejects.toMatchObject({ code: 'FIELD_NOT_ALLOWED' })
     await provider.status(principal, opened.snapshotId)
 
     expect(calls.filter(call => call.url === '/v1/ticket-retrieval/capabilities')).toHaveLength(1)
     expect(calls.every(call => call.authorization === 'Bearer test-token')).toBe(true)
     const postBodies = calls.filter(call => call.method === 'POST').map(call => call.body as Record<string, unknown>)
-    expect(postBodies).toHaveLength(6)
+    expect(postBodies).toHaveLength(7)
     expect(postBodies.every(body => body.protocolVersion === STREAMCLUSTER_PROTOCOL_VERSION)).toBe(true)
     expect(postBodies.every(body => (body.principal as TrustedPrincipalContext).subjectId === 'development-admin')).toBe(true)
     expect(calls.find(call => call.url === '/v1/ticket-retrieval/search')?.body).toMatchObject({
       options: { topK: 5, maxScan: 100, stage: 'baseline' },
     })
     expect(spec.normalizedQuery).toBe('主副卡')
-    expect(l3.details.map(detail => detail.candidateRef)).toEqual(['candidate-2', 'candidate-1'])
-    expect(l3.details[0]?.rawPayload).toEqual({ conversation: ['第二条原始用户消息', '第二条原始处理回复'] })
+    expect(batch.evidence.map(detail => detail.candidateRef)).toEqual(['candidate-2', 'candidate-1'])
+    expect(batch.evidence[0]?.text).toBe('重新同步后恢复正常。')
+    expect(batch.evidence[0]?.evidenceId).toBe('evidence-candidate-2-answer')
   })
 
   it('rejects snapshot drift and preserves a structured remote error', async () => {
@@ -321,7 +322,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
           protocolVersion: STREAMCLUSTER_PROTOCOL_VERSION,
           providerId: 'streamcluster-test', readOnly: true,
           capabilities: {
-            snapshot: true, search: true, evidenceRead: true, detailRead: true, l3DetailsRead: true, status: true,
+            snapshot: true, search: true, evidenceRead: true, detailRead: true, status: true,
             keywordSearch: true, denseSearch: true, hybridFusion: true, reranking: false, rankingTrace: true,
           },
         }))
@@ -366,7 +367,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
         providerId: 'streamcluster-test',
         readOnly: true,
         capabilities: {
-          snapshot: true, search: true, evidenceRead: true, detailRead: true, l3DetailsRead: true, status: true,
+          snapshot: true, search: true, evidenceRead: true, detailRead: true, status: true,
           keywordSearch: true, denseSearch: true, hybridFusion: true, reranking: false,
         },
       }))
@@ -384,7 +385,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
           protocolVersion: STREAMCLUSTER_PROTOCOL_VERSION,
           providerId: 'streamcluster-test', readOnly: true,
           capabilities: {
-            snapshot: true, search: true, evidenceRead: true, detailRead: true, l3DetailsRead: true, status: true,
+            snapshot: true, search: true, evidenceRead: true, detailRead: true, status: true,
             keywordSearch: true, denseSearch: true, hybridFusion: true, reranking: false, rankingTrace: true,
           },
         }))
@@ -422,7 +423,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
           protocolVersion: STREAMCLUSTER_PROTOCOL_VERSION,
           providerId: 'streamcluster-test', readOnly: true,
           capabilities: {
-            snapshot: true, search: true, evidenceRead: true, detailRead: true, l3DetailsRead: true, status: true,
+            snapshot: true, search: true, evidenceRead: true, detailRead: true, status: true,
             keywordSearch: true, denseSearch: true, hybridFusion: true, reranking: false, rankingTrace: true,
           },
         }))
@@ -463,7 +464,7 @@ describe('StreamClusterTicketProvider HTTP contract', () => {
           protocolVersion: STREAMCLUSTER_PROTOCOL_VERSION,
           providerId: 'streamcluster-test', readOnly: true,
           capabilities: {
-            snapshot: true, search: true, evidenceRead: true, detailRead: true, l3DetailsRead: true, status: true,
+            snapshot: true, search: true, evidenceRead: true, detailRead: true, status: true,
             keywordSearch: true, denseSearch: true, hybridFusion: true, reranking: false, rankingTrace: true,
           },
         }))

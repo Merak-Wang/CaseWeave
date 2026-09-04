@@ -363,7 +363,6 @@ class RetrievalRankingBackend:
                 "dense": DENSE_RANKING_VERSION, "fusion": FUSION_VERSION,
                 "vectorCache": VECTOR_CACHE_FORMAT_VERSION, "preparationProgressSchema": 1,
             },
-            "policy": {"candidateRanking": "candidate-ranking-v1", "knowledgeAssessment": "knowledge-assessment-v1"},
         }
 
     def _verify_model_identity(self, profile: dict[str, Any], require_dense: bool) -> dict[str, Any] | None:

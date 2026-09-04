@@ -86,14 +86,10 @@ const stoppedState: RetrievalState = {
   budget: {
     maxRounds: 8,
     maxSearches: 4,
-    maxPromotions: 3,
-    maxEvidenceTokens: 1500,
     maxLatencyMs: 120000,
-    roundsUsed: 1,
+    modelStepsUsed: 1,
     searchesUsed: 1,
-    promotionsUsed: 0,
-    evidenceTokensUsed: 0,
-    latencyMs: 10,
+    wallClockElapsedMs: 10,
   },
   progress: {
     newCandidateRefs: [],
