@@ -34,6 +34,7 @@ export interface ModelServiceReadyResponse {
 }
 
 export interface EmbedTextsParams {
+  readonly requireCompleteInput?: boolean
   readonly protocolVersion: typeof MODEL_SERVICE_PROTOCOL_VERSION
   readonly requestId: string
   readonly model: string
@@ -46,6 +47,8 @@ export interface EmbedTextsParams {
 }
 
 export interface EmbedTextsResponse {
+  readonly timings?: Readonly<Record<string, number>>
+  readonly inputComplete?: boolean
   readonly protocolVersion: typeof MODEL_SERVICE_PROTOCOL_VERSION
   readonly requestId: string
   readonly model: string

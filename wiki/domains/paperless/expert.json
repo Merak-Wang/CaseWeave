@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "paperless",
+  "domain": "paperless",
+  "description": "无纸化与受理单",
+  "activationPhase": "post-fast-query",
+  "authority": "reference-data-only",
+  "knowledgeRefs": [
+    "paperless-document-types",
+    "paperless-query-states"
+  ],
+  "toolGrants": [],
+  "promptOverride": null,
+  "outputRequirements": [
+    "区分先验与工单证据",
+    "引用实际可见工单片段",
+    "列出歧义及反例",
+    "不修改用户条件"
+  ]
+}

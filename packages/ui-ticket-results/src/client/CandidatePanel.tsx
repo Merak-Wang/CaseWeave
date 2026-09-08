@@ -10,8 +10,9 @@ import type {
 } from '@retrieval-agent/contracts'
 import css from './CandidatePanel.module.css'
 import { continueFailureMessage, continueRetrieval } from './continue.js'
-import { detailFailureMessage, readTicketDetail } from './detail.js'
-import { readRetrievalPresentation } from './presentation.js'
+import { detailFailureMessage, readTicketDetail } from '@retrieval-agent/product-api/detail-client'
+import { readRetrievalPresentation, RetrievalPresentationClientError, snapshotInvalidated } from './presentation.js'
+import { ResultDelivery } from './ResultDelivery.js'
 
 export type CandidatePanelProps = PropsRuntime<'conversation.chat.node', 'ticket-candidates'>
 
@@ -135,11 +136,29 @@ function DetailBody({
   </div>
 }
 
+/**
+ * Deterministic reauthorization failures never offer the same request again: a dead snapshot
+ * can only be recovered by a new retrieval, which the pre-step restarts from user input.
+ */
+export function PresentationFailure({ error, onRetry }: {
+  readonly error: RetrievalPresentationClientError
+  readonly onRetry: () => void
+}) {
+  return <section className={css.panel} aria-label="工单检索结果">
+    <p role="alert">{error.message}</p>
+    {error.retryable
+      ? <button type="button" className={css.retryButton} onClick={onRetry}>重新授权</button>
+      : snapshotInvalidated(error)
+        ? <p className={css.notice}>快照失效后无法恢复本次授权。请在输入框中补充或重述需求重新发起检索，原查询与已确认条件会自动并入。</p>
+        : null}
+  </section>
+}
+
 /** Deterministic collection renderer. Detail clicks always go through the trusted Product Host. */
 export function CandidatePanel(props: CandidatePanelProps) {
   const { node, sessionId } = props
   const [presentation, setPresentation] = useState<{
-    readonly key: string; readonly data?: TicketCandidateNode; readonly error?: string
+    readonly key: string; readonly data?: TicketCandidateNode; readonly error?: RetrievalPresentationClientError
   }>()
   const key = `${sessionId}:${node.data.retrievalId}:${node.data.version}`
   const [retry, setRetry] = useState(0)
@@ -148,15 +167,25 @@ export function CandidatePanel(props: CandidatePanelProps) {
     void readRetrievalPresentation(String(sessionId), node.data.retrievalId, abort.signal)
       .then(data => { if (!abort.signal.aborted) setPresentation({ key, data }) })
       .catch((error: unknown) => {
-        if (!abort.signal.aborted) setPresentation({ key, error: error instanceof Error ? error.message : '无法重新授权当前工单集合。' })
+        if (abort.signal.aborted) return
+        setPresentation({
+          key,
+          error: error instanceof RetrievalPresentationClientError
+            ? error
+            : new RetrievalPresentationClientError(
+              'UNKNOWN',
+              error instanceof Error ? error.message : '无法重新授权当前工单集合。',
+              true,
+            ),
+        })
       })
     return () => { abort.abort() }
   }, [key, retry])
   if (presentation?.key === key && presentation.error !== undefined) {
-    return <section className={css.panel} aria-label="工单检索结果">
-      <p role="alert">{presentation.error}</p>
-      <button type="button" onClick={() => { setPresentation(undefined); setRetry(value => value + 1) }}>重新授权</button>
-    </section>
+    return <PresentationFailure
+      error={presentation.error}
+      onRetry={() => { setPresentation(undefined); setRetry(value => value + 1) }}
+    />
   }
   return <AuthorizedCandidatePanel
     {...props}
@@ -184,7 +213,7 @@ export function AuthorizedCandidatePanel({ node, sessionId, accessPending = fals
     ? '当前结果已就绪'
     : STATUS_LABELS[data.status]
   const heading = terminal
-    ? `候选工单 · ${data.candidates.length} 条`
+    ? `过程候选 · ${data.candidates.length} 条`
     : `候选工单 · 已加载 ${data.candidates.length} 条`
 
   useEffect(() => {
@@ -238,6 +267,7 @@ export function AuthorizedCandidatePanel({ node, sessionId, accessPending = fals
 
   return (
     <section className={css.panel} aria-label="工单检索结果" data-retrieval-status={data.status}>
+      {data.result === undefined ? null : <ResultDelivery key={data.result.resultRevision} data={data} sessionId={String(sessionId)} />}
       <button
         type="button"
         className={css.collectionToggle}
@@ -263,9 +293,9 @@ export function AuthorizedCandidatePanel({ node, sessionId, accessPending = fals
         <p className={css.query}><span>原始查询</span>{data.querySummary || '—'}</p>
         <p className={css.logic}>
           <span>提取关键词</span>
-          {(data.fastQuery?.keyword?.terms ?? []).length === 0
+          {(data.keywordTerms ?? data.fastQuery?.keyword?.terms ?? []).length === 0
             ? <em>—</em>
-            : data.fastQuery!.keyword!.terms.map(term => <em key={term}>{term}</em>)}
+            : (data.keywordTerms ?? data.fastQuery!.keyword!.terms).map(term => <em key={term}>{term}</em>)}
         </p>
         {data.queryAmbiguities === undefined || data.queryAmbiguities.length === 0 ? null : (
           <p className={css.noticeInline}>待确认：{data.queryAmbiguities.map(item => item.text).join('；')}</p>
@@ -276,11 +306,17 @@ export function AuthorizedCandidatePanel({ node, sessionId, accessPending = fals
         <div className={css.context} aria-label="检索上下文">
           <span>{boundaryText(data)}</span>
           {data.result === undefined ? null : <span>
-            已确认 {data.result.tickets.length} 条 · 待判定 {data.result.undeterminedCandidates?.length ?? 0} 条
+            已确认 {data.result.tickets.length} 条 · 待判定 {data.candidates.filter(candidate => !data.result!.tickets.some(ticket => ticket.ref === candidate.ref)).length} 条
           </span>}
         </div>
       </button>
 
+      {data.searchProgress === undefined ? null : <div role="status" aria-label="检索通道进度">
+        {data.searchProgress.channels.map(channel => <p key={channel.channel}>
+          {channel.channel === 'keyword' ? '关键词全集' : '向量召回'}：
+          {{ running: '进行中', completed: '已完成', failed: '失败，已有候选保留', skipped: '本轮未执行' }[channel.status]}，已取得 {channel.count} 条
+        </p>)}
+      </div>}
       {data.message === undefined ? null : (
         <p className={data.status === 'error' ? css.error : css.notice} role={data.status === 'error' ? 'alert' : 'status'}>
           {data.message}
@@ -316,13 +352,14 @@ export function AuthorizedCandidatePanel({ node, sessionId, accessPending = fals
                   {candidate.summary.trim().length === 0 || candidate.summary.trim() === candidate.title.trim()
                     ? null
                     : <span className={css.summary}>{candidate.summary}</span>}
+                  {candidate.summaryOrigin?.kind === 'generated' ? <span className={css.source}>生成摘要 · 可打开来源详情复核</span> : null}
                   {metadata.length === 0 ? null : <span className={css.metadata}>
                     {metadata.map(item => <span key={`${item.label}-${item.value}`}><b>{item.label}</b>{item.value}</span>)}
                   </span>}
                   <span className={css.source} title={candidate.sourceVersion}>来源 {compactVersion(candidate.sourceVersion)}</span>
                   {data.alreadyReadEvidence.filter(evidence => evidence.candidateRef === candidate.ref).map(evidence => (
                     <span key={evidence.evidenceId} className={css.source}>
-                      {evidence.evidenceLevel ?? (['title', 'summary'].includes(evidence.field) ? 'L1' : 'L2')} · {evidence.evidenceId} ·
+                      {evidence.projectionLevel ?? evidence.evidenceLevel ?? (['title', 'summary'].includes(evidence.field) ? 'L1' : 'L2')} · {evidence.evidenceId} ·
                       {evidence.readers === undefined ? '读取者未记录' : evidence.readers.map(reader => reader === 'model' ? '模型已读' : reader === 'user' ? '用户已读' : '来源已提供').join('、')}
                     </span>
                   ))}

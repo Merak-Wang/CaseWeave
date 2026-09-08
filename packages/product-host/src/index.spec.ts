@@ -6,11 +6,15 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader, { Group } from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
+import WebServer from '@deepseek-ai/dsh-host-webserver'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { InMemoryDetailReadAuditSink, InMemoryExportAuditSink } from '@retrieval-agent/product-api'
-import { RetrievalId } from '@retrieval-agent/contracts'
+import { callReportModel } from '@retrieval-agent/agent-plugin'
+import { RetrievalId, TicketCandidateRef } from '@retrieval-agent/contracts'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  apply as applyProductHost,
+  inject as productHostInject,
   continueRetrievalForAgent,
   exportCandidatesForAgent,
   parseContinueRetrievalParams,
@@ -25,17 +29,23 @@ const ISOLATED_SERVICES_FIXTURE = `
 const candidateRef = 'candidate-isolated-1'
 const state = {
   retrievalId: 'retrieval-isolated-1',
+  stateId: 'state-isolated-1',
   revision: 1,
-  termination: 'active',
+  termination: 'top_k_accepted',
   accessValidation: 'current',
-  phase: 'assessed',
+  phase: 'stopped',
   task: { target: 'ranked_cases', countPolicy: 'adaptive' },
   gaps: [],
-  query: { original: '隔离服务导出' },
+  query: { original: '隔离服务导出', confirmedConstraints: [] },
   snapshot: {
     snapshotId: 'snapshot-isolated-1', shortId: 'snap-isolated',
-    fieldCatalog: [{ key: 'problemDescription', label: '问题描述', valueKind: 'text', accessLevel: 'L2' }],
-    capabilities: { detailRead: true },
+    fieldCatalog: [
+      { key: 'summary', label: '摘要', valueKind: 'text', accessLevel: 'L1' },
+      { key: 'problemDescription', label: '问题描述', valueKind: 'text', accessLevel: 'L2' },
+      { key: 'source.raw_dialogue', label: '完整对话', valueKind: 'text', accessLevel: 'L3' },
+      { key: 'source.raw', label: '原始载荷', valueKind: 'raw_json', accessLevel: 'L3' },
+    ],
+    capabilities: { detailRead: true, exportRead: true },
   },
   candidates: [{
     ref: candidateRef,
@@ -50,7 +60,7 @@ const state = {
     matchFragments: [],
   }],
   candidateHistory: [],
-  selectedCandidateRefs: [], excludedCandidateRefs: [],
+  selectedCandidateRefs: [candidateRef], excludedCandidateRefs: [],
   promotedEvidence: [],
   lastPage: { completeness: 'bounded' },
 }
@@ -87,7 +97,7 @@ const ticketRetrievalProvider = {
       displayId: 'TKT-ISO-1',
       sourceVersion: 'fixture-v1',
       title: '隔离 preset 中的工单',
-      summary: '该记录验证 Host 能通过公开 serviceFor 读取隔离服务。',
+      summary: '隔离 preset 工单摘要',
       l0: { status: 'resolved', priority: 'high' },
       fields: Object.fromEntries(request.fields.map(field => [field, ['数据库返回的详细问题描述']])),
       unavailableFields: [],
@@ -149,16 +159,93 @@ async function isolatedPresetHarness(): Promise<{
 }
 
 describe('DSH product Host adapter', () => {
+  it('can invoke the report model from the declared Cordis product Host scope', async () => {
+    const ctx = new Context()
+    const invoked = vi.fn()
+    for (const name of ['webServer', 'agents', 'agentPresets', 'workspaceRegistry']) ctx.reflect.provide(name as never, {} as never)
+    await ctx.plugin({ name: 'report-model-provider', apply(provider: Context) {
+      provider.reflect.provide('llm', { async *stream() {
+        invoked()
+        yield { type: 'block-end', block: { type: 'tool-call', name: 'retrieval_report', arguments: JSON.stringify({ paragraphs: [{ text: '有原文依据。', citations: ['ref-1'] }] }) } }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      } } as never)
+    } })
+    const agent = { session: { requestContext: () => ({ provider: 'fixture', model: 'fixture', contextWindow: 32000 }) } } as unknown as Agent
+    const invoke = (inject: string[]) => new Promise<unknown>((resolve, reject) => {
+      void Promise.resolve(ctx.plugin({ name: 'product-host-report-scope', inject, async apply(scope: Context) {
+        try { resolve(await callReportModel(scope, agent, 'report-scope', 'write', {}, new AbortController().signal, async () => {})) }
+        catch (error) { reject(error) }
+      } })).catch(reject)
+    })
+    try {
+      await expect(invoke(productHostInject.filter(name => name !== 'llm'))).rejects.toThrow('without inject')
+      await expect(invoke(productHostInject)).resolves.toEqual({ paragraphs: [{ text: '有原文依据。', citations: ['ref-1'] }] })
+      expect(invoked).toHaveBeenCalledOnce()
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('serves confirmed-only downloads through the actual registered HTTP route', async () => {
+    const harness = await isolatedPresetHarness()
+    try {
+      const service = harness.ctx.agentPresets.serviceFor(harness.agent, 'retrievalAgent')!
+      const current = service.currentOrUndefined(harness.agent)!
+      const pending = { ...current.candidates[0]!, ref: TicketCandidateRef('pending-http'), displayId: 'PENDING-HTTP' }
+      vi.spyOn(service, 'currentOrUndefined').mockReturnValue({ ...current, candidates: [...current.candidates, pending] })
+      await harness.ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+      harness.ctx.effect(() => harness.ctx.reflect.provide('agents', { get: () => harness.agent }), 'HTTP test Agent lookup')
+      await applyProductHost(harness.ctx)
+      const url = `http://127.0.0.1:${harness.ctx.webServer.port}/api/retrieval-agent/export`
+      const payload = { sessionId: 'session-isolated-1', retrievalId: current.retrievalId, resultRevision: current.stateId }
+      const post = (body: unknown) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const response = await post(payload)
+      expect(response.status).toBe(200)
+      const exported = await response.json() as { contentUtf8: string; receipt: { rowCount: number; resultRevision: string } }
+      expect(exported.receipt).toMatchObject({ rowCount: 1, resultRevision: current.stateId })
+      expect(exported.contentUtf8).toContain('TKT-ISO-1')
+      expect(exported.contentUtf8).not.toContain('PENDING-HTTP')
+      const forged = await post({ ...payload, candidateRefs: [pending.ref] })
+      expect(forged.status).toBe(400)
+      expect(await forged.json()).toMatchObject({ code: 'CANDIDATE_NOT_FOUND' })
+      const stale = await post({ ...payload, resultRevision: 'old-result' })
+      expect(stale.status).toBe(409)
+      expect(await stale.json()).toMatchObject({ code: 'INVALID_TRANSITION' })
+      // Follow the fields advertised to the UI, rather than supplying a hand-picked L2 field.
+      const identity = { sessionId: payload.sessionId, retrievalId: payload.retrievalId }
+      const request = (endpoint: string, body: unknown) => fetch(url.replace('/export', endpoint), {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      })
+      const presentation = await request('/presentation', identity)
+      expect(presentation.status).toBe(200)
+      const { node } = await presentation.json() as { node: { detailFields: { key: string }[] } }
+      const fields = node.detailFields.map(field => field.key)
+      expect(fields).toEqual(['summary', 'problemDescription', 'source.raw_dialogue'])
+      const detail = await request('/detail', { ...identity, candidateRefs: [current.candidates[0]!.ref], fields })
+      expect(detail.status).toBe(200)
+      expect(await detail.json()).toMatchObject({ details: [{ fields: {
+        summary: ['数据库返回的详细问题描述'], 'source.raw_dialogue': ['数据库返回的详细问题描述'],
+      } }] })
+      const raw = await request('/detail', { ...identity, candidateRefs: [current.candidates[0]!.ref], fields: ['source.raw'] })
+      expect(raw.status).toBe(400)
+      expect(await raw.json()).toMatchObject({ code: 'FIELD_NOT_ALLOWED' })
+    } finally {
+      await harness.ctx.fiber.dispose()
+      await rm(harness.root, { recursive: true, force: true })
+    }
+  })
+
   it('accepts only the explicit wire contract', () => {
     expect(parseExportCandidatesParams({
-      sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: ['candidate-1'],
+      sessionId: 'session-1', retrievalId: 'retrieval-1', resultRevision: 'result-1', candidateRefs: ['candidate-1'],
     })).toMatchObject({ sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: ['candidate-1'] })
     expect(() => parseExportCandidatesParams({
       sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: [], principal: { tenantId: 'attacker' },
     })).toThrow(/未知字段/u)
+    expect(parseExportCandidatesParams({
+      sessionId: 'session-1', retrievalId: 'retrieval-1', resultRevision: 'result-1',
+    })).not.toHaveProperty('candidateRefs')
     expect(() => parseExportCandidatesParams({
-      sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: Array.from({ length: 201 }, (_, index) => `ref-${index}`),
-    })).toThrow(/候选引用/u)
+      sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: ['candidate-1'],
+    })).toThrow(/引用无效/u)
   })
 
   it('accepts only one opaque candidate per explicit detail wire request', () => {
@@ -193,6 +280,7 @@ describe('DSH product Host adapter', () => {
       const params = parseExportCandidatesParams({
         sessionId: 'session-isolated-1',
         retrievalId: 'retrieval-isolated-1',
+        resultRevision: 'state-isolated-1',
         candidateRefs: ['candidate-isolated-1'],
       })
       const audit = new InMemoryExportAuditSink()
@@ -238,6 +326,36 @@ describe('DSH product Host adapter', () => {
       })
       expect(audit.records).toHaveLength(1)
       expect(record).toHaveBeenCalledWith(harness.agent, response.receipt, expect.objectContaining({ details: response.details }))
+    } finally {
+      await harness.ctx.fiber.dispose()
+      await rm(harness.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects stale versions and a result revision changed while Provider work is in flight', async () => {
+    const harness = await isolatedPresetHarness()
+    try {
+      const service = harness.ctx.agentPresets.serviceFor(harness.agent, 'retrievalAgent')!
+      const source = harness.ctx.agentPresets.serviceFor(harness.agent, 'ticketRetrievalProvider')!
+      const state = service.currentOrUndefined(harness.agent)!
+      let current = state
+      vi.spyOn(service, 'currentOrUndefined').mockImplementation(() => current)
+      const audit = new InMemoryExportAuditSink()
+      const record = vi.spyOn(service, 'recordExport')
+      const params = parseExportCandidatesParams({ sessionId: 'session-isolated-1',
+        retrievalId: state.retrievalId, resultRevision: state.stateId })
+      await expect(exportCandidatesForAgent(harness.ctx, harness.agent, { ...params, resultRevision: 'stale' }, audit))
+        .rejects.toMatchObject({ code: 'INVALID_TRANSITION' })
+      const read = source.readDetails.bind(source)
+      vi.spyOn(source, 'readDetails').mockImplementation(async (...args) => {
+        const response = await read(...args)
+        current = { ...state, phase: 'assessed', termination: 'active', selectedCandidateRefs: [] }
+        return response
+      })
+      await expect(exportCandidatesForAgent(harness.ctx, harness.agent, params, audit))
+        .rejects.toMatchObject({ code: 'INVALID_TRANSITION' })
+      expect(audit.records).toEqual([])
+      expect(record).not.toHaveBeenCalled()
     } finally {
       await harness.ctx.fiber.dispose()
       await rm(harness.root, { recursive: true, force: true })

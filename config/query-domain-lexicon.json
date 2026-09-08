@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "version": "telecom-query-phrases-v2",
+  "version": "telecom-query-phrases-v3",
   "phrases": [
     "异地补卡",
     "实名认证",
@@ -20,7 +20,11 @@
     "记录",
     "结果",
     "有关",
-    "相关"
+    "相关",
+    "告诉",
+    "告诉我",
+    "历史",
+    "原因"
   ],
   "booleanOperators": {
     "and": ["和", "与", "及", "以及", "并且"],

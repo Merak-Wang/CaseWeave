@@ -26,7 +26,7 @@ async function mounted() {
   const decisions: RetrievalDecision[] = []
   const app: RetrievalToolApplication = {
     current: () => current, currentOrUndefined: () => current,
-    projectContext: () => ({ rendered: '<ticket_knowledge_context>{"state_id":"state-1"}</ticket_knowledge_context>' }),
+    projectContext: async () => ({ rendered: '<ticket_knowledge_context>{"state_id":"state-1"}</ticket_knowledge_context>' }),
     decide: async (_agent, decision) => { decisions.push(decision); return current },
     recordToolCall: async () => current, stopIncomplete: vi.fn(async () => current),
   }

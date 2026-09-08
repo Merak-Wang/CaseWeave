@@ -2,7 +2,7 @@ import {
   RetrievalStateId,
   type RetrievalState,
 } from '@retrieval-agent/contracts'
-import { createRetrievalStatePatch } from '@retrieval-agent/retrieval-replay'
+import { createRetrievalStatePatch } from './replay.js'
 import type { RetrievalEventJournal } from './journal.js'
 
 type Clock = () => Date

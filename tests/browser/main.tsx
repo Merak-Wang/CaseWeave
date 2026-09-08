@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type {} from '../../packages/ui-ticket-results/src/client/definition.js'
 import { CandidatePanel, type CandidatePanelProps } from '../../packages/ui-ticket-results/src/client/CandidatePanel.js'
+import { ProductHeaderExport, type ProductHeaderExportProps } from '../../packages/ui-ticket-results/src/client/HeaderExport.js'
 
 const candidates = [
   {
@@ -84,7 +85,9 @@ const fixtureNode = {
     ],
     result: {
       type: 'ticket_collection',
-      schemaVersion: 1,
+      schemaVersion: 2,
+      resultRevision: 'pack-browser-fixture',
+      judgments: [{ candidateRef: candidates[0]!.ref, verdict: 'accept', evidenceRefs: [candidates[0]!.ref], reason: '摘要明确涉及副卡的跨省漫游故障。' }],
       retrievalId: 'retrieval-browser-fixture',
       packId: 'pack-browser-fixture',
       query: '查找副卡和跨域有关工单',
@@ -99,7 +102,6 @@ const fixtureNode = {
       resultMayBeIncomplete: true,
       nextPageAvailable: false,
       tickets: [candidates[0]],
-      undeterminedCandidates: [candidates[1]],
       evidence: [],
       remainingGapKinds: [],
     },
@@ -111,6 +113,20 @@ let presentationAuthorized = new URLSearchParams(window.location.search).get('au
 window.fetch = async (input, init) => {
   const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
   const path = new URL(url, window.location.href).pathname
+  if (path === '/api/retrieval-agent/export') {
+    const params = JSON.parse(String(init?.body)) as { resultRevision?: string; candidateRefs?: string[] }
+    if (!presentationAuthorized) return new Response(JSON.stringify({ message: '当前身份的工单权限已撤销。' }), { status: 403 })
+    if (params.resultRevision !== fixtureNode.data.result.resultRevision || params.candidateRefs !== undefined) {
+      return new Response(JSON.stringify({ message: '应请求当前版本的全部确认结果。' }), { status: 409 })
+    }
+    const contentUtf8 = '\uFEFFticket,title,judgment\r\nTKT-0007,副卡在省外漫游无法上网,confirmed\r\n'
+    const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(contentUtf8)))]
+      .map(byte => byte.toString(16).padStart(2, '0')).join('')
+    return new Response(JSON.stringify({ fileName: 'confirmed-browser-fixture.csv', mediaType: 'text/csv; charset=utf-8', contentUtf8,
+      receipt: { exportId: 'fixture-export', retrievalId: fixtureNode.data.retrievalId,
+        resultRevision: params.resultRevision, rowCount: 1, contentSha256: hash },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
   if (path === '/api/retrieval-agent/presentation') {
     if (!presentationAuthorized) {
       return new Response(JSON.stringify({ code: 'UNAUTHORIZED', message: '当前身份的工单权限已撤销。', retryable: false }), { status: 403 })
@@ -143,6 +159,12 @@ window.fetch = async (input, init) => {
   }), { status: 200, headers: { 'content-type': 'application/json' } })
 }
 const fixtureProps = { node: fixtureNode, sessionId: 'browser-fixture-session' } as unknown as CandidatePanelProps
+const headerProps = {
+  sessionId: 'browser-fixture-session',
+  useSession: (select: (snapshot: unknown) => unknown) => select({ chat: {
+    order: ['browser-fixture-node'], nodes: new Map([['browser-fixture-node', { kind: 'ticket-candidates', data: fixtureNode.data }]]),
+  } }),
+} as unknown as ProductHeaderExportProps
 
 function BrowserFixture() {
   const [dark, setDark] = useState(false)
@@ -160,7 +182,7 @@ function BrowserFixture() {
           {dark ? '浅色' : '深色'}
         </button>
       </aside>
-      <div className="fixture-column"><CandidatePanel {...fixtureProps} /></div>
+      <div className="fixture-column"><ProductHeaderExport {...headerProps} /><CandidatePanel {...fixtureProps} /></div>
     </main>
   )
 }

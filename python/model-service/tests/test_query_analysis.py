@@ -36,6 +36,12 @@ def test_removes_reduplicated_search_scaffolding(analyzer: SpacyQueryAnalyzer) -
     assert result["keywords"] == ["主卡"]
 
 
+def test_task_instruction_terms_stay_out_of_keywords(analyzer: SpacyQueryAnalyzer) -> None:
+    # “历史、告诉、原因”是对结果的任务指令，不是工单内容；进入关键词通道会污染 AND 约束。
+    result = analyzer.analyze("找 3 条副卡无法使用的历史工单，告诉我各自是什么原因")
+    assert result["keywords"] == ["副卡无法"]
+
+
 def test_domain_lexicon_merges_multi_token_phrases(analyzer: SpacyQueryAnalyzer) -> None:
     result = analyzer.analyze("帮我找异地补卡和实名认证有关工单")
     assert result["keywords"] == ["异地补卡", "实名认证"]

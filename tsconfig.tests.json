@@ -2,7 +2,9 @@
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "rootDir": "."
+    "allowJs": true,
+    "rootDir": ".",
+    "paths": { "@retrieval-agent/agent-plugin": ["./packages/agent-plugin/src/index.ts"] }
   },
   "include": [
     "packages/*/src/**/*.spec.ts",

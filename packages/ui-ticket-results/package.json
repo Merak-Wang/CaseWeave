@@ -1,7 +1,7 @@
 {
   "name": "@retrieval-agent/ui-ticket-results",
   "version": "0.1.0",
-  "description": "Replayable candidate-node projection and DSH client renderer",
+  "description": "Retrieval results and header download UI for DSH",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -27,7 +27,7 @@
   "dependencies": {
     "@retrieval-agent/contracts": "workspace:*",
     "@retrieval-agent/product-api": "workspace:*",
-    "@retrieval-agent/retrieval-replay": "workspace:*"
+    "@retrieval-agent/domain": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",

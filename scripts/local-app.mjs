@@ -13,6 +13,7 @@ import { loadSpacyDependency, syncSpacyDependency } from './spacy-dependency.mjs
 import { seedModelSettings } from './local-settings.mjs'
 import { createStartupProgressReporter } from './startup-progress.mjs'
 import { resolveIndexPreparationConfig } from './index-preparation-config.mjs'
+import { ensureContainerService } from './model-container.mjs'
 
 export { resolveIndexPreparationConfig } from './index-preparation-config.mjs'
 
@@ -100,16 +101,17 @@ export function resolveLocalAppPaths(environment = process.env, projectRoot = ro
   const stateRoot = resolve(projectRoot, environment.RETRIEVAL_AGENT_LOCAL_STATE_DIR ?? '.cache/retrieval-agent-local')
   const dshHome = resolve(projectRoot, environment.RETRIEVAL_AGENT_DSH_HOME ?? join(stateRoot, 'dsh-home'))
   const vectorCacheDir = resolve(projectRoot, environment.RETRIEVAL_AGENT_VECTOR_CACHE_DIR ?? '.cache/retrieval-agent-vectors')
+  const runtimeRoot = resolve(projectRoot, environment.RETRIEVAL_AGENT_RUNTIME_ROOT ?? join(stateRoot, 'runtime'))
   return {
     root: projectRoot,
     stateRoot,
-    runtimeRoot: join(stateRoot, 'runtime'),
-    runnerRoot: join(stateRoot, 'runtime', 'dsh-runner'),
+    runtimeRoot,
+    runnerRoot: join(runtimeRoot, 'dsh-runner'),
     dshHome,
     profileRoot: join(dshHome, 'profiles', webProfile),
     vectorCacheDir,
     bundleRoot: join(projectRoot, 'packages', 'bundle'),
-    modelServiceBaseUrl: environment.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012',
+    modelServiceBaseUrl: environment.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? `http://127.0.0.1:${environment.RETRIEVAL_AGENT_MODEL_PORT ?? '8012'}`,
   }
 }
 
@@ -156,7 +158,10 @@ Aliases:
   pnpm models:sync
 
 Options after "web" are forwarded to DSH, for example --no-open or --port 3080.
-Requires Node.js, pnpm and uv. The first run installs pinned DSH and synchronizes
+Requires Node.js and pnpm; host model mode also requires uv. Set
+RETRIEVAL_AGENT_MODEL_SERVICE_MODE=container to use explicitly built/prepared
+Docker models (pnpm model:container --help), or external to reuse a ready service.
+Host mode's first run installs pinned DSH and synchronizes
 active, pinned model dependencies that are not already present under models/.
 Use "models --all" to prefetch optional dependencies as well.
 Use "models --role reranker" to prefetch one runtime role and its required defaults.
@@ -221,6 +226,7 @@ async function ensureProfile(paths, dshBin, environment) {
   await mkdir(paths.dshHome, { recursive: true })
   const dshEnvironment = {
     ...environment,
+    RETRIEVAL_AGENT_WIKI_ROOT: environment.RETRIEVAL_AGENT_WIKI_ROOT ?? join(paths.root, 'wiki'),
     DSH_HOME: paths.dshHome,
     DSH_TELEMETRY_DISABLED: environment.DSH_TELEMETRY_DISABLED ?? '1',
   }
@@ -250,7 +256,7 @@ async function ensureProfile(paths, dshBin, environment) {
     cwd: paths.root,
     env: dshEnvironment,
   })
-  for (const required of ['@retrieval-agent/product-host', '@retrieval-agent/ui-ticket-results', '@retrieval-agent/ui-product-shell']) {
+  for (const required of ['@retrieval-agent/product-host', '@retrieval-agent/ui-ticket-results']) {
     if (!config.includes(required)) throw new Error(`persistent DSH profile is missing ${required}`)
   }
   return { linked: action === 'link', environment: dshEnvironment }
@@ -407,13 +413,23 @@ async function stopChild(child) {
   if (child.exitCode === null) child.kill('SIGKILL')
 }
 
-async function ensureModelService(paths, environment, progress) {
+export async function ensureModelService(paths, environment, progress) {
+  const mode = environment.RETRIEVAL_AGENT_MODEL_SERVICE_MODE ?? 'host'
+  if (!['host', 'container', 'external'].includes(mode)) throw new Error('MODEL_SERVICE_MODE must be host, container or external')
+  if (mode === 'container') {
+    progress?.stage('[startup 5/8] Model dependencies', 'using prepared container models')
+    const service = await ensureContainerService({ ...environment, RETRIEVAL_AGENT_MODEL_SERVICE_URL: paths.modelServiceBaseUrl }, paths.root,
+      message => progress?.stage('[startup 6/8] Model service', message))
+    progress?.complete('[startup 6/8] Model service', `Docker owns ${paths.modelServiceBaseUrl}`)
+    return service
+  }
   const ready = await modelServiceReady(paths.modelServiceBaseUrl)
   if (ready) {
     progress?.complete('[startup 5/8] Model dependencies', 'ready service already owns loaded dependencies')
     progress?.complete('[startup 6/8] Model service', `reused ${paths.modelServiceBaseUrl}`)
     return { child: undefined, owned: false }
   }
+  if (mode === 'external') throw new Error(`External model service is not ready at ${paths.modelServiceBaseUrl}; start it with its owner. Host Python fallback is disabled.`)
   progress?.stage('[startup 5/8] Model dependencies', 'checking/downloading pinned models and spaCy pipeline')
   const modelPlan = await loadModelDependencyManifest(paths.root, environment)
   const spacyDependency = await loadSpacyDependency(paths.root, environment)
@@ -461,6 +477,16 @@ async function ensureModelService(paths, environment, progress) {
 }
 
 async function prepareIndex(paths, environment, progress, model) {
+  if (environment.RETRIEVAL_AGENT_STORAGE === 'mysql_milvus') {
+    const { TicketDatabase } = await import('../packages/provider-database/lib/index.js')
+    const database = new TicketDatabase(environment.RETRIEVAL_AGENT_MYSQL_URL)
+    try {
+      const publication = await database.publication(environment.RETRIEVAL_AGENT_DATASET_ID ?? 'esft-development')
+      progress?.complete('[startup 7/8] Vector index', publication.index
+        ? `published SQL/Milvus generation ${publication.index.id.slice(0, 12)}` : 'SQL ready; vector channel unavailable until index publication')
+    } finally { await database.close() }
+    return
+  }
   const { prepareDevelopmentIndex } = await import('./prepare-development-index.mjs')
   const preparation = resolveIndexPreparationConfig(environment)
   progress?.stage(
@@ -506,6 +532,7 @@ export async function runLocalWeb(forwardedArgs = [], options = {}) {
 
   const childEnvironment = {
     ...environment,
+    RETRIEVAL_AGENT_WIKI_ROOT: environment.RETRIEVAL_AGENT_WIKI_ROOT ?? join(paths.root, 'wiki'),
     DSH_HOME: paths.dshHome,
     DSH_TELEMETRY_DISABLED: environment.DSH_TELEMETRY_DISABLED ?? '1',
     RETRIEVAL_AGENT_MODEL_SERVICE_URL: paths.modelServiceBaseUrl,

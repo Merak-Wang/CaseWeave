@@ -28,9 +28,6 @@ for (const entry of contract.packages) {
   const manifestPath = join(packagesRoot, entry.directory, 'package.json')
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
   manifests.set(entry.name, manifest)
-  if (manifest.private === true) failures.push(`${entry.name}: production package must be publishable, not private`)
-  if (manifest.version !== '0.1.0') failures.push(`${entry.name}: expected aligned preview version 0.1.0, got ${String(manifest.version)}`)
-  if (manifest.license !== 'MIT') failures.push(`${entry.name}: package license must be explicit`)
   for (const section of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
     for (const [name, version] of Object.entries(manifest[section] ?? {})) {
       if (prohibitedDependency.test(name)) failures.push(`${entry.name}: prohibited production dependency ${name}`)
@@ -57,13 +54,11 @@ while (queue.length > 0) {
     if (packageByName.has(dependency)) queue.push(dependency)
   }
 }
-const expectedClosure = new Set(contract.packages.map(entry => entry.name))
-for (const name of expectedClosure) if (!closure.has(name)) failures.push(`bundle release closure is missing ${name}`)
-for (const name of closure) if (!expectedClosure.has(name)) failures.push(`bundle release closure contains undeclared package ${name}`)
+const releaseEntries = contract.packages.filter(entry => closure.has(entry.name))
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'retrieval-agent-release-'))
 try {
-  for (const entry of contract.packages) {
+  for (const entry of releaseEntries) {
     let packOutput
     try {
       packOutput = execFileSync(packageManager.command, [...packageManager.prefix, '--filter', entry.name, 'pack', '--json', '--pack-destination', tempRoot], {

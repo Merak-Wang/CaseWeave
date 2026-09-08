@@ -66,6 +66,27 @@ function fixtureRecords(): readonly NormalizedTicketRecord[] {
 }
 
 describe('LocalTicketProvider authorization boundary', () => {
+  it('continues a long authorized field through stable source spans to its final counterexample', async () => {
+    const body = '处理记录：先核对解绑状态。'.repeat(550) + '最终反例：此工单只是欠费停机，未发生解绑。'
+    const provider = new LocalTicketProvider([record({ ticketId: 'long', displayId: 'LONG', title: '登录异常', answer: body })], { now: () => BASE_TIME, ranker: testHybridRanker() })
+    const snapshot = await provider.openSnapshot(principal())
+    const page = await provider.search(principal(), snapshot.snapshotId, provider.resolve({ query: '登录', target: 'ranked_cases' }), { topK: 5, maxScan: 100, stage: 'initial_hybrid' })
+    const ref = page.candidates[0]!.ref
+    let position: import('@retrieval-agent/contracts').EvidencePosition | undefined
+    const segments: import('@retrieval-agent/contracts').TicketEvidenceSegment[] = []
+    do {
+      const result = await provider.readEvidence(principal(), { snapshotId: snapshot.snapshotId, candidateRefs: [ref], fields: ['answer'],
+        tokenBudget: 750, level: 'L3', ...(position ? { position } : {}) })
+      expect(result.tokensUsed).toBeLessThanOrEqual(750)
+      segments.push(...result.evidence); position = result.nextPosition
+    } while (position)
+    expect(segments.map(e => e.text).join('')).toBe(body)
+    expect(new Set(segments.map(e => e.evidenceId)).size).toBe(segments.length)
+    expect(segments.at(-1)?.text).toContain('只是欠费停机')
+    expect(segments.every(e => e.projectionLevel === 'L3' && e.spanHash && e.origin?.kind === 'source')).toBe(true)
+    const again = await provider.readEvidence(principal(), { snapshotId: snapshot.snapshotId, candidateRefs: [ref], fields: ['answer'], tokenBudget: 750 })
+    expect(again.evidence[0]?.evidenceId).toBe(segments[0]?.evidenceId)
+  })
   it('defaults an unquantified request to adaptive independently of task type', () => {
     const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker: testHybridRanker() })
     const spec = provider.resolve({ target: 'cohort_collection', query: '登录工单' })
@@ -102,6 +123,20 @@ describe('LocalTicketProvider authorization boundary', () => {
       .resolves.toMatchObject({ returned: 1 })
     await expect(provider.search(user, snapshot.snapshotId, spec, { topK: 2, maxScan: 100, stage: 'initial_hybrid' }))
       .rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  })
+
+  it('reports provider scan capacity as a distinct capacity error, not task budget exhaustion', async () => {
+    const ranker: RetrievalRanker = {
+      profileVersion: 'test',
+      capabilities: { keyword: true, dense: false, fusion: false, reranker: false },
+      async rank() { throw new RankingError('SCAN_LIMIT', '授权文档数量超过本地排名容量。') },
+    }
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker })
+    const user = principal()
+    const snapshot = await provider.openSnapshot(user)
+    const spec = provider.resolve({ target: 'ranked_cases', query: '登录' })
+    await expect(provider.search(user, snapshot.snapshotId, spec, { topK: 5, maxScan: 100, stage: 'initial_hybrid' }))
+      .rejects.toMatchObject({ code: 'CAPACITY_EXCEEDED', publicMessage: '当前授权语料超过本地检索容量。' })
   })
 
   it('does not synthesize a keyword query when the fast plan is dense-only', async () => {

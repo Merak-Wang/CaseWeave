@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   RetrievalError,
+  isReadableTicketField,
   type CandidateDetailReadReceipt,
   type RetrievalState,
   type TicketCandidateRef,
@@ -79,7 +80,7 @@ export class CandidateDetailService {
       throw new RetrievalError('INVALID_REQUEST', '单次详情读取超过限制。')
     }
     const allowedFields = new Set(state.snapshot.fieldCatalog
-      .filter(field => field.accessLevel === 'L2' && field.valueKind !== 'raw_json')
+      .filter(isReadableTicketField)
       .map(field => field.key))
     if (selectedFields.some(field => !allowedFields.has(field))) {
       throw new RetrievalError('FIELD_NOT_ALLOWED', '请求了当前快照不允许展示的详情字段。')

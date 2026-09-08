@@ -1,6 +1,8 @@
 import type { ModelServiceReadyResponse } from './protocol.js'
 
 export interface EmbedInput {
+  readonly requireCompleteInput?: boolean
+  readonly onTiming?: (timings: Readonly<Record<string, number>>) => void
   readonly texts: readonly string[]
   readonly inputType: 'query' | 'document'
   readonly instruction?: string

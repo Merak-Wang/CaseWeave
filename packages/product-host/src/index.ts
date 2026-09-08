@@ -11,6 +11,8 @@ import {
   TicketCandidateRef,
 } from '@retrieval-agent/contracts'
 import type {} from '@retrieval-agent/agent-plugin'
+import { installTaskHost } from './tasks.js'
+export * from './tasks.js'
 import {
   CandidateDetailService,
   CandidateExportService,
@@ -46,22 +48,27 @@ export function parseExportCandidatesParams(value: unknown): ExportCandidatesPar
     throw new RetrievalError('INVALID_REQUEST', '导出请求格式无效。')
   }
   const record = value as Record<string, unknown>
-  if (Object.keys(record).some(key => !['sessionId', 'retrievalId', 'candidateRefs'].includes(key))) {
+  if (Object.keys(record).some(key => !['sessionId', 'retrievalId', 'candidateRefs', 'resultRevision'].includes(key))) {
     throw new RetrievalError('INVALID_REQUEST', '导出请求包含未知字段。')
   }
   if (typeof record.sessionId !== 'string' || record.sessionId.trim().length === 0 || record.sessionId.length > 512) {
     throw new RetrievalError('INVALID_REQUEST', '会话引用无效。')
   }
-  if (typeof record.retrievalId !== 'string' || !Array.isArray(record.candidateRefs)) {
+  if (typeof record.retrievalId !== 'string' || typeof record.resultRevision !== 'string'
+    || record.resultRevision.trim().length === 0 || record.resultRevision.length > 512) {
     throw new RetrievalError('INVALID_REQUEST', '检索或候选引用无效。')
   }
-  if (record.candidateRefs.length > 200 || record.candidateRefs.some(ref => typeof ref !== 'string')) {
+  if (record.candidateRefs !== undefined && (!Array.isArray(record.candidateRefs)
+    || record.candidateRefs.length === 0 || record.candidateRefs.some(ref => typeof ref !== 'string'))) {
     throw new RetrievalError('INVALID_REQUEST', '候选引用无效。')
   }
   return {
     sessionId: record.sessionId.trim(),
     retrievalId: RetrievalId(record.retrievalId),
-    candidateRefs: record.candidateRefs.map(ref => TicketCandidateRef(ref as string)),
+    resultRevision: record.resultRevision,
+    ...(record.candidateRefs === undefined ? {} : {
+      candidateRefs: (record.candidateRefs as string[]).map(ref => TicketCandidateRef(ref)),
+    }),
   }
 }
 
@@ -148,6 +155,7 @@ function statusOf(error: RetrievalError): number {
   switch (error.code) {
     case 'UNAUTHORIZED': return 403
     case 'SNAPSHOT_INVALID':
+    case 'INVALID_TRANSITION':
     case 'SNAPSHOT_NOT_FOUND': return 409
     case 'EXPORT_LIMIT_EXCEEDED': return 413
     case 'PROVIDER_UNAVAILABLE':
@@ -211,9 +219,12 @@ export async function continueRetrievalForAgent(
       { retryable: true },
     )
   }
-  const state = retrievalAgent.currentOrUndefined(agent)
+  const state = await (retrievalAgent.stateForTask?.(agent, params.retrievalId) ?? retrievalAgent.currentOrUndefined(agent))
   if (state === undefined || state.retrievalId !== params.retrievalId) {
     throw new RetrievalError('INVALID_REQUEST', '当前会话没有对应的检索结果。')
+  }
+  if (retrievalAgent.currentOrUndefined(agent)?.retrievalId !== params.retrievalId) {
+    throw new RetrievalError('INVALID_TRANSITION', '历史任务不能通过当前会话的分页按钮继续，请打开对应任务并保存补充。')
   }
   const continued = await retrievalAgent.continueRanking(agent, signal)
   return {
@@ -240,14 +251,26 @@ export async function exportCandidatesForAgent(
       { retryable: true },
     )
   }
-  const state = retrievalAgent.currentOrUndefined(agent)
+  const state = await (retrievalAgent.stateForTask?.(agent, params.retrievalId) ?? retrievalAgent.currentOrUndefined(agent))
   if (state === undefined || state.retrievalId !== params.retrievalId) {
     throw new RetrievalError('INVALID_REQUEST', '当前会话没有对应的检索结果。')
   }
+  const assertCurrentResult = async (): Promise<void> => {
+    const current = await (retrievalAgent.stateForTask?.(agent, params.retrievalId) ?? retrievalAgent.currentOrUndefined(agent))
+    if (current?.retrievalId !== state.retrievalId || current.phase !== 'stopped'
+      || (current.frozenEvidence?.packId ?? current.stateId) !== params.resultRevision) {
+      throw new RetrievalError('INVALID_TRANSITION', '确认结果已变化，请刷新结果后重新下载。')
+    }
+    if (['permission_blocked', 'snapshot_invalid'].includes(current.termination)) {
+      throw new RetrievalError('SNAPSHOT_INVALID', '当前确认结果的访问资格已失效，请重新复核。')
+    }
+  }
+  await assertCurrentResult()
   const principal = await retrievalAgent.principal(agent, 'export', signal)
-  const exported = await new CandidateExportService(provider, audit)
+  await assertCurrentResult()
+  const exported = await new CandidateExportService(provider, audit, { assertCurrentResult })
     .exportCsv(principal, state, params.candidateRefs, signal)
-  retrievalAgent.recordExport(agent, exported.receipt)
+  await retrievalAgent.recordExport(agent, exported.receipt)
   return {
     fileName: exported.fileName,
     mediaType: exported.mediaType,
@@ -273,7 +296,7 @@ export async function readTicketDetailsForAgent(
       { retryable: true },
     )
   }
-  const state = retrievalAgent.currentOrUndefined(agent)
+  const state = await (retrievalAgent.stateForTask?.(agent, params.retrievalId) ?? retrievalAgent.currentOrUndefined(agent))
   if (state === undefined || state.retrievalId !== params.retrievalId) {
     throw new RetrievalError('INVALID_REQUEST', '当前会话没有对应的检索结果。')
   }
@@ -290,9 +313,11 @@ export async function readTicketDetailsForAgent(
 }
 
 export const name = 'retrieval-product-host'
-export const inject = ['webServer', 'agents', 'agentPresets', 'workspaceRegistry']
+export const inject = ['webServer', 'agents', 'agentPresets', 'workspaceRegistry', 'llm']
 
 export interface Config {
+  readonly taskPersistence?: 'session' | 'mysql'
+  readonly mysqlUrl?: string
   /** Existing product-owned directory adopted as the default DSH workspace. */
   readonly workspacePath?: string
 }
@@ -305,6 +330,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     await ctx.workspaceRegistry.create(workspacePath, '工单检索')
   }
   const audit = new InMemoryExportAuditSink()
+  if ((config.taskPersistence ?? (process.env.RETRIEVAL_AGENT_STORAGE === 'mysql_milvus' ? 'mysql' : 'session')) === 'mysql') await installTaskHost(ctx, config)
   const detailAudit = new InMemoryDetailReadAuditSink()
   const register = <Params>(
     path: string,
@@ -334,6 +360,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
             writeJson(response, 409, { code: 'SESSION_NOT_ACTIVE', message: '会话当前不可用，请重新打开后重试。', retryable: true })
             return
           }
+          await ctx.agentPresets.serviceFor(agent, 'retrievalAgent')?.loadTask?.(agent)
           writeJson(response, 200, await execute(agent, params, abort.signal))
         } catch (error) {
           if (error instanceof RetrievalError) {

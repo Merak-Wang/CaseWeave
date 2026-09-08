@@ -1,0 +1,45 @@
+# Merge after database/compose.yml and model-service/compose.yml.
+x-app: &app
+  image: ${RETRIEVAL_AGENT_APP_IMAGE:-retrieval-agent-app:0.1.0}
+  build:
+    context: ../..
+    dockerfile: config/app/Dockerfile
+  init: true
+  environment:
+    RETRIEVAL_AGENT_BROWSER_LLM_PROVIDER: ${RETRIEVAL_AGENT_BROWSER_LLM_PROVIDER:-}
+    RETRIEVAL_AGENT_BROWSER_LLM_MODEL: ${RETRIEVAL_AGENT_BROWSER_LLM_MODEL:-}
+    RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL: ${RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL:-}
+    RETRIEVAL_AGENT_BROWSER_LLM_API_KEY_ENV: ${RETRIEVAL_AGENT_BROWSER_LLM_API_KEY_ENV:-}
+    RETRIEVAL_AGENT_BROWSER_LLM_REASONING: ${RETRIEVAL_AGENT_BROWSER_LLM_REASONING:-off}
+    RETRIEVAL_AGENT_MAIN_MODEL_API_KEY: ${RETRIEVAL_AGENT_MAIN_MODEL_API_KEY:-}
+    RETRIEVAL_AGENT_WIKI_LEARNING: ${RETRIEVAL_AGENT_WIKI_LEARNING:-1}
+  volumes:
+    - app-state:/app/.cache
+    - app-data:/app/data
+    - app-wiki:/app/wiki
+    - app-output:/app/output
+services:
+  app:
+    <<: *app
+    ports: ['127.0.0.1:${RETRIEVAL_AGENT_WEB_PORT:-3080}:3080']
+    depends_on:
+      mysql: {condition: service_healthy}
+      milvus: {condition: service_healthy}
+      model-service: {condition: service_healthy}
+    restart: on-failure:3
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, node, '-e', "fetch('http://127.0.0.1:3080/retrieval').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+      retries: 12
+  app-prepare:
+    <<: *app
+    profiles: [prepare]
+    command: [node, scripts/manage-ticket-data.mjs, all]
+volumes:
+  app-state:
+  app-data:
+  app-wiki:
+  app-output:

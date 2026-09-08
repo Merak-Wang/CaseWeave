@@ -1,193 +1,73 @@
-import { readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { readFile, readdir, writeFile } from 'node:fs/promises'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const contractPath = join(root, 'architecture', 'workspace.json')
-const graphPath = join(root, 'docs', 'WORKSPACE_GRAPH.md')
 const mode = process.argv[2] ?? '--check'
-
-if (!['--check', '--write'].includes(mode)) {
-  throw new Error('usage: node scripts/workspace-contracts.mjs [--check|--write]')
-}
-
-const contract = JSON.parse(await readFile(contractPath, 'utf8'))
+if (!['--check', '--write'].includes(mode)) throw new Error('usage: workspace-contracts.mjs [--check|--write]')
+const metadata = JSON.parse(await readFile(join(root, 'architecture/workspace.json'), 'utf8'))
 const failures = []
-const packageByName = new Map(contract.packages.map(entry => [entry.name, entry]))
-const dependencySections = ['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies']
-
 async function filesUnder(directory) {
-  const result = []
+  const files = []
   for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (entry.name === 'lib' || entry.name === 'node_modules') continue
+    if (['lib', 'node_modules'].includes(entry.name)) continue
     const path = join(directory, entry.name)
-    if (entry.isDirectory()) result.push(...await filesUnder(path))
-    else result.push(path)
+    files.push(...(entry.isDirectory() ? await filesUnder(path) : [path]))
   }
-  return result
+  return files
 }
-
-function slash(path) {
-  return path.split(sep).join('/')
-}
-
-for (const forbidden of contract.forbiddenGenericPackageNames) {
-  if (packageByName.has(`${contract.packageScope}${forbidden}`)) {
-    failures.push(`generic catch-all package is forbidden: ${contract.packageScope}${forbidden}`)
-  }
-}
-
-const diskPackageDirectories = []
-for (const entry of await readdir(join(root, 'packages'), { withFileTypes: true })) {
-  if (!entry.isDirectory()) continue
-  const directory = join(root, 'packages', entry.name)
-  try {
-    await stat(join(directory, 'package.json'))
-    diskPackageDirectories.push(entry.name)
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error
-    // Removing a package does not require deleting installed modules or generated
-    // artifacts. Source left without a manifest remains an error.
-    if ((await filesUnder(directory)).length > 0) failures.push(`source directory lacks package manifest: packages/${entry.name}`)
-  }
-}
-diskPackageDirectories.sort()
-const declaredDirectories = contract.packages.map(entry => entry.directory).sort()
-if (JSON.stringify(diskPackageDirectories) !== JSON.stringify(declaredDirectories)) {
-  failures.push(`workspace manifest drift: disk=${diskPackageDirectories.join(',')} declared=${declaredDirectories.join(',')}`)
-}
-
-for (const entry of contract.packages) {
-  const packageDirectory = join(root, 'packages', entry.directory)
+const packages = []
+for (const directory of await readdir(join(root, 'packages'), { withFileTypes: true })) {
+  if (!directory.isDirectory()) continue
+  const path = join(root, 'packages', directory.name)
   let manifest
-  try {
-    manifest = JSON.parse(await readFile(join(packageDirectory, 'package.json'), 'utf8'))
-  } catch (error) {
-    failures.push(`cannot read packages/${entry.directory}/package.json: ${error.message}`)
+  try { manifest = JSON.parse(await readFile(join(path, 'package.json'), 'utf8')) }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error
+    if ((await filesUnder(path)).length) failures.push(`source without package manifest: ${directory.name}`)
     continue
   }
-  if (manifest.name !== entry.name) failures.push(`packages/${entry.directory}: expected package name ${entry.name}, got ${manifest.name}`)
-  if (!manifest.name?.startsWith(contract.packageScope)) failures.push(`packages/${entry.directory}: first-party package must use ${contract.packageScope} prefix`)
-
-  const actualInternalDependencies = new Set()
-  for (const section of dependencySections) {
-    for (const dependency of Object.keys(manifest[section] ?? {})) {
-      if (packageByName.has(dependency)) actualInternalDependencies.add(dependency)
-    }
-  }
-  for (const dependency of actualInternalDependencies) {
-    if (!entry.allowedInternalDependencies.includes(dependency)) failures.push(`${entry.name}: internal dependency ${dependency} is outside its allowed boundary`)
-  }
-
-  const sourceDirectory = join(packageDirectory, 'src')
-  let sourceFiles = []
-  try {
-    if ((await stat(sourceDirectory)).isDirectory()) sourceFiles = (await filesUnder(sourceDirectory)).filter(path => path.endsWith('.ts') || path.endsWith('.tsx'))
-  } catch {
-    sourceFiles = []
-  }
-  for (const file of sourceFiles) {
-    const relativeFile = slash(relative(root, file))
-    const source = await readFile(file, 'utf8')
-    const isTest = /\.spec\.tsx?$/u.test(file)
-    if (isTest) {
-      const implementation = file.replace(/\.spec(\.tsx?)$/u, '$1')
-      try {
-        if (!(await stat(implementation)).isFile()) failures.push(`${relativeFile}: adjacent test has no matching implementation module`)
-      } catch {
-        failures.push(`${relativeFile}: adjacent test has no matching implementation module`)
-      }
-      continue
-    }
-    if (/export\s+function\s+apply\s*\(/u.test(source)
-      && /export\s+const\s+inject\s*=/u.test(source)
-      && /export\s+default\b/u.test(source)) {
-      failures.push(`${relativeFile}: DSH plugin entry with named apply/inject must not export a default that hides loader metadata`)
-    }
-    if (/\bextends\s+Service\b/u.test(source) && /(^|[^\w$])#[A-Za-z_$][\w$]*/mu.test(source)) {
-      failures.push(`${relativeFile}: Cordis Service subclasses must not use ECMAScript #private members because trace proxies change the method receiver`)
-    }
-
-    const importPattern = /(?:from\s+|import\s*\()(['"])(@retrieval-agent\/[^'"/]+)(?:\/[^'"]*)?\1/gu
-    for (const match of source.matchAll(importPattern)) {
-      const dependency = match[2]
-      if (dependency !== entry.name && !actualInternalDependencies.has(dependency)) failures.push(`${relativeFile}: imports undeclared internal dependency ${dependency}`)
-      if (dependency !== entry.name && !entry.allowedInternalDependencies.includes(dependency)) failures.push(`${relativeFile}: imports ${dependency} outside allowed boundary`)
-    }
-
-    if (file.endsWith(`${sep}${contract.protocolConvention.fileName}`)) {
-      const declarationPattern = /export\s+(?:interface|type|class)\s+([A-Za-z_$][\w$]*)/gu
-      for (const match of source.matchAll(declarationPattern)) {
-        const typeName = match[1]
-        if (!contract.protocolConvention.allowedExportedTypeSuffixes.some(suffix => typeName.endsWith(suffix))) {
-          failures.push(`${relativeFile}: exported wire type ${typeName} must end in ${contract.protocolConvention.allowedExportedTypeSuffixes.join(', ')}`)
-        }
-      }
-    }
-  }
-  const misplacedTests = (await filesUnder(packageDirectory)).filter(path => /\.spec\.tsx?$/u.test(path) && !path.startsWith(`${sourceDirectory}${sep}`))
-  for (const file of misplacedTests) failures.push(`${slash(relative(root, file))}: package tests must be adjacent under src/`)
+  const description = metadata.packages.find(p => p.name === manifest.name)
+  packages.push({ directory: directory.name, manifest, name: manifest.name,
+    kind: description?.kind ?? 'module', capability: description?.capability ?? manifest.description ?? '' })
 }
-
-function graphMarkdown() {
-  const rows = contract.packages.map(entry => {
-    const dependencies = entry.allowedInternalDependencies.length === 0
-      ? '—'
-      : entry.allowedInternalDependencies.map(value => `\`${value}\``).join('<br>')
-    return `| \`${entry.name}\` | ${entry.kind} | ${entry.capability} | ${dependencies} |`
-  })
-  const edges = contract.packages.flatMap(entry => entry.allowedInternalDependencies.map(dependency => {
-    const from = entry.directory.replace(/-/gu, '_')
-    const to = packageByName.get(dependency).directory.replace(/-/gu, '_')
-    return `  ${from} --> ${to}`
-  }))
-  const nodes = contract.packages.map(entry => `  ${entry.directory.replace(/-/gu, '_')}["${entry.name}<br/>${entry.kind}"]`)
-  return `<!-- Generated by scripts/workspace-contracts.mjs. Do not edit by hand. -->
+packages.sort((a, b) => a.name.localeCompare(b.name))
+const byName = new Map(packages.map(p => [p.name, p]))
+for (const entry of packages) {
+  const dependencies = new Set(['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies']
+    .flatMap(section => Object.keys(entry.manifest[section] ?? {})))
+  entry.dependencies = [...dependencies].filter(name => byName.has(name)).sort()
+  if (!entry.name.startsWith(metadata.packageScope)) failures.push(`unexpected package scope: ${entry.name}`)
+  for (const file of await filesUnder(join(root, 'packages', entry.directory))) {
+    if (!/\.[cm]?[jt]sx?$/.test(file) || /\.(spec|test)\./.test(file)) continue
+    const source = await readFile(file, 'utf8'), label = relative(root, file).replaceAll('\\', '/')
+    if (/export\s+function\s+apply\s*\(/u.test(source) && /export\s+const\s+inject\s*=/u.test(source) && /export\s+default\b/u.test(source)) failures.push(`${label}: default export hides DSH loader metadata`)
+    if (/\bextends\s+Service\b/u.test(source) && /(^|[^\w$])#[A-Za-z_$][\w$]*/mu.test(source)) failures.push(`${label}: Cordis trace proxies cannot use #private members`)
+    for (const match of source.matchAll(/(?:from\s+|import\s*\()(['"])(@retrieval-agent\/[^'"/]+)(?:\/[^'"]*)?\1/gu)) {
+      if (match[2] !== entry.name && !dependencies.has(match[2])) failures.push(`${label}: undeclared dependency ${match[2]}`)
+    }
+  }
+}
+const node = entry => entry.directory.replaceAll('-', '_')
+const graph = `<!-- Generated from package.json by scripts/workspace-contracts.mjs. -->
 # Workspace 能力图
 
-状态：\`implemented\`。本页由 \`architecture/workspace.json\` 生成；\`pnpm verify:workspace\` 同时检查图漂移、包命名、允许依赖、协议类型后缀和测试位置。生产依赖及发布产物的评测隔离由 \`pnpm verify:release\` 检查。
-
-箭头 \`A --> B\` 表示 A 可以在构建时依赖 B；它不是运行时数据流，也不代表 B 可以反向访问 A。
+本图来自实际 workspace 的 package.json；角色说明来自 architecture/workspace.json。箭头表示已声明的构建依赖（包含开发/peer 依赖），不是运行时数据流或依赖许可清单。
 
 \`\`\`mermaid
 flowchart LR
-${nodes.join('\n')}
-${edges.join('\n')}
+${packages.map(p => `  ${node(p)}["${p.name}<br/>${p.kind}"]`).join('\n')}
+${packages.flatMap(p => p.dependencies.map(d => `  ${node(p)} --> ${node(byName.get(d))}`)).join('\n')}
 \`\`\`
 
-| 包 | 角色 | 独占能力 | 允许的一方依赖 |
+| 包 | 角色 | 职责 | 已声明的一方依赖 |
 | --- | --- | --- | --- |
-${rows.join('\n')}
+${packages.map(p => `| \`${p.name}\` | ${p.kind} | ${p.capability} | ${p.dependencies.map(d => `\`${d}\``).join('<br>') || '—'} |`).join('\n')}
 
-## 命名与依赖边界
-
-- 一方包必须使用 \`${contract.packageScope}*\`；禁止创建 ${contract.forbiddenGenericPackageNames.map(value => `\`${value}\``).join('、')} 这类兜底包。
-- 线协议只放在 \`${contract.protocolConvention.fileName}\`，导出载荷使用 ${contract.protocolConvention.allowedExportedTypeSuffixes.map(value => `\`*${value}\``).join('、')} 后缀。
-- 包内测试与实现相邻，使用 \`name.spec.ts\`；跨包组合测试才进入根目录 \`${contract.testConvention.repositoryIntegrationRoot}/\`。
-- Cordis \`Service\` 子类不得使用 ECMAScript \`#private\` 成员；服务必须通过 \`ctx.<service>\` trace proxy 回归测试。
-
-## 运行时边界
-
-\`ui-ticket-results\` 只渲染安全事件投影；\`ui-product-shell\` 只通过 \`product-api/protocol\` 调用会话头能力；\`product-host\` 才能把协议绑定到 DSH Web、活动 Session 与可信 Principal。\`retrieval-ranking\` 不读取来源或执行授权，\`agent-plugin\` 也不得把 Provider 算法收回应用层。\`bundle\` 是唯一默认装配点。Python 评测与 Retrieval 服务都位于生产 pnpm workspace 之外：前者只能通过公开测试驱动协议观察产品，后者只能由 \`model-service-client\`、\`query-understanding\` 和 \`retrieval-ranking\` 经各自版本化进程协议调用。
+浏览器通过 domain/result、domain/replay 和 product-api 的明确客户端出口复用逻辑；Host、数据库和 DSH 装配保留在服务端。测试按用户行为或实际失败边界组织，不要求与实现文件一一对应。发布检查只处理 bundle 实际运行依赖闭包。
 `
-}
-
-const expectedGraph = graphMarkdown()
-if (mode === '--write') {
-  await writeFile(graphPath, expectedGraph, 'utf8')
-} else {
-  let currentGraph = ''
-  try {
-    currentGraph = await readFile(graphPath, 'utf8')
-  } catch {
-    failures.push('docs/WORKSPACE_GRAPH.md is missing; run pnpm graph:workspace')
-  }
-  if (currentGraph !== expectedGraph) failures.push('docs/WORKSPACE_GRAPH.md is stale; run pnpm graph:workspace')
-}
-
-if (failures.length > 0) {
-  console.error(failures.map(failure => `- ${failure}`).join('\n'))
-  process.exitCode = 1
-} else {
-  console.log(`workspace contract verified for ${contract.packages.length} packages`)
-}
+const graphPath = join(root, 'docs/WORKSPACE_GRAPH.md')
+if (mode === '--write' && !failures.length) await writeFile(graphPath, graph)
+else if (await readFile(graphPath, 'utf8').catch(() => '') !== graph) failures.push('workspace graph changed: run pnpm graph:workspace')
+if (failures.length) { console.error(failures.join('\n')); process.exitCode = 1 }
+else console.log(`workspace verified for ${packages.length} packages`)

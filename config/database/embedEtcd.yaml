@@ -1,0 +1,7 @@
+# Keep the original embedded-etcd directory and member identity when restarting.
+data-dir: /var/lib/milvus/etcd
+listen-client-urls: http://0.0.0.0:2379
+advertise-client-urls: http://etcd:2379
+quota-backend-bytes: 4294967296
+auto-compaction-mode: revision
+auto-compaction-retention: '1000'

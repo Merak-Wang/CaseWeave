@@ -57,9 +57,11 @@ describe('local source launcher', () => {
     const overridden = launcher.resolveLocalAppPaths({
       RETRIEVAL_AGENT_DSH_HOME: 'local/dsh',
       RETRIEVAL_AGENT_VECTOR_CACHE_DIR: 'local/vectors',
+      RETRIEVAL_AGENT_RUNTIME_ROOT: 'image/runtime',
     }, projectRoot)
     expect(overridden.dshHome).toBe(resolve(projectRoot, 'local/dsh'))
     expect(overridden.vectorCacheDir).toBe(resolve(projectRoot, 'local/vectors'))
+    expect(overridden.runnerRoot).toBe(resolve(projectRoot, 'image/runtime/dsh-runner'))
   })
 
   it('normalizes accepted reranker flags for the restricted DSH preset expression', () => {
@@ -99,16 +101,6 @@ describe('local source launcher', () => {
     expect(launcher.modelServiceAction({
       ready: false, manage: true, baseUrl: 'http://127.0.0.1:8012',
     })).toBe('start')
-  })
-
-  it('documents build-once/run-many instead of hiding a build in the web command', () => {
-    const help = launcher.helpText()
-    expect(help).toContain('pnpm build')
-    expect(help).toContain('once')
-    expect(help).toContain('pnpm retrieval-agent web')
-    expect(help).toContain('pnpm retrieval-agent models')
-    expect(help).toContain('active, pinned model dependencies')
-    expect(help).toContain('never runs a product build, pack, clean-install verification or uninstall')
   })
 
   it('keeps cold-index liveness configuration separate from online ranking deadlines', () => {

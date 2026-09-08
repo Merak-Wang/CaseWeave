@@ -7,7 +7,10 @@
 
       首轮快查询不改写：关键词通道使用从原始输入直接抽取的关键词，向量通道嵌入完整原始问题，
       两路在同一授权快照中并行执行并归并。候选只用 c1、c2 等稳定短别名，不得生成或复述不透明
-      引用。候选已含 L2 摘要；只有先评估出引用具体候选的 open depth gap，才可以使用动态开放的 L3 读取工具，并应选最小必要批次。
+      引用。L0 是编号与标题索引，L1 是来源类型已标明的概览，L2 是来源片段，L3 是可分段读取的完整授权详情。
+      在具体证据缺口下使用 inspect；历史证据可用 inspect history 重读，长字段依据 nextPosition 续读。
+      快查后可按目录分派 1–3 个有明确目标、scope 和知识条目的专家；空库用 general。主 Agent 综合
+      finding 并逐条采纳，专家分歧须分类、重读来源并提交 conflict_resolution；不能投票或忽略未决缺口。
       首轮之后才允许改写关键词或向量 query、继续隐藏游标或请求澄清。system gaps
       和 BoundaryState 只读；模型不能生成 coverage/quality 分数，也不能把 accept_current_top_k 解释为
       数据源穷尽或语义找全。
@@ -38,6 +41,8 @@
     - id: local-provider
       name: '@retrieval-agent/bundle/provider'
       config:
+        storageBackend: !!js process.env.RETRIEVAL_AGENT_STORAGE ?? 'jsonl'
+        datasetId: !!js process.env.RETRIEVAL_AGENT_DATASET_ID ?? 'esft-development'
         dataPath: !!js process.env.RETRIEVAL_AGENT_DATA_PATH ?? dshHomePath('retrieval-agent', 'data', 'default.jsonl')
         additionalDataPaths: []
         providerId: local-dataset-v1
@@ -61,14 +66,16 @@
     - id: retrieval-agent
       name: '@retrieval-agent/bundle/agent'
       config:
-        maxRounds: 8
-        # 跨动作总页预算覆盖关键词全集与 Dense Top-15 的融合候选；单动作仍至多推进一页，且它不是最终结果条数上限。
+        # 跨动作总页上限覆盖关键词全集与 Dense Top-15 的融合候选；单动作仍至多推进一页，且它不是最终结果条数上限。
+        # 模型步数与墙钟时间只观测记录，不再终止任务。
         maxSearches: 2500
-        maxLatencyMs: 120000
+        taskPersistence: !!js "process.env.RETRIEVAL_AGENT_STORAGE === 'mysql_milvus' ? 'mysql' : 'session'"
         searchTopK: 20
         searchMaxScan: 50000
         queryAnalysisBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
         queryAnalysisDeadlineMs: 5000
+        wikiRoot: !!js process.env.RETRIEVAL_AGENT_WIKI_ROOT
+        wikiLearning: !!js process.env.RETRIEVAL_AGENT_WIKI_LEARNING !== '0'
 
 - id: compaction
   name: cordis:group

@@ -72,7 +72,9 @@ export interface ExportCandidatesParams {
   /** Untrusted routing identity; the Host resolves the live Agent and its trusted Principal. */
   readonly sessionId: string
   readonly retrievalId: RetrievalId
-  readonly candidateRefs: readonly TicketCandidateRef[]
+  readonly resultRevision: string
+  /** Omit to download the complete confirmed set, independent of the UI window. */
+  readonly candidateRefs?: readonly TicketCandidateRef[]
 }
 
 export interface ExportCandidatesResponse {

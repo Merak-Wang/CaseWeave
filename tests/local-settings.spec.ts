@@ -53,12 +53,25 @@ describe('persistent local DSH settings', () => {
     })
   })
 
-  it('never overwrites a YAML settings document it cannot safely merge', async () => {
+  it('can reseed the YAML written by DSH while preserving unrelated configuration', async () => {
+    const dshHome = await fixture()
+    await writeFile(join(dshHome, 'settings.yaml'), 'custom:\n  keep: true\nllm-pi-ai:\n  providers:\n    other-provider:\n      models:\n        - id: other-model\n', 'utf8')
+
+    await expect(settings.seedModelSettings({ dshHome }, environment)).resolves.toBe(true)
+    const document = JSON.parse(await readFile(join(dshHome, 'settings.yaml'), 'utf8'))
+    expect(document.custom).toEqual({ keep: true })
+    expect(document['llm-pi-ai'].providers['other-provider'].models).toEqual([{ id: 'other-model' }])
+    await expect(settings.seedModelSettings({ dshHome }, environment)).resolves.toBe(true)
+    const repeated = JSON.parse(await readFile(join(dshHome, 'settings.yaml'), 'utf8'))
+    expect(repeated['llm-pi-ai'].providers['local-provider'].models).toEqual([{ id: 'local-model' }])
+  })
+
+  it.each(['custom: [broken', 'custom: 1\ncustom: 2\n', '- array-root\n'])('never overwrites malformed or non-mapping settings: %s', async (original) => {
     const dshHome = await fixture()
     const settingsPath = join(dshHome, 'settings.yaml')
-    await writeFile(settingsPath, 'custom:\n  keep: true\n', 'utf8')
+    await writeFile(settingsPath, original, 'utf8')
 
     await expect(settings.seedModelSettings({ dshHome }, environment)).rejects.toThrow(/refusing to overwrite/u)
-    await expect(readFile(settingsPath, 'utf8')).resolves.toBe('custom:\n  keep: true\n')
+    await expect(readFile(settingsPath, 'utf8')).resolves.toBe(original)
   })
 })

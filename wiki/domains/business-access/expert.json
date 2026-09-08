@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "business-access",
+  "domain": "business-access",
+  "description": "业务权限类故障",
+  "activationPhase": "post-fast-query",
+  "authority": "reference-data-only",
+  "knowledgeRefs": [
+    "business-access-visibility-scope"
+  ],
+  "toolGrants": [],
+  "promptOverride": null,
+  "outputRequirements": [
+    "区分先验与工单证据",
+    "引用实际可见工单片段",
+    "列出歧义及反例",
+    "不修改用户条件"
+  ]
+}

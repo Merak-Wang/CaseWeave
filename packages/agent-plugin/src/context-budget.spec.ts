@@ -66,7 +66,6 @@ type RequestMarker = <T extends GenerateOptions>(request: T) => T
 
 async function runtime(
   accepted: boolean,
-  remainingWallClockMs = 60_000,
   adapterDelayMs = 0,
   options: {
     readonly markRequest?: RequestMarker
@@ -92,19 +91,17 @@ async function runtime(
   const admitModelRequest = vi.fn(async (
     _agent: Agent,
     _input: Parameters<RetrievalRuntimeBudgetApplication['admitModelRequest']>[1],
-  ) => ({ accepted, remainingWallClockMs }))
+  ) => ({ accepted }))
   const recordModelResponse = vi.fn(async (
     _agent: Agent,
     _input: Parameters<RetrievalRuntimeBudgetApplication['recordModelResponse']>[1],
   ) => state)
-  const stopForWallClockBudget = vi.fn(async () => state)
   const recordToolCall = vi.fn(async () => state)
   const application: RetrievalRuntimeBudgetApplication = {
     currentOrUndefined: () => state,
     admitModelRequest,
     recordModelResponse,
     recordToolCall,
-    stopForWallClockBudget,
   }
   installRetrievalRuntimeBudget(ctx, application)
   const request = (options.markRequest ?? markAgentLoopRequest)(deepFreeze({
@@ -114,12 +111,12 @@ async function runtime(
   }))
   const chunks: StreamChunk[] = []
   for await (const chunk of ctx.llm.stream(request)) chunks.push(chunk)
-  return { ctx, agent, adapter, request, admitModelRequest, recordModelResponse, recordToolCall, stopForWallClockBudget, cancel, chunks }
+  return { ctx, agent, adapter, request, admitModelRequest, recordModelResponse, recordToolCall, cancel, chunks }
 }
 
 describe('retrieval runtime budget boundary', () => {
   it('meters the full loop request and persists provider usage around the public stream', async () => {
-    const result = await runtime(true, 60_000, 0, { contextWindow: 1_000_000 })
+    const result = await runtime(true, 0, { contextWindow: 1_000_000 })
     try {
       expect(result.adapter.calls).toBe(1)
       expect(result.admitModelRequest).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
@@ -149,9 +146,9 @@ describe('retrieval runtime budget boundary', () => {
     }
   })
 
-  it('persists a wall-clock stop and cancels an in-flight model request at the admitted deadline', async () => {
+  it('meters an in-flight loop request without ever cancelling it, even when its foreign marker is invisible', async () => {
     const foreignAgentLoopRequests = new WeakSet<object>()
-    const result = await runtime(true, 1, 15, {
+    const result = await runtime(true, 15, {
       markRequest: request => {
         foreignAgentLoopRequests.add(request)
         return request
@@ -161,22 +158,19 @@ describe('retrieval runtime budget boundary', () => {
       expect(foreignAgentLoopRequests.has(result.request)).toBe(true)
       expect(isAgentLoopRequest(result.request)).toBe(false)
       expect(result.admitModelRequest).toHaveBeenCalledTimes(1)
-      expect(result.stopForWallClockBudget).toHaveBeenCalledTimes(1)
-      expect(result.cancel).toHaveBeenCalledWith(
-        { kind: 'hook', reason: 'retrieval wall-clock budget exhausted' },
-        { keepInbox: true },
-      )
+      expect(result.adapter.calls).toBe(1)
+      expect(result.recordModelResponse).toHaveBeenCalledTimes(1)
+      expect(result.cancel).not.toHaveBeenCalled()
     } finally {
       await result.ctx.fiber.dispose()
     }
   })
 
-  it('leaves purpose-tagged auxiliary model requests outside the retrieval wall-clock budget', async () => {
-    const result = await runtime(true, 1, 15, { markRequest: request => request, purpose: 'compaction' })
+  it('leaves purpose-tagged auxiliary model requests outside retrieval admission metering', async () => {
+    const result = await runtime(true, 15, { markRequest: request => request, purpose: 'compaction' })
     try {
       expect(result.adapter.calls).toBe(1)
       expect(result.admitModelRequest).not.toHaveBeenCalled()
-      expect(result.stopForWallClockBudget).not.toHaveBeenCalled()
       expect(result.cancel).not.toHaveBeenCalled()
     } finally {
       await result.ctx.fiber.dispose()

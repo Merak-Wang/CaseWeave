@@ -6,6 +6,7 @@ import type {
   TicketSnapshotId,
 } from './brand.js'
 import type { TicketRetrievalMode, TicketSearchTrace } from './ranking.js'
+import type { QueryPlan, QueryFieldCapability } from './query-plan.js'
 /** Trusted identity established by the product host, never by a model or browser field. */
 export interface TrustedPrincipalContext {
   readonly tenantId: string
@@ -137,8 +138,9 @@ export type TicketFastQueryPlan =
  * language, domain, entities, constraints, and result-set policy it used.
  */
 export interface TicketQueryContract {
+  readonly queryPlan?: QueryPlan
   /** Version 8 records sourced user requirements; older persisted contracts remain readable. */
-  readonly schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
+  readonly schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
   readonly original: string
   readonly normalized: string
   readonly task: TicketTaskTarget
@@ -176,7 +178,7 @@ export type TicketQueryChange =
   | { readonly kind: 'add_terms'; readonly terms: readonly string[] }
   | { readonly kind: 'replace_terms'; readonly terms: readonly string[]; readonly operator: 'and' | 'or' }
   | { readonly kind: 'exclude_terms'; readonly terms: readonly string[] }
-  | { readonly kind: 'add_filter'; readonly filter: TicketFilter }
+  | { readonly kind: 'add_filter'; readonly filter: TicketFilter; readonly resolves?: string }
   | { readonly kind: 'remove_filter'; readonly field: string }
   | { readonly kind: 'semantic_hint'; readonly text: string }
   | { readonly kind: 'rewrite_semantic_query'; readonly text: string }
@@ -209,6 +211,7 @@ export interface TicketRetrievalRequest {
 
 /** Fully validated query specification. */
 export interface TicketRetrievalSpec {
+  readonly queryPlan?: QueryPlan
   readonly target: TicketTaskTarget
   readonly originalQuery: string
   readonly normalizedQuery: string
@@ -245,6 +248,8 @@ export interface TicketSnapshot {
   readonly queryPolicyVersion: string
   /** Versioned data vocabulary exposed for this authorized snapshot. */
   readonly fieldCatalog: readonly TicketFieldDescriptor[]
+  /** Search predicates can use projections that are not standalone evidence read fields. */
+  readonly queryFields?: readonly QueryFieldCapability[]
   readonly capabilities: {
     readonly exhaustive: boolean
     readonly pagination: boolean
@@ -261,6 +266,7 @@ export interface TicketSnapshot {
 }
 
 export interface TicketFieldDescriptor {
+  readonly capability?: QueryFieldCapability
   readonly key: string
   readonly label: string
   readonly valueKind: 'keyword' | 'datetime' | 'text' | 'string_list' | 'raw_json'
@@ -295,6 +301,9 @@ export interface TicketL0 {
 
 /** Authorized title and summary. Legacy L2 markers are migrated by field meaning. */
 export interface TicketCandidate {
+  readonly projectionVersion?: 2
+  readonly summaryOrigin?: import('./agent-context.js').TicketContentOrigin
+  readonly titleOrigin?: import('./agent-context.js').TicketContentOrigin
   readonly ref: TicketCandidateRef
   readonly displayId: string
   readonly sourceVersion: string
@@ -345,6 +354,14 @@ export type TicketEvidenceField = string
 
 /** L2 evidence is untrusted ticket content even after authorization. */
 export interface TicketEvidenceSegment {
+  readonly projectionVersion?: 2
+  readonly projectionLevel?: import('./agent-context.js').TicketProjectionLevel
+  readonly origin?: import('./agent-context.js').TicketContentOrigin
+  readonly part?: number
+  readonly datasetId?: string
+  /** Hash of this exact text, distinct from the whole ticket contentHash. */
+  readonly spanHash?: string
+  readonly fieldLength?: number
   readonly evidenceId: TicketEvidenceId
   readonly candidateRef: TicketCandidateRef
   readonly displayId: string
@@ -366,6 +383,7 @@ export interface TicketEvidenceSegment {
 }
 
 export interface TicketEvidenceResult {
+  readonly nextPosition?: import('./agent-context.js').EvidencePosition
   readonly snapshotId: TicketSnapshotId
   readonly evidence: readonly TicketEvidenceSegment[]
   readonly requestedCandidateRefs: readonly TicketCandidateRef[]
@@ -424,6 +442,8 @@ export interface TicketProviderStatus {
 
 /** Internal normalized source record used by providers; never returned wholesale. */
 export interface NormalizedTicketRecord {
+  readonly summaryOrigin?: import('./agent-context.js').TicketContentOrigin
+  readonly titleOrigin?: import('./agent-context.js').TicketContentOrigin
   readonly ticketId: TicketId
   readonly displayId: string
   readonly tenantId: string
@@ -465,7 +485,7 @@ export interface NormalizedTicketRecord {
   readonly additionalFields?: readonly TicketDisplayField[]
   /** Provider-side values for source-specific filters. */
   readonly filterValues?: Readonly<Record<string, string | readonly string[]>>
-  /** Source-specific L2 values. L3 raw payloads are read only from `rawSource`. */
+  /** Source-specific controlled text values; the field catalog declares their projection level. */
   readonly additionalEvidence?: Readonly<Record<string, readonly string[]>>
   /** Descriptors contributed by the source adapter. */
   readonly fieldCatalog?: readonly TicketFieldDescriptor[]

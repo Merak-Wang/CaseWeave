@@ -15,7 +15,8 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   IconChevronUpOutline14: () => null,
 }))
 
-import { CandidatePanel, AuthorizedCandidatePanel, type CandidatePanelProps } from './CandidatePanel.js'
+import { CandidatePanel, AuthorizedCandidatePanel, PresentationFailure, type CandidatePanelProps } from './CandidatePanel.js'
+import { RetrievalPresentationClientError } from './presentation.js'
 
 const snapshotId = TicketSnapshotId('snapshot-ui-density')
 
@@ -76,7 +77,9 @@ function data(): TicketCandidateNode {
     exportEnabled: true,
     result: {
       type: 'ticket_collection',
-      schemaVersion: 1,
+      schemaVersion: 2,
+      resultRevision: 'result-ui-1',
+      judgments: [],
       retrievalId: RetrievalId('retrieval-ui-density'),
       query: '副卡',
       target: 'ranked_cases',
@@ -106,21 +109,23 @@ describe('CandidatePanel density', () => {
 
   it('starts collapsed and shows only the user query plus extracted keywords', () => {
     const html = renderToStaticMarkup(<AuthorizedCandidatePanel {...({ node: { data: data() }, sessionId: 'session-ui' } as CandidatePanelProps)} />)
-    expect(html).toContain('候选工单 · 6 条')
+    expect(html).toContain('过程候选 · 6 条')
+    expect(html).toContain('下载全部确认工单（6 条 CSV）')
     expect(html).toContain('aria-expanded="false"')
-    expect(html).toContain('原始查询')
-    expect(html).toContain('提取关键词')
     expect(html).toContain('副卡')
     expect(html).toContain('跨域')
-    expect(html).not.toContain('系统理解')
-    expect(html).not.toContain('规范化理解')
-    expect(html).not.toContain('向量使用原始问题，不改写')
-    expect(html).not.toContain('融合候选')
-    expect(html).not.toContain('匹配：向量通道')
     expect(html).not.toContain('工单编号 TKT-1')
     expect(html).not.toContain('工单编号 TKT-6')
     expect(html).toContain('当前 Top-K 已接受；语义召回范围仍未知。')
     expect(html).not.toContain('继续检索下一批')
+  })
+
+  it('prefers the current query keyword terms over the first-round fast query', () => {
+    const html = renderToStaticMarkup(<AuthorizedCandidatePanel {...({
+      node: { data: { ...data(), keywordTerms: ['副卡', '停机保号'] } }, sessionId: 'session-ui',
+    } as CandidatePanelProps)} />)
+    expect(html).toContain('停机保号')
+    expect(html).not.toContain('跨域')
   })
 
   it('labels an active page as loaded candidates rather than a fixed first batch', () => {
@@ -131,5 +136,27 @@ describe('CandidatePanel density', () => {
     expect(html).toContain('候选工单 · 已加载 6 条')
     expect(html).toContain('当前检索表达式仍有后续候选，检索尚未完成。')
     expect(html).not.toContain('首批候选')
+  })
+})
+
+describe('presentation failure actions', () => {
+  it('offers no reauthorization retry when the snapshot is deterministically dead', () => {
+    const html = renderToStaticMarkup(<PresentationFailure
+      error={new RetrievalPresentationClientError('SNAPSHOT_INVALID', '历史快照已失效，请重新检索。', false, 409)}
+      onRetry={() => {}}
+    />)
+    expect(html).toContain('历史快照已失效，请重新检索。')
+    expect(html).not.toContain('重新授权')
+    expect(html).toContain('重新发起检索')
+    expect(html).toContain('已确认条件会自动并入')
+  })
+
+  it('keeps the reauthorization retry for transient backend failures', () => {
+    const html = renderToStaticMarkup(<PresentationFailure
+      error={new RetrievalPresentationClientError('PROVIDER_UNAVAILABLE', '工单来源暂时不可用，无法完成重新授权；请稍后重试。', true, 503)}
+      onRetry={() => {}}
+    />)
+    expect(html).toContain('重新授权')
+    expect(html).not.toContain('重新发起检索')
   })
 })

@@ -14,6 +14,14 @@
       "types": "./lib/startup.d.ts",
       "default": "./lib/startup.js"
     },
+    "./session-compat": {
+      "types": "./lib/session-compat.d.ts",
+      "default": "./lib/session-compat.js"
+    },
+    "./opencode-pi-ai": {
+      "types": "./lib/opencode-pi-ai.d.ts",
+      "default": "./lib/opencode-pi-ai.js"
+    },
     "./provider": {
       "types": "./lib/provider.d.ts",
       "default": "./lib/provider.js"
@@ -54,14 +62,13 @@
     "@retrieval-agent/dsh-compat": "workspace:*",
     "@retrieval-agent/model-service-client": "workspace:*",
     "@retrieval-agent/provider-local": "workspace:*",
+    "@retrieval-agent/provider-database": "workspace:*",
     "@retrieval-agent/provider-streamcluster": "workspace:*",
     "@retrieval-agent/product-api": "workspace:*",
     "@retrieval-agent/product-host": "workspace:*",
     "@retrieval-agent/query-understanding": "workspace:*",
     "@retrieval-agent/retrieval-ranking": "workspace:*",
-    "@retrieval-agent/ticket-collection": "workspace:*",
     "@retrieval-agent/ui-ticket-results": "workspace:*",
-    "@retrieval-agent/ui-product-shell": "workspace:*",
     "@deepseek-ai/schemastery": "3.18.1"
   },
   "peerDependencies": {

@@ -32,7 +32,7 @@ function state(termination: RetrievalState['termination']): RetrievalState {
     candidates: [], candidateHistory: [], rankingHistory: [], excludedCandidateRefs: [], selectedCandidateRefs: [],
     lastAssessment: undefined, promotedEvidence: [], gaps: [], allowedActions: [],
     budget: {
-      maxRounds: 8, maxSearches: 4, maxLatencyMs: 10000,
+      maxSearches: 4,
       modelStepsUsed: 1, searchesUsed: 1, wallClockElapsedMs: 1,
     },
     progress: { newCandidateRefs: [], rankOverlap: 0, newDecisiveEvidence: false, resolvedGaps: [], noProgressStreak: 0 },
@@ -64,7 +64,7 @@ describe('candidate node projection', () => {
     })
     const projected = projectTicketCandidateNode([event], retrievalId)
     expect(projected.result?.tickets.map(item => item.ref)).toEqual([accepted.ref])
-    expect(projected.result?.undeterminedCandidates?.map(item => item.ref)).toEqual([waiting.ref])
+    expect(projected.result).not.toHaveProperty('undeterminedCandidates')
     expect(projected.candidates.map(item => item.ref)).toEqual([accepted.ref, waiting.ref])
     expect(projected.message).toBe(stopped.stopExplanation)
   })

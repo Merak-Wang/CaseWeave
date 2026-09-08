@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "primary-secondary-card",
+  "domain": "primary-secondary-card",
+  "description": "主副卡与跨域",
+  "activationPhase": "post-fast-query",
+  "authority": "reference-data-only",
+  "knowledgeRefs": [
+    "primary-secondary-card-cross-domain",
+    "primary-secondary-card-quota",
+    "primary-secondary-card-suspension"
+  ],
+  "toolGrants": [],
+  "promptOverride": null,
+  "outputRequirements": [
+    "区分先验与工单证据",
+    "引用实际可见工单片段",
+    "列出歧义及反例",
+    "不修改用户条件"
+  ]
+}

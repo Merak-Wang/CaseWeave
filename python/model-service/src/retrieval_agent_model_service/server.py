@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import time
+import asyncio
+import threading
+import logging
+import json
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +85,7 @@ def create_app(backend: Any, ranking_backend: RetrievalRankingBackend | None = N
         return JSONResponse(status_code=200 if value["ready"] else 503, content=value)
 
     @app.post("/v1/embeddings")
-    def embeddings(value: dict[str, Any], request: Request) -> dict[str, Any]:
+    async def embeddings(value: dict[str, Any], request: Request) -> dict[str, Any]:
         started = time.perf_counter()
         request_id = _request_id(value, request)
         texts = value.get("input")
@@ -98,7 +102,25 @@ def create_app(backend: Any, ranking_backend: RetrievalRankingBackend | None = N
             or isinstance(dimensions, bool)
         ):
             raise ServiceError(400, "INVALID_REQUEST", "Embedding inputType and L2 normalization are required.")
-        vectors = backend.embed(texts, input_type, instruction, dimensions)
+        complete = value.get("requireCompleteInput", False)
+        if not isinstance(complete, bool):
+            raise ServiceError(400, "INVALID_REQUEST", "requireCompleteInput must be Boolean.")
+        timings: dict[str, float] = {}
+        cancel = threading.Event()
+        if hasattr(backend, "embed_measured"):
+            task = asyncio.create_task(asyncio.to_thread(backend.embed_measured, texts, input_type, instruction, dimensions, timings, cancel, complete))
+            try:
+                while not task.done():
+                    if await request.is_disconnected():
+                        cancel.set()
+                    await asyncio.wait({task}, timeout=0.025)
+                vectors = await task
+            finally:
+                cancel.set()
+        else:
+            if complete:
+                raise ServiceError(400, "CAPABILITY_DISABLED", "Backend cannot attest complete input.")
+            vectors = await asyncio.to_thread(backend.embed, texts, input_type, instruction, dimensions)
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "requestId": request_id,
@@ -108,6 +130,8 @@ def create_app(backend: Any, ranking_backend: RetrievalRankingBackend | None = N
             "normalization": "l2",
             "data": [{"index": index, "embedding": vector} for index, vector in enumerate(vectors)],
             "elapsedMs": (time.perf_counter() - started) * 1000,
+            "timings": timings,
+            "inputComplete": complete,
         }
 
     @app.post("/v1/rerank")
@@ -191,16 +215,34 @@ def create_app(backend: Any, ranking_backend: RetrievalRankingBackend | None = N
         }
 
     @app.post("/v1/ranking/rank")
-    def rank(value: dict[str, Any], request: Request) -> dict[str, Any]:
+    async def rank(value: dict[str, Any], request: Request) -> dict[str, Any]:
         started = time.perf_counter()
         request_id = _request_id(value, request, RAG_PROTOCOL_VERSION)
-        result = ranking_backend.rank(
-            value.get("documents"), value.get("query"), value.get("options"), value.get("profile")
-        )
+        cancel = threading.Event()
+        timings: dict[str, float] = {}
+        status = "completed"
+        task = asyncio.create_task(asyncio.to_thread(ranking_backend.rank,
+            value.get("documents"), value.get("query"), value.get("options"), value.get("profile"), cancel, timings))
+        try:
+            while not task.done():
+                if await request.is_disconnected():
+                    cancel.set()
+                await asyncio.wait({task}, timeout=0.025)
+            result = await task
+        except BaseException as error:
+            status = getattr(error, "code", type(error).__name__)
+            raise
+        finally:
+            cancel.set()
+            logging.getLogger("uvicorn.error").info("ranking_request %s", json.dumps({
+                "requestId": request_id, "status": status, "timings": timings,
+                "elapsedMs": (time.perf_counter() - started) * 1000,
+            }))
         return {
             "protocolVersion": RAG_PROTOCOL_VERSION,
             "requestId": request_id,
             "result": result,
+            "timings": timings,
             "elapsedMs": max(0.0, (time.perf_counter() - started) * 1000),
         }
 

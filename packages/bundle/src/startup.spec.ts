@@ -1,8 +1,11 @@
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, parse } from 'node:path'
+import { dirname, join, parse, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { installLocalProductAssets, uninstallLocalProductAssets } from './startup.js'
+
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const temporaryRoots: string[] = []
 
@@ -78,6 +81,16 @@ describe('installLocalProductAssets', () => {
     const root = parse(process.cwd()).root
     await expect(installLocalProductAssets(root)).rejects.toThrow(/filesystem root/u)
     await expect(uninstallLocalProductAssets(root)).rejects.toThrow(/filesystem root/u)
+  })
+
+  it('registers the Session vocabulary at host startup, before the preset-bound service', async () => {
+    const patch = await readFile(join(packageRoot, 'cordis.patch.yml'), 'utf8')
+    const compatRow = patch.indexOf('id: retrieval-session-compat')
+    const hostRow = patch.indexOf('id: retrieval-product-host')
+
+    expect(compatRow).toBeGreaterThanOrEqual(0)
+      expect(patch.slice(compatRow, hostRow)).toContain("name: '@retrieval-agent/bundle/session-compat'")
+    expect(hostRow).toBeGreaterThan(compatRow)
   })
 
   it('removes only product-owned preset and fixture directories', async () => {

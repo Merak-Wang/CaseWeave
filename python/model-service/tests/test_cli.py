@@ -15,8 +15,13 @@ class FakeBackend:
         domain_lexicon_path: Path | None,
         enable_reranker: bool,
         device: str,
+        *,
+        max_batch_size: int = 16,
+        max_total_tokens: int = 8192,
     ) -> None:
         del manifest, embedding_path, reranker_path, spacy_path, domain_lexicon_path, enable_reranker, device
+        self.max_batch_size = max_batch_size
+        self.max_total_tokens = max_total_tokens
 
     def load(self) -> None:
         return None

@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import type {
   TicketFastQueryPlan,
+  TicketFilter,
   TicketQueryContract,
   TicketQueryEntity,
   TicketQueryLogic,
   TicketRetrievalRequest,
+  QueryPlan,
+  QueryFieldCapability,
 } from '@retrieval-agent/contracts'
 import {
   QUERY_ANALYSIS_PROTOCOL_VERSION,
@@ -12,11 +15,14 @@ import {
   type QueryAnalysisResponse,
 } from './protocol.js'
 import { compileUserConditions, explicitUserCount } from './conditions.js'
+import { compileQueryPlan } from './query-plan.js'
+import type { QueryPlanParser } from './query-plan.js'
+export * from './query-plan.js'
 
 export * from './protocol.js'
 export { compileUserConditions, explicitUserCount } from './conditions.js'
 
-const ASSEMBLER_VERSION = 'spacy-fast-query-v4'
+const ASSEMBLER_VERSION = 'spacy-fast-query-v6'
 
 /** 查询分析端口：业务装配依赖这个接口，不依赖某个具体 HTTP 客户端，便于替换 Provider 和做契约测试。 */
 export interface TicketQueryAnalyzer {
@@ -189,6 +195,25 @@ export interface FastTicketRequestOptions {
   readonly signal?: AbortSignal
   readonly now?: Date
   readonly timeZone?: string
+  /** 上一任务实例中用户已确认的条件；快照失效重启时并入本轮请求，避免已确认约束丢失。 */
+  readonly inheritedFilters?: readonly TicketFilter[]
+}
+
+/** 快照失效重启时把已确认条件并入本轮编译结果，相同条件按值去重。 */
+function mergeInheritedFilters(
+  inherited: readonly TicketFilter[] | undefined,
+  compiled: readonly TicketFilter[],
+): TicketFilter[] {
+  if (inherited === undefined || inherited.length === 0) return [...compiled]
+  const merged = [...compiled]
+  const seen = new Set(merged.map(filter => JSON.stringify(filter)))
+  for (const filter of inherited) {
+    const key = JSON.stringify(filter)
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(filter)
+  }
+  return merged
 }
 
 function language(value: string): TicketQueryContract['language'] {
@@ -264,9 +289,24 @@ export async function buildFastTicketRequest(
   }
   // NLP 只执行一次，后续所有字段都从同一份版本化分析结果派生，保证事件可重放。
   const analysis = await config.analyzer.analyze(rawQuery, config.signal)
+  const queryPlan = compileQueryPlan(rawQuery, analysis.keywords, {
+    ...(config.now === undefined ? {} : { now: config.now }),
+    ...(config.timeZone === undefined ? {} : { timeZone: config.timeZone }),
+  })
   const conditions = compileUserConditions(rawQuery, analysis.entities, config.now ?? new Date(),
     config.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)
-  const keywordTerms = [...analysis.keywords]
+  // Branch-specific conditions cannot be flattened into the legacy global filter list.
+  const hasDisjunction = (expression: import('@retrieval-agent/contracts').QueryExpression): boolean => expression.kind === 'or'
+    || (expression.kind === 'and' && expression.children.some(hasDisjunction))
+    || (expression.kind === 'not' && hasDisjunction(expression.child))
+  const branched = hasDisjunction(queryPlan.keyword) || hasDisjunction(queryPlan.hard)
+  const additionalUnresolved = queryPlan.requirements.filter(r => r.status === 'unresolved'
+    && !conditions.userRequirements.some(legacy => legacy.text === r.span.text && legacy.status === 'unresolved'))
+  const filters = mergeInheritedFilters(config.inheritedFilters, branched ? [] : conditions.filters)
+  // Field values and workflow instructions are not additional text predicates.
+  // QueryPlan owns the sourced Boolean expression; the flat view only carries
+  // its remaining lexical operands for legacy consumers and model context.
+  const keywordTerms = [...new Set(queryPlan.requirements.filter(r => r.kind === 'keyword').map(r => r.span.text))].slice(0, 8)
   const queryLogic = explicitLogic(analysis)
   // 未识别到显式 OR 时按 AND 查找包含全部关键词的工单；向量文本始终逐字保留用户输入。
   const fastQuery: TicketFastQueryPlan = {
@@ -294,6 +334,7 @@ export async function buildFastTicketRequest(
     analysis.analyzer.lexiconVersion,
   ].join(':')
   const queryContract: TicketQueryContract = {
+    queryPlan,
     schemaVersion: 8,
     original: rawQuery,
     normalized,
@@ -305,8 +346,11 @@ export async function buildFastTicketRequest(
     domain: 'telecom_ticket',
     language: language(analysis.language),
     entities: keywordEntities(keywordTerms),
-    constraints: conditions.filters,
-    userRequirements: conditions.userRequirements,
+    constraints: filters,
+    userRequirements: branched ? queryPlan.requirements.filter(r => r.kind === 'hard').map(r => ({
+      text: r.span.text, filters: [], status: r.status === 'unresolved' ? 'unresolved' as const : 'compiled' as const,
+      ...(r.status === 'unresolved' ? { reason: r.interpretation } : {}),
+    })) : [...conditions.userRequirements, ...additionalUnresolved.map(r => ({ text: r.span.text, status: 'unresolved' as const, filters: [], reason: r.interpretation }))],
     ...(queryLogic === undefined ? {} : { logic: queryLogic }),
     fastQuery,
     // 保存完整 spaCy provenance，后续可以解释关键词来自哪个 token、词性、依存关系和词典版本。
@@ -338,8 +382,9 @@ export async function buildFastTicketRequest(
       })),
       triples: analysis.triples.map(triple => ({ ...triple })),
     },
-    ambiguities: conditions.ambiguities,
-    interpretationBasis: conditions.ambiguities.length > 0 ? 'clarification_required' : 'deterministic_syntax',
+    ambiguities: branched ? queryPlan.requirements.filter(r => r.status === 'unresolved').map(r => ({ kind: 'constraint' as const, text: `${r.span.text}：${r.interpretation}` }))
+      : [...conditions.ambiguities, ...additionalUnresolved.map(r => ({ kind: 'constraint' as const, text: `${r.span.text}：${r.interpretation}` }))],
+    interpretationBasis: conditions.ambiguities.length > 0 || queryPlan.unresolved.length > 0 ? 'clarification_required' : 'deterministic_syntax',
     compilerVersion: `${ASSEMBLER_VERSION}:${analyzerVersion}`,
   }
   return {
@@ -348,10 +393,30 @@ export async function buildFastTicketRequest(
     retrievalQuery: normalized,
     ...(requestedCount === undefined ? {} : { requestedCount }),
     countPolicy,
-    filters: conditions.filters,
-    ambiguities: conditions.ambiguities,
+    filters,
+    ambiguities: queryContract.ambiguities,
     ...(conditions.filters.some(filter => filter.field === 'displayId') ? { retrievalIntent: 'known_item' as const } : {}),
     fastQuery,
     queryContract,
   }
+}
+
+/** New parser port accepts no engine-specific token, POS or dependency vocabulary. */
+export async function buildPlannedTicketRequest(query: string, parser: QueryPlanParser, options: {
+  readonly now: Date; readonly timeZone: string; readonly fields: readonly QueryFieldCapability[]; readonly signal?: AbortSignal
+}): Promise<TicketRetrievalRequest> {
+  const plan: QueryPlan = await parser.parse({ query, now: options.now, timeZone: options.timeZone, fields: options.fields }, options.signal)
+  const result = compileUserResultPolicy(query); const countPolicy = result?.countPolicy ?? 'adaptive'; const target = taskTarget(query)
+  const terms = [...new Set(plan.requirements.filter(r => r.kind === 'keyword').map(r => r.span.text))].slice(0, 8)
+  const fastQuery: TicketFastQueryPlan = { schemaVersion: 2, source: 'direct_user', rewriteApplied: false,
+    ...(terms.length ? { keyword: { terms, operator: 'and' as const } } : {}), vector: { text: query } }
+  const ambiguities = plan.requirements.filter(r => r.status === 'unresolved').map(r => ({ kind: 'constraint' as const, text: `${r.span.text}：${r.interpretation}` }))
+  const contract: TicketQueryContract = { schemaVersion: 9, queryPlan: plan, original: query, normalized: query.normalize('NFKC').trim(), task: target,
+    resultPolicy: countPolicy === 'explicit' ? 'explicit_top_k' : countPolicy === 'exhaustive' ? 'exhaustive_current_snapshot' : 'adaptive_top_k',
+    ...(result?.requestedCount ? { resultLimit: result.requestedCount } : {}), domain: 'telecom_ticket', language: /\p{Script=Han}/u.test(query) ? 'zh' : 'en',
+    entities: keywordEntities(terms), constraints: [], userRequirements: plan.requirements.filter(r => r.kind === 'hard').map(r => ({ text: r.span.text,
+      status: r.status === 'compiled' ? 'compiled' as const : 'unresolved' as const, filters: [], ...(r.status === 'compiled' ? {} : { reason: r.interpretation }) })),
+    ambiguities, fastQuery, compilerVersion: plan.parserVersion }
+  return { target, query, retrievalQuery: contract.normalized, countPolicy, ...(result?.requestedCount ? { requestedCount: result.requestedCount } : {}),
+    filters: [], ambiguities, fastQuery, queryContract: contract }
 }

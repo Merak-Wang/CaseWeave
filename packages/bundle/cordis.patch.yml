@@ -1,18 +1,27 @@
 # `retrieval-agent-install` places the preset in DSH's standard writable
 # `.agent-presets` root and fixture data under `retrieval-agent/data`.
 - insert:
+    # Session 事件词汇注册必须先于任何持久化读取；冷恢复与历史检查在 preset 组合之前校验事件。
+    - id: retrieval-session-compat
+      name: '@retrieval-agent/bundle/session-compat'
+    - id: retrieval-llm-pi-ai
+      name: '@retrieval-agent/bundle/opencode-pi-ai'
     - id: retrieval-product-host
       name: '@retrieval-agent/product-host'
       config:
         workspacePath: !!js dshHomePath('retrieval-agent', 'workspace')
+        taskPersistence: !!js "process.env.RETRIEVAL_AGENT_STORAGE === 'mysql_milvus' ? 'mysql' : 'session'"
     - id: retrieval-ticket-results-ui
       name: '@retrieval-agent/ui-ticket-results'
-    - id: retrieval-product-shell-ui
-      name: '@retrieval-agent/ui-product-shell'
 
 - id: agent-presets
   config:
     default: retrieval-agent
+
+# rc.2 receives GenerateOptions.sessionId but omits OpenCode's required routing header.
+# Reuse the upstream adapter/config/credentials through the version-bound compatibility facade.
+- id: llm-pi-ai
+  disabled: true
 
 - id: permission
   config:

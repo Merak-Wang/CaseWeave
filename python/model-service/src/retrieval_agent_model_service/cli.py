@@ -23,6 +23,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--enable-reranker", action="store_true")
     result.add_argument("--device", default="auto")
     result.add_argument("--host", default="127.0.0.1")
+    result.add_argument("--allow-container-bind", action="store_true",
+                        help="explicitly allow 0.0.0.0 inside a container; publish host port on loopback only")
+    result.add_argument("--max-batch-size", type=int, default=16)
+    result.add_argument("--max-total-tokens", type=int, default=8192)
     result.add_argument("--port", type=int, default=8012)
     result.add_argument(
         "--exit-on-stdin-close",
@@ -39,16 +43,23 @@ def _exit_when_stdin_closes() -> None:
         os._exit(0)
 
 
+def validate_bind(host: str, allow_container_bind: bool) -> None:
+    if host not in ("127.0.0.1", "localhost", "::1") and not (host == "0.0.0.0" and allow_container_bind):
+        raise SystemExit("model service requires loopback; container 0.0.0.0 requires --allow-container-bind")
+
+
 def main() -> None:
     args = parser().parse_args()
-    if args.host not in ("127.0.0.1", "localhost", "::1"):
-        raise SystemExit("model service may only bind to a loopback address")
+    validate_bind(args.host, args.allow_container_bind)
     if args.checkpoint_every_batches < 1:
         raise SystemExit("checkpoint interval must be positive")
+    if args.max_batch_size < 1 or args.max_total_tokens < 1:
+        raise SystemExit("model resource limits must be positive")
     backend = QwenModelBackend(
         load_manifest(args.manifest), args.embedding_path, args.reranker_path,
         args.spacy_path, args.domain_lexicon,
         args.enable_reranker, args.device,
+        max_batch_size=args.max_batch_size, max_total_tokens=args.max_total_tokens,
     )
     backend.load()
     if args.exit_on_stdin_close:

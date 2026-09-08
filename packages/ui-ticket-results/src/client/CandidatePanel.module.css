@@ -10,6 +10,18 @@
   background: var(--dsw-alias-bg-layer-1);
 }
 
+.delivery {
+  padding: 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.delivery h3 { margin: 0 0 8px; font-size: 16px; }
+.delivery p { margin: 8px 0; }
+.delivery summary { cursor: pointer; }
+.delivery ul { padding-left: 20px; }
+.delivery blockquote { margin: 8px 0; padding-left: 12px; border-left: 2px solid var(--dsw-alias-border-l2); }
+
 .collectionToggle,
 .rowToggle,
 .retryButton {

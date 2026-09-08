@@ -1,0 +1,354 @@
+{
+  "schemaVersion": 2,
+  "releaseId": "wiki-2eb486c65d79a1b09605efa98b44f779c70552ef",
+  "baseRelease": "enterprise-retrieval-v2",
+  "kind": "evidence-reviewed-learning",
+  "operationHash": "d4c2bb1d9ee0d3acbbd15ca607c2c00474522e764fb371875d2de83b224177b8",
+  "domains": [
+    {
+      "id": "primary-secondary-card",
+      "title": "主副卡与跨域",
+      "knowledgeRefs": [
+        "primary-secondary-card-cross-domain",
+        "primary-secondary-card-quota",
+        "primary-secondary-card-suspension"
+      ]
+    },
+    {
+      "id": "convergence",
+      "title": "融合业务与返销",
+      "knowledgeRefs": [
+        "convergence-relations",
+        "convergence-restoration",
+        "convergence-reversal"
+      ]
+    },
+    {
+      "id": "esim",
+      "title": "eSIM 与一号双终端",
+      "knowledgeRefs": [
+        "esim-activation",
+        "esim-cancellation",
+        "esim-forms",
+        "esim-replacement"
+      ]
+    },
+    {
+      "id": "portability",
+      "title": "携号转网",
+      "knowledgeRefs": [
+        "portability-direction",
+        "portability-state"
+      ]
+    },
+    {
+      "id": "broadband",
+      "title": "宽带包年与到期处理",
+      "knowledgeRefs": [
+        "broadband-change-conflict",
+        "broadband-expiry"
+      ]
+    },
+    {
+      "id": "renewal",
+      "title": "自动顺延与续约",
+      "knowledgeRefs": [
+        "renewal-confirmation-result",
+        "renewal-network-scope"
+      ]
+    },
+    {
+      "id": "cancellation",
+      "title": "销户、拆机与复装",
+      "knowledgeRefs": [
+        "cancellation-benefits",
+        "cancellation-lifecycle"
+      ]
+    },
+    {
+      "id": "ownership-transfer",
+      "title": "过户与客户账户关系",
+      "knowledgeRefs": [
+        "ownership-transfer-customer-account",
+        "ownership-transfer-group-contract"
+      ]
+    },
+    {
+      "id": "prestige-number",
+      "title": "靓号与承诺消费",
+      "knowledgeRefs": [
+        "prestige-number-terms",
+        "prestige-number-transfer-exit"
+      ]
+    },
+    {
+      "id": "fees",
+      "title": "费用争议与收费证据",
+      "knowledgeRefs": [
+        "fees-assessed-paid",
+        "fees-cancel-reversal",
+        "fees-fee-family"
+      ]
+    },
+    {
+      "id": "invoices",
+      "title": "发票与收据",
+      "knowledgeRefs": [
+        "invoices-cross-area-receipt",
+        "invoices-digital-history",
+        "invoices-printable-amount"
+      ]
+    },
+    {
+      "id": "identity-service-status",
+      "title": "实名核验与服务受限",
+      "knowledgeRefs": [
+        "identity-service-status-reason",
+        "identity-service-status-verification-application"
+      ]
+    },
+    {
+      "id": "business-access",
+      "title": "业务权限类故障",
+      "knowledgeRefs": [
+        "business-access-visibility-scope"
+      ]
+    },
+    {
+      "id": "paperless",
+      "title": "无纸化与受理单",
+      "knowledgeRefs": [
+        "paperless-document-types",
+        "paperless-query-states"
+      ]
+    },
+    {
+      "id": "package-change",
+      "title": "套餐变更与降档",
+      "knowledgeRefs": [
+        "package-change-downgrade"
+      ]
+    },
+    {
+      "id": "channel-incentives",
+      "title": "渠道佣金支撑工单",
+      "knowledgeRefs": [
+        "channel-incentives-calculation-payment",
+        "channel-incentives-rule-mismatch"
+      ]
+    },
+    {
+      "id": "cross-domain-evidence",
+      "title": "通用业务辨析与取证",
+      "knowledgeRefs": [
+        "cross-domain-evidence-error-code",
+        "cross-domain-evidence-pending-effective"
+      ]
+    },
+    {
+      "id": "general",
+      "title": "通用检索经验",
+      "knowledgeRefs": [
+        "learned-677f4fd29e0e3645e42572a49be71143"
+      ]
+    }
+  ],
+  "entries": [
+    {
+      "id": "broadband-change-conflict",
+      "revision": 2,
+      "sha256": "f318a6cc91131b846ba6d9a888bc311e95ebd8bd0a639ab3e31a8cd472b6c3cb"
+    },
+    {
+      "id": "broadband-expiry",
+      "revision": 2,
+      "sha256": "9bd1b3e36ae5ccbec6787a0e0cfbaf7c2bdcc87d496322b9bee631c6aa48aa5c"
+    },
+    {
+      "id": "business-access-visibility-scope",
+      "revision": 2,
+      "sha256": "caa36b7d9cf19ab52d570e3694736a3049b8efc1ac4090fe14133a0b8b135087"
+    },
+    {
+      "id": "cancellation-benefits",
+      "revision": 2,
+      "sha256": "c5c53c1792a055c5c7663e36ed5f3010416c1c1e59b41615ff61c1c30bf314b8"
+    },
+    {
+      "id": "cancellation-lifecycle",
+      "revision": 2,
+      "sha256": "815bc2fe8f6811dcec11a7f5b1732811ee458ebcb36b777e723c46936ce3aa86"
+    },
+    {
+      "id": "channel-incentives-calculation-payment",
+      "revision": 2,
+      "sha256": "1db4aa911ffe87b7723081991863ad4f1b32cccc266c4dd5523426e5751ee55a"
+    },
+    {
+      "id": "channel-incentives-rule-mismatch",
+      "revision": 2,
+      "sha256": "9ec372c585298c53ac6f9e4bc7a1e5d488c277144e11900902ff5657c749420b"
+    },
+    {
+      "id": "convergence-relations",
+      "revision": 2,
+      "sha256": "f295c09abf98aa3bbce64c78cd89a50444920b86cf62742e9ee96684c3dc54f1"
+    },
+    {
+      "id": "convergence-restoration",
+      "revision": 2,
+      "sha256": "65539c3091f08e4ef4ceeeabcc1f10a3d5ae195afc55db8cef7fd9171d81c415"
+    },
+    {
+      "id": "convergence-reversal",
+      "revision": 2,
+      "sha256": "baa91618cb19dd2f2ed24ba1e994c5c90962275201ce2aea91dd761a574e1751"
+    },
+    {
+      "id": "cross-domain-evidence-error-code",
+      "revision": 2,
+      "sha256": "a9993fd2d08f00e98921f103d20c3dcd3275616fcd9fec9373dd9a745f4ad79f"
+    },
+    {
+      "id": "cross-domain-evidence-pending-effective",
+      "revision": 2,
+      "sha256": "3dd2369e1611dbd8a34a7a2213ccde1f09f6f376597556d5951229307026305f"
+    },
+    {
+      "id": "esim-activation",
+      "revision": 2,
+      "sha256": "a0e9e4f7de579a7205a0cda77684d70b7d39a8d1761fa0a9aa201af41a786745"
+    },
+    {
+      "id": "esim-cancellation",
+      "revision": 2,
+      "sha256": "223813e788d0564da735f71259cde4149f582d65ebcac355f6899481de379d5d"
+    },
+    {
+      "id": "esim-forms",
+      "revision": 2,
+      "sha256": "3a8812d69b082699d1fe00fbbed5f51c39f8826b2736e3c59b292208cdf8764b"
+    },
+    {
+      "id": "esim-replacement",
+      "revision": 2,
+      "sha256": "e133bd217475413c37431d6bac5a9933963d8d460b4a663931f4c31d91734695"
+    },
+    {
+      "id": "fees-assessed-paid",
+      "revision": 2,
+      "sha256": "1bbd905e9f193f6a5505760ba96b05a7d5563d5dbf5d28d9477a30e3f9ab26d7"
+    },
+    {
+      "id": "fees-cancel-reversal",
+      "revision": 2,
+      "sha256": "356191128ad76630c4026b7ff9bc927510f3db209474e6e3fa024288452a3633"
+    },
+    {
+      "id": "fees-fee-family",
+      "revision": 2,
+      "sha256": "9298da94794e22932db32e95cf9f143178e94451745f0ae76fddc500247fc5b1"
+    },
+    {
+      "id": "identity-service-status-reason",
+      "revision": 2,
+      "sha256": "594606782b94dfd4de69c659b7eb6b7a1cd551d62d0aa185b262e8b895469f15"
+    },
+    {
+      "id": "identity-service-status-verification-application",
+      "revision": 2,
+      "sha256": "4d21897ef0a4b86414ca93211772af361c196a22d647377c38bb882833c345f4"
+    },
+    {
+      "id": "invoices-cross-area-receipt",
+      "revision": 2,
+      "sha256": "0228296265aec700807ebd01b22c4861050157d5de4ca980582c73febb4d832e"
+    },
+    {
+      "id": "invoices-digital-history",
+      "revision": 2,
+      "sha256": "27d34fc43e29a7000948f83b96a5ceb1cda11490f57a2e107d8e0f06bc3a9957"
+    },
+    {
+      "id": "invoices-printable-amount",
+      "revision": 2,
+      "sha256": "13b3ead5d24f10f8b3cb0d367e4315a90150d1dd76a649876eb3e736e250de00"
+    },
+    {
+      "id": "learned-677f4fd29e0e3645e42572a49be71143",
+      "revision": 1,
+      "sha256": "f21be706c0a8f5a990cee66511a9e23782670d4de45bbc9866593d6c1963633a"
+    },
+    {
+      "id": "ownership-transfer-customer-account",
+      "revision": 2,
+      "sha256": "e4e17cc721650ad0ac9fc01662168c989c5f92ccff974711f55a6bd7b3e27f82"
+    },
+    {
+      "id": "ownership-transfer-group-contract",
+      "revision": 2,
+      "sha256": "e774ac5b6e1a842beb3c7e140c2de93756868ebcb68df78c5171ef3b28f64831"
+    },
+    {
+      "id": "package-change-downgrade",
+      "revision": 2,
+      "sha256": "309139c19005a74828b95d79e0f1daac2f6d5b496ea876fabe6393e8328f1c79"
+    },
+    {
+      "id": "paperless-document-types",
+      "revision": 2,
+      "sha256": "8ef6a57cb7c5bcdc5c3223b5c208ad8990925b594b043105cbb82308ee5ed89d"
+    },
+    {
+      "id": "paperless-query-states",
+      "revision": 2,
+      "sha256": "2c4c2b916c98ed0830188b553a10b25c39d38775737abf20e38057cf5edf7715"
+    },
+    {
+      "id": "portability-direction",
+      "revision": 2,
+      "sha256": "7d4607f5adb71df66aeb0f0454c88568ed74c2e529db1f3846004b128a3e5712"
+    },
+    {
+      "id": "portability-state",
+      "revision": 2,
+      "sha256": "a500497a20c1886996ab37dbdc84bff4b70cb03c218e421ec26f9def595183d8"
+    },
+    {
+      "id": "prestige-number-terms",
+      "revision": 2,
+      "sha256": "8d8ae301cf1fc95a2da24b47bfbfd2b8956992357f14b5ca40a4ca00db0b849f"
+    },
+    {
+      "id": "prestige-number-transfer-exit",
+      "revision": 2,
+      "sha256": "ed48bad6f0f3851f8189f025877b7f6200fc89c18f8125627f1bed7efcfc7fe7"
+    },
+    {
+      "id": "primary-secondary-card-cross-domain",
+      "revision": 2,
+      "sha256": "066bd4a97ee93612bc421938fae3f9baaa4e138d2d03e63997ebfce9268dbc1a"
+    },
+    {
+      "id": "primary-secondary-card-quota",
+      "revision": 2,
+      "sha256": "721fcfae2c0804bac3190ad2fad1a8b235689e1a4c3db77da9b4ef3b5fc874ba"
+    },
+    {
+      "id": "primary-secondary-card-suspension",
+      "revision": 2,
+      "sha256": "a307871094d97fa1797df7ea2cbb411f0285294b7f60db501fcc981d25cde57b"
+    },
+    {
+      "id": "renewal-confirmation-result",
+      "revision": 2,
+      "sha256": "6935b1cc408a08a094a5e776a4a0b89ca8671e3d3639f79cb7d7c59d5e44f628"
+    },
+    {
+      "id": "renewal-network-scope",
+      "revision": 2,
+      "sha256": "5681c599270f18cab4722a600012e7374d0d43f341f224e547af8cfad49d7809"
+    }
+  ],
+  "retired": []
+}

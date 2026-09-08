@@ -10,6 +10,7 @@ import {
   RetrievalId,
   makeRetrievalEvent,
 } from '@retrieval-agent/contracts'
+import { apply } from './plugin.js'
 import {
   PINNED_DSH_SESSION_VERSION,
   appendRetrievalPresentationAnchor,
@@ -32,6 +33,20 @@ describe('DSH Session compatibility boundary', () => {
     expect(second.newlyRegisteredEventTypes).toEqual([])
     expect(REQUIRED_RETRIEVAL_EVENT_TYPES.every(type => KNOWN_SESSION_EVENT_TYPES.has(type))).toBe(true)
     expect(KNOWN_SESSION_EVENT_TYPES.has(RETRIEVAL_PRESENTATION_EVENT_TYPE)).toBe(true)
+  })
+
+  it('startup plugin restores the vocabulary for a harness that never composed the preset', () => {
+    const all = [...REQUIRED_RETRIEVAL_EVENT_TYPES, RETRIEVAL_PRESENTATION_EVENT_TYPE]
+    const registry = KNOWN_SESSION_EVENT_TYPES as Set<string>
+    for (const type of all) registry.delete(type)
+    try {
+      // The cold-start refusal: persistence rejects every retrieval event as unknown.
+      expect(all.every(type => !KNOWN_SESSION_EVENT_TYPES.has(type))).toBe(true)
+      apply()
+      expect(all.every(type => KNOWN_SESSION_EVENT_TYPES.has(type))).toBe(true)
+    } finally {
+      installDshSessionCompatibility()
+    }
   })
 
   it('registers the separate physical Session package used by the DSH runtime', async () => {

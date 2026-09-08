@@ -1,0 +1,44 @@
+name: Source verification
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.13.0
+      - run: npm install --global pnpm@10.28.2
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm build
+      - run: pnpm typecheck:code
+      - run: pnpm test --maxWorkers=2
+      - run: node --test scripts/container-web.spec.mjs scripts/model-container.spec.mjs scripts/wiki-store.spec.mjs
+      - if: runner.os == 'Linux'
+        run: node --test --test-concurrency=1 scripts/setup.spec.mjs
+      - run: pnpm verify:workspace
+      - run: pnpm verify:source
+      - run: node scripts/wiki-store.mjs verify
+  app-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: docker build -f config/app/Dockerfile -t retrieval-agent-app:ci .
+      - run: docker run --rm retrieval-agent-app:ci node scripts/wiki-store.mjs verify
+# Database, real-model and browser acceptance are explicit opt-ins documented in
+# DEVELOPMENT.md. CI needs no model credentials, business data or GPU.

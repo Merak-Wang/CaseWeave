@@ -7,33 +7,18 @@
   "required": [
     "schemaVersion",
     "packageScope",
-    "forbiddenGenericPackageNames",
-    "testConvention",
-    "protocolConvention",
     "packages"
   ],
   "properties": {
-    "$schema": { "type": "string" },
-    "schemaVersion": { "const": 1 },
-    "packageScope": { "type": "string", "minLength": 1 },
-    "forbiddenGenericPackageNames": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-    "testConvention": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["packagePattern", "repositoryIntegrationRoot"],
-      "properties": {
-        "packagePattern": { "type": "string" },
-        "repositoryIntegrationRoot": { "type": "string" }
-      }
+    "$schema": {
+      "type": "string"
     },
-    "protocolConvention": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["fileName", "allowedExportedTypeSuffixes"],
-      "properties": {
-        "fileName": { "type": "string" },
-        "allowedExportedTypeSuffixes": { "type": "array", "items": { "type": "string" }, "minItems": 1, "uniqueItems": true }
-      }
+    "schemaVersion": {
+      "const": 1
+    },
+    "packageScope": {
+      "type": "string",
+      "minLength": 1
     },
     "packages": {
       "type": "array",
@@ -41,13 +26,29 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["directory", "name", "kind", "capability", "allowedInternalDependencies"],
+        "required": [
+          "directory",
+          "name",
+          "kind",
+          "capability"
+        ],
         "properties": {
-          "directory": { "type": "string", "minLength": 1 },
-          "name": { "type": "string", "minLength": 1 },
-          "kind": { "type": "string", "minLength": 1 },
-          "capability": { "type": "string", "minLength": 1 },
-          "allowedInternalDependencies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+          "directory": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "capability": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     }

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "channel-incentives",
+  "domain": "channel-incentives",
+  "description": "渠道佣金支撑工单",
+  "activationPhase": "post-fast-query",
+  "authority": "reference-data-only",
+  "knowledgeRefs": [
+    "channel-incentives-calculation-payment",
+    "channel-incentives-rule-mismatch"
+  ],
+  "toolGrants": [],
+  "promptOverride": null,
+  "outputRequirements": [
+    "区分先验与工单证据",
+    "引用实际可见工单片段",
+    "列出歧义及反例",
+    "不修改用户条件"
+  ]
+}

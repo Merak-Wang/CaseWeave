@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "package-change",
+  "domain": "package-change",
+  "description": "套餐变更与降档",
+  "activationPhase": "post-fast-query",
+  "authority": "reference-data-only",
+  "knowledgeRefs": [
+    "package-change-downgrade"
+  ],
+  "toolGrants": [],
+  "promptOverride": null,
+  "outputRequirements": [
+    "区分先验与工单证据",
+    "引用实际可见工单片段",
+    "列出歧义及反例",
+    "不修改用户条件"
+  ]
+}

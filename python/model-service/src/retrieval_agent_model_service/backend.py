@@ -36,6 +36,8 @@ class QwenModelBackend:
         self.max_total_tokens = max_total_tokens
         self.max_rerank_candidates = max_rerank_candidates
         self._gate = threading.BoundedSemaphore(1)
+        self._priority_lock = threading.Lock()
+        self._interactive_waiters = 0
         self._embedding_tokenizer: Any = None
         self._embedding_model: Any = None
         self._reranker_tokenizer: Any = None
@@ -63,6 +65,8 @@ class QwenModelBackend:
             self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         else:
             self.device = self.device_name
+        if self.device.startswith("cuda") and not torch.cuda.is_available():
+            raise ServiceError(500, "GPU_UNAVAILABLE", "CUDA was explicitly requested but is unavailable; check Docker GPU access/driver or select the CPU configuration.")
         dtype = torch.bfloat16 if self.device.startswith("cuda") and torch.cuda.is_bf16_supported() else (
             torch.float16 if self.device.startswith("cuda") else torch.float32
         )
@@ -133,7 +137,47 @@ class QwenModelBackend:
         if sum(lengths) > self.max_total_tokens:
             raise ServiceError(413, "TOKEN_LIMIT", "Model input exceeds the configured token budget.")
 
-    def embed(self, texts: list[str], input_type: str, instruction: str | None, dimensions: int) -> list[list[float]]:
+    def embed_measured(self, texts: list[str], input_type: str, instruction: str | None, dimensions: int,
+                       timings: dict[str, float], cancel: threading.Event, complete: bool) -> list[list[float]]:
+        queued = time.perf_counter()
+        interactive = input_type == "query"
+        with self._priority_lock:
+            self._interactive_waiters += int(interactive)
+        acquired = False
+        try:
+            while not acquired:
+                if cancel.is_set():
+                    raise ServiceError(499, "CANCELLED", "Embedding cancelled before computation.")
+                if time.perf_counter() - queued > 120:
+                    raise ServiceError(429, "BACKPRESSURE", "Embedding queue capacity exceeded.", retryable=True)
+                with self._priority_lock:
+                    priority_waiting = self._interactive_waiters > 0
+                if not interactive and priority_waiting:
+                    cancel.wait(0.01)
+                    continue
+                acquired = self._gate.acquire(timeout=0.025)
+                if acquired and not interactive:
+                    with self._priority_lock:
+                        priority_waiting = self._interactive_waiters > 0
+                    if priority_waiting:
+                        self._gate.release()
+                        acquired = False
+            timings["queueMs"] = (time.perf_counter() - queued) * 1000
+            if cancel.is_set():
+                raise ServiceError(499, "CANCELLED", "Embedding cancelled before computation.")
+            started = time.perf_counter()
+            try:
+                return self.embed(texts, input_type, instruction, dimensions, complete=complete, gate_owned=True)
+            finally:
+                timings["computeMs"] = (time.perf_counter() - started) * 1000
+        finally:
+            with self._priority_lock:
+                self._interactive_waiters -= int(interactive)
+            if acquired:
+                self._gate.release()
+
+    def embed(self, texts: list[str], input_type: str, instruction: str | None, dimensions: int,
+              complete: bool = False, gate_owned: bool = False) -> list[list[float]]:
         if self._embedding_model is None:
             raise ServiceError(503, "NOT_READY", "Embedding model is not ready.", retryable=True)
         if len(texts) < 1 or len(texts) > self.max_batch_size or any(not text.strip() for text in texts):
@@ -142,8 +186,13 @@ class QwenModelBackend:
             raise ServiceError(400, "DIMENSION_MISMATCH", "Only the manifest embedding dimensions are supported.")
         prompt = instruction or self.manifest.embedding.instruction or ""
         prepared = [f"Instruct: {prompt}\nQuery:{text}" for text in texts] if input_type == "query" else texts
-        self._acquire()
+        if not gate_owned:
+            self._acquire()
         try:
+            if complete:
+                encoded = self._embedding_tokenizer(prepared, add_special_tokens=True, padding=False, truncation=False)
+                if any(len(row) > self.manifest.embedding.max_tokens for row in encoded["input_ids"]):
+                    raise ServiceError(413, "INPUT_TRUNCATION_REQUIRED", "Split source fields before embedding; complete input exceeds model token capacity.")
             self._tokens(self._embedding_tokenizer, prepared, self.manifest.embedding.max_tokens)
             batch = self._embedding_tokenizer(
                 prepared, padding=True, truncation=True, max_length=self.manifest.embedding.max_tokens,
@@ -167,7 +216,8 @@ class QwenModelBackend:
                 raise ServiceError(500, "INVALID_VECTOR", "Embedding model produced invalid vectors.")
             return vectors
         finally:
-            self._gate.release()
+            if not gate_owned:
+                self._gate.release()
 
     def rerank(self, query: str, candidates: list[dict[str, str]], instruction: str, top_k: int) -> list[dict[str, Any]]:
         if self._reranker_model is None:

@@ -10,7 +10,15 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./result": {
+      "types": "./lib/result.d.ts",
+      "default": "./lib/result.js"
+    },
+    "./replay": {
+      "types": "./lib/replay.d.ts",
+      "default": "./lib/replay.js"
+    }
   },
   "files": [
     "lib",
@@ -21,8 +29,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@retrieval-agent/contracts": "workspace:*",
-    "@retrieval-agent/retrieval-replay": "workspace:*"
+    "@retrieval-agent/contracts": "workspace:*"
   },
   "publishConfig": {
     "access": "public"

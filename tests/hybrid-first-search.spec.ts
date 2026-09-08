@@ -3,9 +3,9 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { type TrustedPrincipalContext } from '@retrieval-agent/contracts'
-import { createTicketResultCollection } from '@retrieval-agent/ticket-collection'
+import { createTicketResultCollection } from '@retrieval-agent/domain/result'
 import { InMemoryRetrievalEventJournal, RetrievalController } from '@retrieval-agent/domain'
-import { LocalTicketProvider, parseFixtureJsonl } from '@retrieval-agent/provider-local'
+import { LocalTicketProvider, normalizeFixtureTicket, parseFixtureJsonl } from '@retrieval-agent/provider-local'
 import { testHybridRanker } from './support/fake-model-gateway.js'
 import { buildFastTicketRequest } from '@retrieval-agent/query-understanding'
 import { fixtureQueryAnalyzer } from './support/query-analyzer.js'
@@ -62,6 +62,52 @@ describe('fixed first-pass Hybrid retrieval', () => {
       'TKT-0001', 'TKT-0002', 'TKT-0003', 'TKT-0004', 'TKT-0005', 'TKT-0007',
       'TKT-0008', 'TKT-0027', 'TKT-0028', 'TKT-0029', 'TKT-0030',
     ]))
+  })
+
+  it('takes an exact ticket id through the displayId filter without requiring the id in business text', async () => {
+    const ticket = (ticketId: string, title: string) => normalizeFixtureTicket({
+      ticketId, displayId: ticketId, title, summary: title,
+      tenantId: 'demo', allowedSubjectIds: [], requiredAttributes: { role: ['administrator'] },
+      sourceVersion: 'known-item-fixture-v1', conversationOrUpdates: [], resolutionSteps: [], errorCodes: [],
+      piiRedactionStatus: 'redacted', language: 'zh',
+      searchText: [title],
+    })
+    const provider = new LocalTicketProvider([
+      ticket('ESFT-SUMMARY-TRAIN-024545', '副卡无法使用'),
+      ticket('ESFT-SUMMARY-TRAIN-024546', '副卡无法使用'),
+      ticket('TKT-0005', '副卡无法使用'),
+    ], {
+      now: () => NOW,
+      ranker: testHybridRanker(),
+      defaultMode: 'hybrid',
+    })
+    const request = await buildFastTicketRequest('查找工单 ESFT-SUMMARY-TRAIN-024545。', {
+      analyzer: fixtureQueryAnalyzer(['ES', 'FT', 'MARY', 'TRAIN']),
+    })
+    expect(request.filters).toContainEqual({ field: 'displayId', op: 'eq', value: 'ESFT-SUMMARY-TRAIN-024545' })
+    expect(request.retrievalIntent).toBe('known_item')
+
+    const spec = provider.resolve(request)
+    expect(spec.keywordQuery).toBeUndefined()
+    expect(spec.filters).toContainEqual({ field: 'displayId', op: 'eq', value: 'ESFT-SUMMARY-TRAIN-024545' })
+    const snapshot = await provider.openSnapshot(PRINCIPAL)
+    const page = await provider.search(PRINCIPAL, snapshot.snapshotId, spec, {
+      topK: 10,
+      maxScan: 100,
+      stage: 'initial_hybrid',
+    })
+
+    expect(page.candidates.map(candidate => candidate.displayId)).toEqual(['ESFT-SUMMARY-TRAIN-024545'])
+    expect(page.boundary).toMatchObject({
+      authorizedCorpusSize: 3,
+      documentsAfterStructuredFilters: 1,
+      documentsEligibleForKeywordChannel: 1,
+    })
+    expect(page.trace.channels).toEqual(expect.arrayContaining([
+      expect.objectContaining({ channel: 'keyword', querySource: 'direct_user_keywords', resultCount: 1 }),
+      expect.objectContaining({ channel: 'vector', querySource: 'direct_user_original' }),
+    ]))
+    expect(page.candidates[0]?.matchSignals?.channels).toContain('keyword')
   })
 
   it('keeps vector diagnostics separate while assessment selects the automatic Hybrid result collection', async () => {

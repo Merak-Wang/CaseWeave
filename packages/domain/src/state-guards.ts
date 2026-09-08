@@ -9,9 +9,10 @@ import {
   type TicketEvidenceField,
 } from '@retrieval-agent/contracts'
 
-export function stopReason(error: unknown): Extract<RetrievalTermination, 'budget_exhausted' | 'permission_blocked' | 'backend_error' | 'snapshot_invalid' | 'cancelled'> | undefined {
+export function stopReason(error: unknown): Extract<RetrievalTermination, 'budget_exhausted' | 'capacity_exceeded' | 'permission_blocked' | 'backend_error' | 'snapshot_invalid' | 'cancelled'> | undefined {
   if (!(error instanceof RetrievalError)) return undefined
   if (error.code === 'BUDGET_EXHAUSTED') return 'budget_exhausted'
+  if (error.code === 'CAPACITY_EXCEEDED') return 'capacity_exceeded'
   if (error.code === 'UNAUTHORIZED') return 'permission_blocked'
   if (error.code === 'SNAPSHOT_INVALID' || error.code === 'SNAPSHOT_NOT_FOUND') return 'snapshot_invalid'
   if (error.code === 'CANCELLED') return 'cancelled'
@@ -19,7 +20,7 @@ export function stopReason(error: unknown): Extract<RetrievalTermination, 'budge
   return undefined
 }
 
-export function emptyBudget(config: Pick<RetrievalBudgetState, 'maxRounds' | 'maxSearches' | 'maxLatencyMs'>): RetrievalBudgetState {
+export function emptyBudget(config: Pick<RetrievalBudgetState, 'maxSearches'>): RetrievalBudgetState {
   return {
     ...config,
     searchesUsed: 0,

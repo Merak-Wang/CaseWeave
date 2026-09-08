@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "esim",
+  "domain": "esim",
+  "description": "eSIM 与一号双终端",
+  "activationPhase": "post-fast-query",
+  "authority": "reference-data-only",
+  "knowledgeRefs": [
+    "esim-forms",
+    "esim-activation",
+    "esim-replacement",
+    "esim-cancellation"
+  ],
+  "toolGrants": [],
+  "promptOverride": null,
+  "outputRequirements": [
+    "区分先验与工单证据",
+    "引用实际可见工单片段",
+    "列出歧义及反例",
+    "不修改用户条件"
+  ]
+}

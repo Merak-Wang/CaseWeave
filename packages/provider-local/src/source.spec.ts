@@ -12,6 +12,23 @@ const PRINCIPAL: TrustedPrincipalContext = {
 }
 
 describe('source-native public snapshot adapter', () => {
+  it('keeps upstream summaries at L1 and reads the full controlled dialogue without exposing raw metadata', async () => {
+    const record = normalizePublicSnapshotTicket({ ticket_id: 'ESFT-PROJECTION', source_dataset: 'deepseek-ai/ESFT', source_version: 'v1',
+      title: '副卡办理', summary: '用户要求办理副卡。', problem_description: '客户只说要办理。', pii_redaction_status: 'redacted',
+      raw_dialogue: [{ speaker: 'customer', text: '我要办理副卡。' }, { speaker: 'agent', text: '异地无法办理，需要到归属地。' }],
+      transformation: { hidden: 'not-a-ticket-field' } })
+    const provider = new LocalTicketProvider([record], { now: () => new Date('2026-08-27T01:00:00.000Z'), ranker: testHybridRanker() })
+    const snapshot = await provider.openSnapshot(PRINCIPAL)
+    const page = await provider.search(PRINCIPAL, snapshot.snapshotId, provider.resolve({ query: '副卡', target: 'ranked_cases' }), { topK: 5, maxScan: 10, stage: 'initial_hybrid' })
+    expect(page.candidates[0]?.titleOrigin?.kind).toBe('generated')
+    const read = await provider.readEvidence(PRINCIPAL, { snapshotId: snapshot.snapshotId, candidateRefs: [page.candidates[0]!.ref], fields: ['summary', 'source.raw_dialogue'], tokenBudget: 1000, level: 'L3' })
+    expect(read.evidence[0]).toMatchObject({ projectionLevel: 'L1', origin: { kind: 'unknown' } })
+    expect(read.evidence[0]?.origin?.description).toContain('非对话原文')
+    expect(read.evidence.filter(e => e.field === 'source.raw_dialogue').map(e => JSON.parse(e.text))).toEqual(record.rawSource!.payload.raw_dialogue)
+    expect(JSON.stringify(read)).not.toContain('not-a-ticket-field')
+    const details = await provider.readDetails(PRINCIPAL, { snapshotId: snapshot.snapshotId, candidateRefs: [page.candidates[0]!.ref], fields: ['source.raw_dialogue'], purpose: 'inline_detail' })
+    expect(details.evidence?.map(e => e.evidenceId)).toEqual(read.evidence.slice(1).map(e => e.evidenceId))
+  })
   it('keeps unknown raw keys inside the Provider and rejects raw evidence and detail reads', async () => {
     const record = normalizePublicSnapshotTicket({
       ticket_id: 'PUBLIC-1', source_dataset: 'example/full', source_version: 'v1', source_kind: 'real',

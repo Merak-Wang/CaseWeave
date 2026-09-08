@@ -1,5 +1,5 @@
 import type { RetrievalDomainEvent, RetrievalId, TicketCandidateNode } from '@retrieval-agent/contracts'
-import { foldRetrievalEvents } from '@retrieval-agent/retrieval-replay'
+import { foldRetrievalEvents } from '@retrieval-agent/domain/replay'
 import { projectTicketCandidateState } from '@retrieval-agent/product-api/presentation'
 
 /** Historical projection is an inspectable fact, never a fresh authorization grant. */

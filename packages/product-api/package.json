@@ -18,17 +18,30 @@
       "types": "./lib/presentation.d.ts",
       "default": "./lib/presentation.js"
     },
-    "./package.json": "./package.json"
+    "./download-client": {
+      "types": "./lib/download-client.d.ts",
+      "default": "./lib/download-client.js"
+    },
+    "./package.json": "./package.json",
+    "./detail-client": {
+      "types": "./lib/detail-client.d.ts",
+      "default": "./lib/detail-client.js"
+    }
   },
-  "files": ["lib", "README.md"],
+  "files": [
+    "lib",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@retrieval-agent/contracts": "workspace:*",
-    "@retrieval-agent/ticket-collection": "workspace:*"
+    "@retrieval-agent/domain": "workspace:*"
   },
-  "publishConfig": { "access": "public" },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT"
 }

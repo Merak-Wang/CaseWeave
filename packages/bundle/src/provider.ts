@@ -20,8 +20,15 @@ import {
 import { TicketRetrievalProviderService } from '@retrieval-agent/agent-plugin'
 import { LocalTicketProvider, parseTicketDatasetJsonl, rankingDocuments } from '@retrieval-agent/provider-local'
 import { HybridRankingEngine, type RetrievalRanker } from '@retrieval-agent/retrieval-ranking'
+import { DatabaseTicketProvider, TicketDatabase, MilvusClient } from '@retrieval-agent/provider-database'
+import { ModelServiceClient } from '@retrieval-agent/model-service-client'
+import type { TicketRetrievalProvider } from '@retrieval-agent/contracts'
 
 export interface Config {
+  readonly storageBackend?: 'jsonl' | 'mysql_milvus'
+  readonly mysqlUrl?: string
+  readonly milvusUrl?: string
+  readonly datasetId?: string
   readonly dataPath: string
   readonly additionalDataPaths?: string[]
   readonly providerId?: string
@@ -45,6 +52,10 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
+  storageBackend: z.union(['jsonl', 'mysql_milvus'] as const).default('jsonl'),
+  mysqlUrl: z.string(),
+  milvusUrl: z.string(),
+  datasetId: z.string().default('esft-development'),
   dataPath: z.string().required(),
   additionalDataPaths: z.array(z.string()).default([]),
   providerId: z.string().default('local-fixture-v1'),
@@ -69,12 +80,22 @@ export const Config: z<Config> = z.object({
 /** Fixture Provider adapter used by the shipped local preset only. */
 export class LocalTicketProviderService extends TicketRetrievalProviderService {
   static Config = Config
-  private readonly provider: LocalTicketProvider
+  private readonly provider: TicketRetrievalProvider
   private readonly preparation: Promise<void>
   private preparationError: unknown
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
+    if (config.storageBackend === 'mysql_milvus') {
+      const database = new TicketDatabase(config.mysqlUrl ?? process.env.RETRIEVAL_AGENT_MYSQL_URL)
+      const model = new ModelServiceClient({ baseUrl: config.modelServiceBaseUrl ?? 'http://127.0.0.1:8012',
+        embeddingModel: config.embeddingModel ?? 'Qwen/Qwen3-Embedding-0.6B', embeddingDimensions: config.embeddingDimensions ?? 1024,
+        ...(config.embeddingRevision ? { embeddingRevision: config.embeddingRevision } : {}), defaultDeadlineMs: config.modelDeadlineMs ?? 120_000 })
+      this.provider = new DatabaseTicketProvider(database, new MilvusClient(config.milvusUrl ?? process.env.RETRIEVAL_AGENT_MILVUS_URL, process.env.RETRIEVAL_AGENT_MILVUS_TOKEN), model, config.datasetId, config.denseTopK)
+      this.preparation = database.migrate().then(() => database.publication(config.datasetId ?? 'esft-development')).then(() => undefined, error => { this.preparationError = error })
+      ctx.effect(() => () => database.close())
+      return
+    }
     const records = [config.dataPath, ...(config.additionalDataPaths ?? [])]
       .flatMap(path => parseTicketDatasetJsonl(readFileSync(path, 'utf8')))
     const mode = config.retrievalMode ?? 'hybrid'

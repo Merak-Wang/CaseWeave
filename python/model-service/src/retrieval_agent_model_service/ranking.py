@@ -423,6 +423,8 @@ class RetrievalRankingBackend:
         documents: list[dict[str, str]],
         profile: dict[str, Any],
         flight: _PrepareFlight | None = None,
+        cancel: threading.Event | None = None,
+        timings: dict[str, float] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         identity = self._identity(documents, self._verify_model_identity(profile, True))
         store = VectorCacheStore(self.vector_cache_dir, self._cache_key(identity), identity)
@@ -452,8 +454,8 @@ class RetrievalRankingBackend:
         batch_number = 0
         for offset in range(resumed, len(documents), batch_size):
             batch = documents[offset:offset + batch_size]
-            values = np.asarray(self.model_backend.embed(
-                [_projection(document) for document in batch], "document", None, identity["dimensions"]
+            values = np.asarray(self._embed(
+                [_projection(document) for document in batch], "document", None, identity["dimensions"], cancel, timings
             ), dtype=np.float32)
             if values.shape != (len(batch), identity["dimensions"]):
                 raise ServiceError(500, "INVALID_VECTOR", "Document embedding dimensions changed.")
@@ -572,7 +574,27 @@ class RetrievalRankingBackend:
             flight.completed.set()
         return self._prepare_response(prepared, profile, started)
 
-    def _dense(self, documents: list[dict[str, str]], query: str, profile: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    @staticmethod
+    def _check_cancel(cancel: threading.Event | None) -> None:
+        if cancel is not None and cancel.is_set():
+            raise ServiceError(499, "CANCELLED", "Ranking cancelled; no further batches will run.")
+
+    def _embed(self, texts, input_type, instruction, dimensions, cancel=None, timings=None):
+        self._check_cancel(cancel)
+        measured: dict[str, float] = {}
+        if cancel is not None and hasattr(self.model_backend, "embed_measured"):
+            result = self.model_backend.embed_measured(texts, input_type, instruction, dimensions, measured, cancel, False)
+        else:
+            result = self.model_backend.embed(texts, input_type, instruction, dimensions)
+        if timings is not None:
+            for key, value in measured.items():
+                name = f"{input_type}_{key}"
+                timings[name] = timings.get(name, 0) + value
+        self._check_cancel(cancel)
+        return result
+
+    def _dense(self, documents: list[dict[str, str]], query: str, profile: dict[str, Any],
+               cancel: threading.Event | None = None, timings: dict[str, float] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         started = time.perf_counter()
         prepared = self.prepared
         selected_rows: list[int] | None = None
@@ -583,9 +605,11 @@ class RetrievalRankingBackend:
             vectors, identity = prepared.vectors, prepared.identity
             selected_rows = [prepared.rows[document["id"]][0] for document in documents]
         else:
-            vectors, identity = self._vectors(documents, profile)
-        [query_vector] = self.model_backend.embed(
-            [query], "query", profile["embeddingInstruction"], identity["dimensions"]
+            vectors, identity = self._vectors(documents, profile, cancel=cancel, timings=timings)
+        if timings is not None:
+            timings["corpusMs"] = (time.perf_counter() - started) * 1000
+        [query_vector] = self._embed(
+            [query], "query", profile["embeddingInstruction"], identity["dimensions"], cancel, timings
         )
         matrix = vectors if selected_rows is None else vectors[selected_rows]
         scores = matrix @ np.asarray(query_vector, dtype=np.float32)
@@ -605,7 +629,9 @@ class RetrievalRankingBackend:
             "model": identity["model"], "revision": identity["revision"], "dimensions": identity["dimensions"],
         }
 
-    def rank(self, raw_documents: Any, raw_query: Any, raw_options: Any, raw_profile: Any) -> dict[str, Any]:
+    def rank(self, raw_documents: Any, raw_query: Any, raw_options: Any, raw_profile: Any,
+             cancel: threading.Event | None = None, timings: dict[str, float] | None = None) -> dict[str, Any]:
+        self._check_cancel(cancel)
         if not isinstance(raw_options, dict):
             raise ServiceError(400, "INVALID_REQUEST", "rank options are required.")
         max_scan = _integer(raw_options.get("maxScan"), "max scan", 1)
@@ -661,6 +687,7 @@ class RetrievalRankingBackend:
             "querySource": "direct_user_keywords" if query["fastPath"] else "agent_rewrite",
         }
         if mode == "keyword":
+            self._check_cancel(cancel)
             hits = [self._channel_hit(item, "keyword") for item in lexical or []]
             return self._result(mode, "keyword", profile, hits, [keyword_execution], allowed, keyword_allowed, [])
         if profile["embeddingIdentity"] is None:
@@ -670,8 +697,10 @@ class RetrievalRankingBackend:
             return self._result(mode, "keyword_fallback", profile, hits, [keyword_execution], allowed, keyword_allowed, ["dense_unavailable_keyword_fallback"])
         dense_query = "\n".join(filter(None, [query["semanticText"] or query["text"], *query["semanticHints"]]))
         try:
-            dense, dense_meta = self._dense(allowed, dense_query, profile)
-        except ServiceError:
+            dense, dense_meta = self._dense(allowed, dense_query, profile, cancel, timings)
+        except ServiceError as error:
+            if error.code == "CANCELLED":
+                raise
             if mode == "dense" or not profile["allowKeywordFallback"] or not lexical:
                 raise
             hits = [self._channel_hit(item, "keyword") for item in lexical or []]
@@ -689,7 +718,9 @@ class RetrievalRankingBackend:
         warnings = [] if fused else ["keyword_no_hits_dense_only" if lexical is not None else "keyword_unavailable_dense_only"]
         reranker = None
         if profile["rerankerEnabled"] and hits:
+            self._check_cancel(cancel)
             hits, reranker, warning, execution = self._rerank(hits, allowed, query, profile)
+            self._check_cancel(cancel)
             if warning:
                 warnings.append(warning)
             if execution:

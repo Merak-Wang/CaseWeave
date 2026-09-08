@@ -38,7 +38,7 @@ function stateWithFieldCatalog(): RetrievalState {
       { kind: 'repair_search', candidateAllowlist: [], fieldAllowlist: [], maxTokens: 0 },
     ],
     budget: {
-      maxRounds: 8, maxSearches: 4, maxLatencyMs: 120_000,
+      maxSearches: 4,
       modelStepsUsed: 1, searchesUsed: 1, wallClockElapsedMs: 0,
     },
     progress: {
@@ -49,6 +49,24 @@ function stateWithFieldCatalog(): RetrievalState {
 }
 
 describe('EvidenceContextPolicy', () => {
+  it('never removes user requirements, feedback or a pending question to fit a tiny context', () => {
+    const base = stateWithFieldCatalog()
+    const state = { ...base, userFeedback: [{ text: '排除仅欠费停机，必须有处理记录', receivedAt: '2026-09-07' }] }
+    expect(() => new EvidenceContextPolicy().select(state, 25)).toThrow(/容量|要求|context/i)
+  })
+
+  it('keeps a thousand historical judgments outside the working prompt and exposes history lookup', () => {
+    const base = stateWithFieldCatalog()
+    const state = { ...base, judgments: Array.from({ length: 1200 }, (_, i) => ({
+      candidateRef: TicketCandidateRef(`old-${i}`), verdict: 'exclude' as const,
+      evidenceRefs: [`evidence-${i}`], reason: `历史反例 ${i}：未发生业务变更。`,
+    })) }
+    const context = new EvidenceContextPolicy().select(state, 4000)
+    expect(context.rendered).toContain('1200')
+    expect(context.rendered).toContain('history')
+    expect(context.rendered).not.toContain('历史反例 500')
+    expect(context.estimatedTokens).toBeLessThanOrEqual(4000)
+  })
   it('exposes only currently declared filterable L0 field capabilities to the model', () => {
     const context = new EvidenceContextPolicy({ estimateTokens: () => 1 }).select(stateWithFieldCatalog(), 100)
 

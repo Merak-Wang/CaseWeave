@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { isMap, parseDocument } from 'yaml'
 
 function record(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {}
@@ -11,7 +12,7 @@ export async function seedModelSettings(paths, environment) {
   const model = environment.RETRIEVAL_AGENT_BROWSER_LLM_MODEL?.trim()
   const baseURL = environment.RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL?.trim()
   const apiKeyEnv = environment.RETRIEVAL_AGENT_BROWSER_LLM_API_KEY_ENV?.trim()
-  if ([provider, model, baseURL, apiKeyEnv].every(value => value === undefined)) return false
+  if ([provider, model, baseURL, apiKeyEnv].every(value => !value)) return false
   if ([provider, model, baseURL, apiKeyEnv].some(value => value === undefined || value.length === 0)) {
     throw new Error('browser Agent LLM setup requires provider, model, base URL, and API-key environment name together')
   }
@@ -21,9 +22,13 @@ export async function seedModelSettings(paths, environment) {
   if (existsSync(settingsPath)) {
     try {
       const text = await readFile(settingsPath, 'utf8')
-      existing = text.trim().length === 0 ? {} : record(JSON.parse(text))
+      // DSH rewrites settings as YAML after onboarding/settings changes. Parse
+      // both formats before merging, and reject malformed/ambiguous documents.
+      const document = parseDocument(text, { uniqueKeys: true, stringKeys: true, merge: true })
+      if (document.errors.length || document.warnings.length || (document.contents && !isMap(document.contents))) throw new Error('Invalid settings mapping')
+      existing = record(document.toJS({ maxAliasCount: 100 }))
     } catch {
-      throw new Error(`refusing to overwrite non-JSON DSH settings at ${settingsPath}; configure the Agent LLM in the Web UI instead`)
+      throw new Error(`refusing to overwrite invalid DSH settings at ${settingsPath}; repair the local YAML/JSON configuration before retrying`)
     }
   }
   const existingAdapter = record(existing['llm-pi-ai'])

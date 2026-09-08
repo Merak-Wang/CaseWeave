@@ -4,6 +4,7 @@ import type {
   TicketDetailResult,
   TicketEvidenceField,
   TicketEvidenceResult,
+  TicketFieldDescriptor,
   TicketProviderStatus,
   TicketRetrievalRequest,
   TicketRetrievalSpec,
@@ -29,13 +30,23 @@ export interface TrustedPrincipalProvider {
 }
 
 export interface TicketSearchOptions extends ProviderCallOptions {
+  /** Persisted progress is bounded to a display window; channel enumeration lives in the Provider store. */
+  readonly onProgress?: (progress: TicketSearchProgress) => Promise<void>
   readonly topK: number
   readonly maxScan: number
   readonly cursor?: string
   readonly stage: TicketSearchStage
 }
 
+export interface TicketSearchProgress {
+  readonly page: TicketSearchPage
+  readonly channels: readonly { readonly channel: 'keyword' | 'vector'; readonly status: 'running' | 'completed' | 'failed' | 'skipped'; readonly count: number; readonly error?: string; readonly cursor?: string }[]
+  readonly timings: Readonly<Record<string, number>>
+}
+
 export interface EvidenceReadRequest {
+  readonly position?: import('./agent-context.js').EvidencePosition
+  readonly level?: 'L2' | 'L3'
   readonly snapshotId: TicketSnapshotId
   readonly candidateRefs: readonly TicketCandidateRef[]
   readonly fields: readonly TicketEvidenceField[]
@@ -50,6 +61,11 @@ export interface DetailReadRequest {
 }
 
 export const MAX_EVIDENCE_CANDIDATES_PER_READ = 20 as const
+
+/** Shared admission for advertised, user-read and model-read textual evidence. */
+export function isReadableTicketField(field: Pick<TicketFieldDescriptor, 'accessLevel' | 'valueKind'>): boolean {
+  return ['L1', 'L2', 'L3'].includes(field.accessLevel) && field.valueKind !== 'raw_json'
+}
 
 /** Every data-bearing method receives the trusted principal again. */
 export interface TicketRetrievalProvider {

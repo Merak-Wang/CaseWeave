@@ -8,6 +8,19 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const contract = JSON.parse(await readFile(join(root, 'architecture', 'workspace.json'), 'utf8'))
+const runtimePackages = new Set()
+async function collectRuntimePackage(name) {
+  if (runtimePackages.has(name)) return
+  const entry = contract.packages.find(p => p.name === name)
+  if (!entry) throw new Error(`unknown runtime package: ${name}`)
+  runtimePackages.add(name)
+  const manifest = JSON.parse(await readFile(join(root, 'packages', entry.directory, 'package.json'), 'utf8'))
+  for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+    if (dependency.startsWith('@retrieval-agent/')) await collectRuntimePackage(dependency)
+  }
+}
+await collectRuntimePackage('@retrieval-agent/bundle')
+const releaseEntries = contract.packages.filter(p => runtimePackages.has(p.name))
 const fallbackPnpmCli = process.platform === 'win32' && process.env.APPDATA !== undefined
   ? join(process.env.APPDATA, 'npm', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
   : undefined
@@ -128,7 +141,7 @@ async function verifyWebStartup(dshBin, home, cwd) {
         void fetch(`http://127.0.0.1:${port}/api/retrieval-agent/export`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
-          body: JSON.stringify({ sessionId: 'missing-session', retrievalId: 'missing-retrieval', candidateRefs: [] }),
+          body: JSON.stringify({ sessionId: 'missing-session', retrievalId: 'missing-retrieval', resultRevision: 'missing-result' }),
         }).then(async response => {
           const body = await response.text()
           if (response.status !== 409 || !body.includes('SESSION_NOT_ACTIVE')) {
@@ -174,7 +187,7 @@ try {
   await mkdir(profile, { recursive: true })
 
   const tarballs = new Map()
-  for (const entry of contract.packages) {
+  for (const entry of releaseEntries) {
     const reportText = pnpm(['--filter', entry.name, 'pack', '--json', '--pack-destination', packs], root)
     const report = JSON.parse(reportText.slice(reportText.indexOf('{')))
     tarballs.set(entry.name, resolve(report.filename))
@@ -215,8 +228,12 @@ try {
     env: { ...process.env, DSH_HOME: home },
   })
   if (!config.includes('@retrieval-agent/ui-ticket-results')) throw new Error('composed DSH config is missing the candidate UI row')
-  if (!config.includes('@retrieval-agent/ui-product-shell')) throw new Error('composed DSH config is missing the product shell UI row')
   if (!config.includes('@retrieval-agent/product-host')) throw new Error('composed DSH config is missing the Product Host row')
+  if (!config.includes('@retrieval-agent/bundle/session-compat')) throw new Error('composed DSH config is missing the Session compatibility row')
+  if (!config.includes("name: '@retrieval-agent/bundle/opencode-pi-ai'")) throw new Error('composed DSH config is missing the OpenCode session adapter')
+  if (!/- id: llm-pi-ai\s+name: ['"]?@deepseek-ai\/dsh-llm-pi-ai['"]?\s+disabled: true/u.test(config)) {
+    throw new Error('the upstream pi-ai row must be disabled when the OpenCode compatibility facade owns its routes')
+  }
   if (!/id:\s*permission[\s\S]*?defaultPreset:\s*['"]?read-only['"]?/u.test(config)) {
     throw new Error('composed DSH config is missing the read-only default permission preset')
   }
@@ -459,7 +476,7 @@ try {
   const restoredState = serviceCtx.retrievalAgent.current(restoredAgent)
   assert.deepStrictEqual(restoredState, { ...JSON.parse(JSON.stringify(serviceState)), accessValidation: 'required' },
     'restored service must preserve evidence while requiring a new authorization grant')
-  assert.throws(() => serviceCtx.retrievalAgent.projectContext(restoredAgent), { code: 'UNAUTHORIZED' },
+  await assert.rejects(() => serviceCtx.retrievalAgent.projectContext(restoredAgent), { code: 'UNAUTHORIZED' },
     'restored evidence must not be presented before current Provider authorization')
   const authorizedState = await serviceCtx.retrievalAgent.authorizePresentation(restoredAgent, serviceState.retrievalId)
   assert.equal(authorizedState.accessValidation, 'current', 'installed Provider did not reauthorize the restored evidence')
@@ -531,7 +548,7 @@ if (JSON.stringify(replayedState) !== JSON.stringify(state)) {
 
   await verifyWebStartup(dshBin, home, root)
 
-  const packageNames = contract.packages.map(entry => entry.name)
+  const packageNames = releaseEntries.map(entry => entry.name)
   run(process.execPath, [uninstaller, '--home', home], { cwd: profile })
   if (existsSync(join(home, '.agent-presets', 'retrieval-agent'))) throw new Error('preset assets remained after uninstall')
   if (existsSync(join(home, 'retrieval-agent'))) throw new Error('fixture assets remained after uninstall')

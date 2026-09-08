@@ -113,6 +113,28 @@ def profile() -> dict[str, Any]:
     }
 
 
+def test_cancelled_cold_rank_stops_after_current_batch_and_never_falls_back(tmp_path) -> None:
+    cancel = Event()
+
+    class CancellingModels(FakeModels):
+        calls = 0
+
+        def embed(self, texts, input_type, instruction, dimensions):
+            self.calls += 1
+            result = super().embed(texts, input_type, instruction, dimensions)
+            cancel.set()
+            return result
+
+    models = CancellingModels()
+    backend = RetrievalRankingBackend(models, tmp_path)
+    with pytest.raises(ServiceError) as failure:
+        backend.rank(documents(), {"text": "副卡", "mode": "hybrid"}, {"maxScan": 10},
+                     {**profile(), "embeddingBatchSize": 1, "allowKeywordFallback": True}, cancel=cancel)
+    assert failure.value.code == "CANCELLED"
+    assert models.calls == 1
+    assert not list(tmp_path.glob("*.f32"))
+
+
 def documents() -> list[dict[str, str]]:
     return [
         {"id": "lexical", "contentHash": "h1", "title": "副卡跨域失败", "summary": "关键词命中", "body": "", "metadata": ""},

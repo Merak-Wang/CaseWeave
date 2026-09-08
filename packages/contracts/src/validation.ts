@@ -1,4 +1,5 @@
 import { RetrievalError } from './errors.js'
+import { validateQueryExpression } from './query-plan.js'
 import type { TicketFilter, TicketRetrievalRequest, TrustedPrincipalContext } from './types.js'
 
 const RESERVED_FILTER_FIELDS = new Set([
@@ -81,6 +82,16 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
   for (const filter of request.filters ?? []) assertTicketFilter(filter)
   const contract = request.queryContract
   if (contract !== undefined) {
+    const plan = contract.queryPlan
+    if (plan !== undefined) {
+      if (plan.schemaVersion !== 1 || plan.original !== request.query || plan.vector.text !== request.query
+        || plan.normalizationVersion !== 'nfkc-lower-v1' || !Number.isFinite(Date.parse(plan.anchor.at))
+        || !Array.isArray(plan.requirements) || plan.requirements.length > 128
+        || plan.requirements.some(r => !Number.isInteger(r.span.start) || !Number.isInteger(r.span.end) || r.span.start < 0 || r.span.end <= r.span.start
+          || plan.original.slice(r.span.start, r.span.end) !== r.span.text)) throw new RetrievalError('INVALID_REQUEST', 'QueryPlan 的身份或要求出处无效。')
+      try { validateQueryExpression(plan.keyword, plan.fields); validateQueryExpression(plan.hard, plan.fields) }
+      catch (error) { throw new RetrievalError('INVALID_REQUEST', 'QueryPlan 含未声明字段或非法布尔条件。', { cause: error }) }
+    }
     const resultPolicyValid = ['explicit_top_k', 'adaptive_top_k', 'exhaustive_current_snapshot'].includes(contract.resultPolicy)
     const legacyBoundedResultPolicy = contract.resultPolicy === 'explicit_top_k' || contract.resultPolicy === 'adaptive_top_k'
     const effectiveCountPolicy = request.countPolicy ?? (request.requestedCount === undefined ? 'adaptive' : 'explicit')
@@ -99,7 +110,7 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
         ? effectiveCountPolicy !== 'explicit' && request.requestedCount === undefined
         : effectiveCountPolicy === 'explicit' && contract.resultLimit === request.requestedCount
           && Number.isSafeInteger(contract.resultLimit) && contract.resultLimit >= 1)
-    if (![1, 2, 3, 4, 5, 6, 7, 8].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
+    if (![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
       || contract.normalized !== (request.retrievalQuery ?? request.query).normalize('NFKC').trim().replace(/\s+/gu, ' ')
       || !resultPolicyValid || contract.resultPolicy !== expectedResultPolicy
       || !['telecom_ticket', 'general_ticket'].includes(contract.domain)
@@ -119,7 +130,7 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
       if (typeof requirement.text !== 'string' || requirement.text.trim().length === 0
         || !contract.original.includes(requirement.text) || !['compiled', 'unresolved'].includes(requirement.status)
         || !Array.isArray(requirement.filters)
-        || (requirement.status === 'compiled' && requirement.filters.length === 0)
+        || (requirement.status === 'compiled' && requirement.filters.length === 0 && !contract.queryPlan?.requirements.some(r => r.span.text === requirement.text && r.status === 'compiled'))
         || (requirement.status === 'unresolved' && (requirement.filters.length !== 0 || !requirement.reason?.trim()))) {
         throw new RetrievalError('INVALID_REQUEST', '用户条件缺少原文依据、可执行条件或未解决原因。')
       }
@@ -169,7 +180,8 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
         throw new RetrievalError('INVALID_REQUEST', '首轮快查询计划无效或已发生改写。')
       }
     }
-    if (contract.schemaVersion >= 4 && contract.nlp === undefined) {
+    if (contract.schemaVersion === 9 && contract.queryPlan === undefined) throw new RetrievalError('INVALID_REQUEST', 'Query Contract v9 必须包含 QueryPlan。')
+    if (contract.schemaVersion >= 4 && contract.schemaVersion < 9 && contract.nlp === undefined) {
       throw new RetrievalError('INVALID_REQUEST', 'Query Contract v4+ 必须包含 NLP 分析轨迹。')
     }
     if (contract.nlp !== undefined) {
@@ -188,7 +200,7 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
           || triple.object.trim().length === 0 || triple.object.length > 200)
       )
       const spacyInvalid = nlp.schemaVersion === 2 && (
-        ![5, 6, 7, 8].includes(contract.schemaVersion) || nlp.engine !== 'spacy'
+        ![5, 6, 7, 8, 9].includes(contract.schemaVersion) || nlp.engine !== 'spacy'
         || [nlp.engineVersion, nlp.pipeline, nlp.pipelineVersion, nlp.lexiconVersion].some(value => value.trim().length === 0 || value.length > 200)
         || nlp.tokens.some((token, index) => token.surface.trim().length === 0 || token.surface.length > 200
           || !Number.isSafeInteger(token.start) || !Number.isSafeInteger(token.end) || token.start < 0 || token.end <= token.start

@@ -20,9 +20,10 @@ import type {
   RetrievalTermination,
 } from './retrieval-state.js'
 import type { TicketSearchStage } from './ranking.js'
+import type { RetrievalErrorCode } from './errors.js'
 
-export const RETRIEVAL_EVENT_SCHEMA_VERSION = 12 as const
-export const SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS = Object.freeze([5, 6, 7, 8, 9, 10, 11, 12] as const)
+export const RETRIEVAL_EVENT_SCHEMA_VERSION = 13 as const
+export const SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS = Object.freeze([5, 6, 7, 8, 9, 10, 11, 12, 13] as const)
 
 /**
  * Durable UI placement is deliberately separate from retrieval-domain state.
@@ -60,6 +61,8 @@ export interface RetrievalEventDataMap {
   'retrieval/user-feedback-received': { readonly text: string }
   'retrieval/context-projected': { readonly selection: EvidenceContextSelection }
   'retrieval/model-request-measured': {
+    readonly outputReservedTokens?: number
+    readonly protocolMarginTokens?: number
     readonly estimatedInputTokens: number
     readonly serializationBytes: number
     readonly wallClockElapsedMs: number
@@ -71,10 +74,10 @@ export interface RetrievalEventDataMap {
     readonly rejectionReason?: 'model_context' | 'deployment_context' | 'model_steps' | 'wall_clock'
     readonly accepted: boolean
   }
-  'retrieval/model-response-measured': { readonly modelLatencyMs: number; readonly outputTokens: number }
+  'retrieval/model-response-measured': { readonly modelLatencyMs: number; readonly outputTokens: number; readonly inputTokens?: number }
   'retrieval/tool-call-measured': { readonly success: boolean; readonly serializationBytes: number }
   'retrieval/evidence-frozen': { readonly pack: FrozenEvidencePack }
-  'retrieval/stopped': { readonly reason: RetrievalTermination; readonly remainingGapKinds: readonly string[] }
+  'retrieval/stopped': { readonly reason: RetrievalTermination; readonly remainingGapKinds: readonly string[]; readonly errorCode?: RetrievalErrorCode }
   'retrieval/detail-read': { readonly receipt: CandidateDetailReadReceipt }
   /** Legacy v9 single-ticket L3 event retained for replay. */
   'retrieval/l3-detail-read': { readonly detail: LegacyRawDetail }

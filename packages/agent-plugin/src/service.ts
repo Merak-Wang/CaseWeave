@@ -20,6 +20,7 @@ import {
   type RetrievalControllerConfig,
   type RetrievalClarificationAnswer,
   type RetrievalSearchInput,
+  type ExpertUpdate,
 } from '@retrieval-agent/domain'
 import { installDshSessionCompatibility, readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
 import { SessionRetrievalEventJournal } from './session-journal.js'
@@ -31,10 +32,11 @@ interface ActiveRetrieval {
   mutationTail: Promise<void>
 }
 
-function stoppedReason(error: unknown): 'budget_exhausted' | 'permission_blocked' | 'backend_error' | 'snapshot_invalid' | 'cancelled' | undefined {
+function stoppedReason(error: unknown): 'budget_exhausted' | 'capacity_exceeded' | 'permission_blocked' | 'backend_error' | 'snapshot_invalid' | 'cancelled' | undefined {
   if (!(error instanceof RetrievalError)) return undefined
   switch (error.code) {
     case 'BUDGET_EXHAUSTED': return 'budget_exhausted'
+    case 'CAPACITY_EXCEEDED': return 'capacity_exceeded'
     case 'UNAUTHORIZED': return 'permission_blocked'
     case 'SNAPSHOT_INVALID':
     case 'SNAPSHOT_NOT_FOUND': return 'snapshot_invalid'
@@ -68,6 +70,7 @@ function latestRetrieval(agent: Agent): { readonly events: ReturnType<typeof rea
 
 /** Per-session product application; model calls only intents on this service. */
 export class RetrievalAgentService extends Service {
+  coordinator?: { prepare(agent: Agent, signal?: AbortSignal): Promise<void>; validateKnowledge?(agent: Agent): Promise<void>; runPending(agent: Agent, signal?: AbortSignal): Promise<void>; settlePending?(agent: Agent, signal?: AbortSignal): Promise<void>; cancelPending?(agent: Agent): void; isExpert(agent: Agent): boolean; knowledgeView?(state: RetrievalState, entryId?: string): Promise<import('./knowledge-view.js').KnowledgeView> }
   static inject = ['ticketRetrievalProvider', 'ticketPrincipalProvider']
   private readonly active = new WeakMap<Agent, ActiveRetrieval>()
   private readonly controllerConfig: RetrievalControllerConfig
@@ -90,27 +93,46 @@ export class RetrievalAgentService extends Service {
     return this.entry(agent).state
   }
 
+  /** Persistent implementations hydrate the task before synchronous presentation/tool consumers read it. */
+  async loadTask(_agent: Agent): Promise<void> {}
+  async updateExpert(agent: Agent, generation: number, update: ExpertUpdate): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => entry.controller.expertUpdate(state, generation, update))
+  }
+  async prepareExperts(agent: Agent, signal?: AbortSignal): Promise<void> {
+    await this.coordinator?.prepare(agent, signal)
+    await this.coordinator?.runPending(agent, signal)
+  }
+  async stateForTask(agent: Agent, retrievalId: RetrievalId): Promise<RetrievalState | undefined> {
+    const state = this.currentOrUndefined(agent)
+    return state?.retrievalId === retrievalId ? state : undefined
+  }
+
   async start(agent: Agent, request: TicketRetrievalRequest, signal?: AbortSignal): Promise<RetrievalState> {
     const previous = this.currentOrUndefined(agent)
     if (previous !== undefined && previous.phase !== 'stopped') {
       throw new RetrievalError('INVALID_TRANSITION', '当前会话已有未结束的检索。')
     }
     const journal = new SessionRetrievalEventJournal(agent.session)
+    let entry: ActiveRetrieval | undefined
+    let releaseStart = (): void => undefined
+    const startBarrier = new Promise<void>(resolve => { releaseStart = resolve })
     const controller = new RetrievalController(
       this.ctx.ticketRetrievalProvider,
       journal,
       new EvidenceContextPolicy(),
-      this.controllerConfig,
+      { ...this.controllerConfig, onState: state => {
+        if (entry) entry.state = state
+        else { entry = { controller, journal, state, mutationTail: startBarrier }; this.active.set(agent, entry) }
+      } },
     )
     const principal = await this.resolvePrincipal(agent, 'snapshot_open', signal)
-    const entry = {
-      controller,
-      journal,
-      state: await controller.start(principal, request, signal),
-      mutationTail: Promise.resolve(),
-    }
-    this.active.set(agent, entry)
-    return await this.finalize(entry, signal)
+    try {
+      const state = await controller.start(principal, request, signal)
+      if (entry) entry.state = state
+      else { entry = { controller, journal, state, mutationTail: startBarrier }; this.active.set(agent, entry) }
+    } finally { releaseStart() }
+    return await this.mutate(entry!, async state => state, signal)
   }
 
   async search(agent: Agent, input: RetrievalSearchInput, signal?: AbortSignal): Promise<RetrievalState> {
@@ -123,7 +145,7 @@ export class RetrievalAgentService extends Service {
       } catch (error) {
         const reason = stoppedReason(error)
         if (reason === undefined) throw error
-        return this.stopForReason(entry, state, reason)
+        return this.stopForReason(entry, state, reason, error instanceof RetrievalError ? error : undefined)
       }
     })
   }
@@ -138,12 +160,13 @@ export class RetrievalAgentService extends Service {
       } catch (error) {
         const reason = stoppedReason(error)
         if (reason === undefined) throw error
-        return this.stopForReason(entry, state, reason)
+        return this.stopForReason(entry, state, reason, error instanceof RetrievalError ? error : undefined)
       }
     })
   }
 
   async decide(agent: Agent, decision: RetrievalDecision, signal?: AbortSignal): Promise<RetrievalState> {
+    await this.coordinator?.validateKnowledge?.(agent)
     const entry = this.entry(agent)
     return await this.mutate(entry, async state => {
       const operation = decision.action.kind === 'inspect' ? 'evidence_read' : 'search'
@@ -153,7 +176,7 @@ export class RetrievalAgentService extends Service {
       } catch (error) {
         const reason = stoppedReason(error)
         if (reason === undefined) throw error
-        return this.stopForReason(entry, state, reason)
+        return this.stopForReason(entry, state, reason, error instanceof RetrievalError ? error : undefined)
       }
     })
   }
@@ -167,7 +190,7 @@ export class RetrievalAgentService extends Service {
       } catch (error) {
         const reason = stoppedReason(error)
         if (reason === undefined) throw error
-        return this.stopForReason(entry, state, reason)
+        return this.stopForReason(entry, state, reason, error instanceof RetrievalError ? error : undefined)
       }
     })
   }
@@ -181,7 +204,7 @@ export class RetrievalAgentService extends Service {
       } catch (error) {
         const reason = stoppedReason(error)
         if (reason === undefined) throw error
-        return this.stopForReason(entry, state, reason)
+        return this.stopForReason(entry, state, reason, error instanceof RetrievalError ? error : undefined)
       }
     })
   }
@@ -199,6 +222,13 @@ export class RetrievalAgentService extends Service {
   async authorizePresentation(agent: Agent, retrievalId: RetrievalId, signal?: AbortSignal): Promise<RetrievalState> {
     const entry = this.entry(agent)
     if (entry.state.retrievalId !== retrievalId) throw new RetrievalError('INVALID_REQUEST', '当前会话没有对应的检索结果。')
+    // Reading progress must not wait behind the running SQL/vector operation or create a competing state revision.
+    if (entry.state.accessValidation === 'current' && entry.state.searchProgress?.channels.some(channel => channel.status === 'running')) {
+      const principal = await this.resolvePrincipal(agent, 'detail_read', signal)
+      if (principal.entitlementVersion !== entry.state.snapshot?.authorizationVersion) throw new RetrievalError('UNAUTHORIZED', '任务访问资格已改变。')
+      await this.ctx.ticketRetrievalProvider.status(principal, entry.state.snapshot!.snapshotId)
+      return entry.state
+    }
     return await this.mutate(entry, async state => {
       const principal = await this.resolvePrincipal(agent, 'detail_read', signal)
       return await entry.controller.reauthorize(principal, state, signal)
@@ -212,14 +242,26 @@ export class RetrievalAgentService extends Service {
     return await this.authorizePresentation(agent, entry.state.retrievalId, signal)
   }
 
-  projectContext(agent: Agent, tokenBudget?: number): EvidenceContextSelection {
+  async projectContext(agent: Agent, tokenBudget?: number): Promise<EvidenceContextSelection> {
     const entry = this.entry(agent)
     if (entry.state.accessValidation === 'required') throw new RetrievalError('UNAUTHORIZED', '历史证据必须先经当前身份重新授权。')
-    const configured = tokenBudget ?? this.contextTokenBudget
+    const configured = tokenBudget ?? this.contextTokenBudget ?? this.workingContextBudget(agent)
     const budget = typeof configured === 'number' ? configured : undefined
-    const selection = entry.controller.projectContext(entry.state, budget)
-    entry.state = entry.controller.recordContextSelection(entry.state, selection)
-    return entry.controller.projectContext(entry.state, budget)
+    let selection: EvidenceContextSelection | undefined
+    await this.mutate(entry, async state => {
+      const rendered = entry.controller.projectContext(state, budget, { journal: false })
+      const recorded = entry.controller.recordContextSelection(state, rendered)
+      // Re-render from the recorded state so the model receives the durable stateId it must submit back.
+      selection = entry.controller.projectContext(recorded, budget)
+      return recorded
+    })
+    return selection!
+  }
+  workingContextBudget(agent: Agent): number {
+    const maximum = 256 * 1024
+    const capacity = this.modelContextTokenLimit(agent)
+    return capacity === undefined ? maximum
+      : Math.min(maximum, Math.max(1, capacity - Math.min(6000, Math.floor(capacity * 0.4))))
   }
 
   /** Resolve the selected route's capacity with an optional narrower deployment override. */
@@ -227,28 +269,31 @@ export class RetrievalAgentService extends Service {
     return this.effectiveContextLimit(agent.session.requestContext()?.contextWindow)
   }
 
+  /**
+   * Measured model steps and wall-clock time never gate admission; only a real
+   * context-window overflow rejects, since that request cannot be served at all.
+   */
   async admitModelRequest(agent: Agent, input: {
+    readonly outputReservedTokens?: number
+    readonly protocolMarginTokens?: number
     readonly estimatedInputTokens: number
     readonly serializationBytes: number
     readonly wallClockElapsedMs: number
     readonly modelContextWindow?: number
-  }): Promise<{ readonly accepted: boolean; readonly remainingWallClockMs: number }> {
+  }): Promise<{ readonly accepted: boolean }> {
     const entry = this.entry(agent)
     let accepted = false
-    const state = await this.mutate(entry, async current => {
+    await this.mutate(entry, async current => {
       if (current.phase === 'stopped') return current
       const effectiveContextLimit = this.effectiveContextLimit(input.modelContextWindow)
       const contextExceeded = effectiveContextLimit !== undefined
-        && input.estimatedInputTokens > effectiveContextLimit
-      const modelStepsExceeded = current.budget.modelStepsUsed >= current.budget.maxRounds
-      const wallClockExceeded = input.wallClockElapsedMs >= current.budget.maxLatencyMs
+        && input.estimatedInputTokens + (input.outputReservedTokens ?? 0) + (input.protocolMarginTokens ?? 0) > effectiveContextLimit
       const rejectionReason = contextExceeded
         ? this.maxContextTokens !== undefined
           && (input.modelContextWindow === undefined || this.maxContextTokens < input.modelContextWindow)
           ? 'deployment_context' as const
           : 'model_context' as const
-        : modelStepsExceeded ? 'model_steps' as const
-          : wallClockExceeded ? 'wall_clock' as const : undefined
+        : undefined
       accepted = rejectionReason === undefined
       const measured = entry.controller.recordModelRequest(current, {
         ...input,
@@ -257,15 +302,13 @@ export class RetrievalAgentService extends Service {
         ...(rejectionReason === undefined ? {} : { rejectionReason }),
         accepted,
       })
-      return accepted ? measured : entry.controller.freezeForBudget(measured)
+      return accepted ? measured : entry.controller.freezeForInterruption(measured, 'budget_exhausted')
     })
-    return {
-      accepted,
-      remainingWallClockMs: Math.max(0, state.budget.maxLatencyMs - (state.budget.wallClockElapsedMs ?? 0)),
-    }
+    return { accepted }
   }
 
   async recordModelResponse(agent: Agent, input: {
+    readonly inputTokens?: number
     readonly modelLatencyMs: number
     readonly outputTokens: number
     readonly wallClockElapsedMs: number
@@ -279,24 +322,20 @@ export class RetrievalAgentService extends Service {
     return await this.mutate(entry, async state => entry.controller.recordToolCall(state, input))
   }
 
-  async stopForWallClockBudget(agent: Agent): Promise<RetrievalState> {
-    const entry = this.entry(agent)
-    return await this.mutate(entry, async state => state.phase === 'stopped'
-      ? state
-      : entry.controller.freezeForBudget(state))
-  }
-
-  async principal(agent: Agent, operation: 'detail_read' | 'export', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
+  async principal(agent: Agent, operation: 'detail_read' | 'export' | 'snapshot_open', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
     return await this.resolvePrincipal(agent, operation, signal)
   }
 
-  recordDetailRead(agent: Agent, receipt: CandidateDetailReadReceipt, result: TicketDetailResult): void {
+  async recordDetailRead(agent: Agent, receipt: CandidateDetailReadReceipt, result: TicketDetailResult): Promise<RetrievalState> {
     const entry = this.entry(agent)
     if (entry.state.retrievalId !== receipt.retrievalId) throw new RetrievalError('INVALID_TRANSITION', '详情回执不属于当前检索。')
-    entry.state = entry.controller.recordDetailRead(entry.state, receipt, result)
-    entry.journal.append(entry.state.retrievalId, 'retrieval/detail-read', { receipt })
+    return await this.mutate(entry, async state => {
+      const next = entry.controller.recordDetailRead(state, receipt, result)
+      entry.journal.append(next.retrievalId, 'retrieval/detail-read', { receipt })
+      return next
+    })
   }
-  recordExport(agent: Agent, receipt: CandidateExportReceipt): void {
+  async recordExport(agent: Agent, receipt: CandidateExportReceipt): Promise<void> {
     const entry = this.entry(agent)
     if (entry.state.retrievalId !== receipt.retrievalId) throw new RetrievalError('INVALID_TRANSITION', '导出回执不属于当前检索。')
     entry.journal.append(entry.state.retrievalId, 'retrieval/exported', { receipt })
@@ -308,7 +347,9 @@ export class RetrievalAgentService extends Service {
     const replayed = latestRetrieval(agent)
     if (replayed === undefined) throw new RetrievalError('INVALID_TRANSITION', '当前会话尚未开始检索。')
     const journal = new SessionRetrievalEventJournal(agent.session)
-    const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, new EvidenceContextPolicy(), this.controllerConfig)
+    const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, new EvidenceContextPolicy(), {
+      ...this.controllerConfig, onState: state => { const current = this.active.get(agent); if (current?.state.retrievalId === state.retrievalId) current.state = state },
+    })
     const entry = { controller, journal, state: replayed.state, mutationTail: Promise.resolve() }
     this.active.set(agent, entry)
     return entry
@@ -324,10 +365,11 @@ export class RetrievalAgentService extends Service {
     entry: ActiveRetrieval,
     state: RetrievalState,
     reason: NonNullable<ReturnType<typeof stoppedReason>>,
+    failure?: RetrievalError,
   ): RetrievalState {
-    return reason === 'budget_exhausted'
-      ? entry.controller.freezeForBudget(state)
-      : entry.controller.stop(state, reason)
+    return reason === 'budget_exhausted' || reason === 'capacity_exceeded'
+      ? entry.controller.freezeForInterruption(state, reason)
+      : entry.controller.stop(state, reason, failure)
   }
 
   private async finalize(entry: ActiveRetrieval, signal?: AbortSignal): Promise<RetrievalState> {
@@ -339,6 +381,7 @@ export class RetrievalAgentService extends Service {
   private async mutate(
     entry: ActiveRetrieval,
     operation: (state: RetrievalState) => Promise<RetrievalState>,
+    signal?: AbortSignal,
   ): Promise<RetrievalState> {
     const previous = entry.mutationTail
     let release = (): void => undefined
@@ -346,7 +389,7 @@ export class RetrievalAgentService extends Service {
     await previous
     try {
       entry.state = await operation(entry.state)
-      return await this.finalize(entry)
+      return await this.finalize(entry, signal)
     } finally {
       release()
     }

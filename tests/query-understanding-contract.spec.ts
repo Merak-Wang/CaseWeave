@@ -9,7 +9,7 @@ function response(body: unknown): Response {
   })
 }
 
-function analysis(requestId: string, query: string, keyword: string, requestedCount?: number): unknown {
+function analysis(requestId: string, query: string, keyword: string, requestedCount?: number): Record<string, unknown> {
   const start = query.indexOf(keyword)
   return {
     protocolVersion: 'retrieval-agent.models.v1',
@@ -129,8 +129,8 @@ describe('query-analysis HTTP contract', () => {
       { field: 'region', op: 'eq', value: '上海' },
       { field: 'status', op: 'eq', value: '已解决' },
       { field: 'displayId', op: 'eq', value: 'TKT-0029' },
-      { field: 'createdAt', op: 'gte', value: '2026-07-31T16:00:00.000Z' },
-      { field: 'createdAt', op: 'lte', value: '2026-08-31T15:59:59.999Z' },
+      { field: 'resolvedAt', op: 'gte', value: '2026-07-31T16:00:00.000Z' },
+      { field: 'resolvedAt', op: 'lte', value: '2026-08-31T15:59:59.999Z' },
     ]))
     expect(request.queryContract?.userRequirements).toEqual(expect.arrayContaining([
       expect.objectContaining({ text: '上海', status: 'compiled', filters: [{ field: 'region', op: 'eq', value: '上海' }] }),
@@ -138,7 +138,69 @@ describe('query-analysis HTTP contract', () => {
     ]))
     expect(request.retrievalIntent).toBe('known_item')
     expect(request.fastQuery?.vector.text).toBe(rawQuery)
+    expect(request.fastQuery?.keyword).toBeUndefined()
     expect(() => assertTicketRetrievalRequest(request)).not.toThrow()
+  })
+
+  it('merges inherited confirmed conditions into a snapshot-expiry restart request', async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      return response(analysis(request.requestId, request.query, '副卡'))
+    })
+    const request = await buildFastTicketRequest(
+      '帮我找上海副卡工单\n\n日期范围是 2026-07-01 到 2026-07-31，其他条件不变',
+      {
+        analyzer: new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch }),
+        timeZone: 'Asia/Shanghai',
+        inheritedFilters: [{ field: 'region', op: 'eq', value: '上海' }],
+      },
+    )
+
+    expect(request.filters?.filter(filter => filter.field === 'region'))
+      .toEqual([{ field: 'region', op: 'eq', value: '上海' }])
+    expect(request.filters).toEqual(expect.arrayContaining([
+      { field: 'createdAt', op: 'gte', value: '2026-06-30T16:00:00.000Z' },
+      { field: 'createdAt', op: 'lte', value: '2026-07-31T15:59:59.999Z' },
+    ]))
+    expect(request.queryContract?.constraints).toEqual(request.filters)
+    expect(() => assertTicketRetrievalRequest(request)).not.toThrow()
+  })
+
+  it('compiles a known-item lookup when the user says 工单 followed by a full ticket id', async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      return response(analysis(request.requestId, request.query, '工单'))
+    })
+    const analyzer = new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch })
+    const rawQuery = '查找工单 ESFT-SUMMARY-TRAIN-024545。'
+    const request = await buildFastTicketRequest(rawQuery, { analyzer })
+
+    expect(request.filters).toContainEqual({ field: 'displayId', op: 'eq', value: 'ESFT-SUMMARY-TRAIN-024545' })
+    expect(request.retrievalIntent).toBe('known_item')
+    expect(request.fastQuery?.keyword).toBeUndefined()
+    expect(request.fastQuery?.vector.text).toBe(rawQuery)
+    expect(request.queryContract?.nlp?.keywordTerms).toEqual([])
+    expect(() => assertTicketRetrievalRequest(request)).not.toThrow()
+
+    const spaced = await buildFastTicketRequest('查工单esft-summary-train-024545', { analyzer })
+    expect(spaced.filters).toContainEqual({ field: 'displayId', op: 'eq', value: 'esft-summary-train-024545' })
+    expect(spaced.fastQuery?.keyword).toBeUndefined()
+  })
+
+  it('does not treat ordinary counts or nouns after 工单 as ticket ids', async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      return response(analysis(request.requestId, request.query, '副卡'))
+    })
+    const analyzer = new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch })
+    const request = await buildFastTicketRequest('找 3 条副卡无法使用的历史工单，告诉我各自是什么原因', { analyzer })
+
+    expect(request.filters).not.toContainEqual(expect.objectContaining({ field: 'displayId' }))
+    expect(request.retrievalIntent).toBeUndefined()
+    expect(request.fastQuery?.keyword?.terms).toEqual(['副卡'])
+    expect(request.queryContract?.userRequirements).not.toContainEqual(expect.objectContaining({
+      text: expect.stringContaining('工单 '),
+    }))
   })
 
   it('accepts a user result target greater than transport page widths', async () => {
@@ -187,6 +249,63 @@ describe('query-analysis HTTP contract', () => {
     expect(excludedDates.queryContract?.userRequirements).toContainEqual(expect.objectContaining({
       text: '2026-08-01', status: 'unresolved', filters: [],
     }))
+  })
+
+  it('compiles a spaced month with a resolution-time reading instead of leaving it pending', async () => {
+    const rawQuery = '找广东地区 2026 年 7 月已解决的副卡故障工单。'
+    const surface = '2026 年 7 月'
+    const start = rawQuery.indexOf(surface)
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      return response({
+        ...analysis(request.requestId, request.query, '副卡'),
+        entities: [{ text: surface, label: 'DATE', start, end: start + surface.length }],
+      })
+    })
+    const request = await buildFastTicketRequest(rawQuery, {
+      analyzer: new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch }),
+      timeZone: 'Asia/Shanghai',
+    })
+
+    expect(request.filters).toEqual(expect.arrayContaining([
+      { field: 'region', op: 'eq', value: '广东' },
+      { field: 'status', op: 'eq', value: '已解决' },
+      { field: 'resolvedAt', op: 'gte', value: '2026-06-30T16:00:00.000Z' },
+      { field: 'resolvedAt', op: 'lte', value: '2026-07-31T15:59:59.999Z' },
+    ]))
+    expect(request.filters).not.toContainEqual(expect.objectContaining({ field: 'createdAt' }))
+    expect(request.ambiguities).toEqual([])
+    expect(request.queryContract?.userRequirements).toContainEqual({
+      text: surface, status: 'compiled',
+      filters: [
+        { field: 'resolvedAt', op: 'gte', value: '2026-06-30T16:00:00.000Z' },
+        { field: 'resolvedAt', op: 'lte', value: '2026-07-31T15:59:59.999Z' },
+      ],
+    })
+    expect(request.queryContract?.ambiguities).toEqual([])
+    expect(() => assertTicketRetrievalRequest(request)).not.toThrow()
+  })
+
+  it('keeps a month bound to the creation time unless the user ties it to resolution', async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      return response(analysis(request.requestId, request.query, '副卡'))
+    })
+    const analyzer = new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch })
+
+    const created = await buildFastTicketRequest('查找 2026 年 7 月创建的副卡工单', { analyzer, timeZone: 'Asia/Shanghai' })
+    expect(created.filters).toEqual(expect.arrayContaining([
+      { field: 'createdAt', op: 'gte', value: '2026-06-30T16:00:00.000Z' },
+      { field: 'createdAt', op: 'lte', value: '2026-07-31T15:59:59.999Z' },
+    ]))
+
+    const resolved = await buildFastTicketRequest('已解决的 2026 年 7 月副卡工单', { analyzer, timeZone: 'Asia/Shanghai' })
+    expect(resolved.filters).toEqual(expect.arrayContaining([
+      { field: 'resolvedAt', op: 'gte', value: '2026-06-30T16:00:00.000Z' },
+      { field: 'resolvedAt', op: 'lte', value: '2026-07-31T15:59:59.999Z' },
+      { field: 'status', op: 'eq', value: '已解决' },
+    ]))
+    expect(resolved.filters).not.toContainEqual(expect.objectContaining({ field: 'createdAt' }))
   })
 
   it('preserves an ambiguous quantity and rejects an unrepresentable exact target', async () => {

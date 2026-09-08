@@ -6,6 +6,7 @@ import {
   RetrievalId,
   RetrievalStateId,
   makeRetrievalEvent,
+  type RetrievalDomainEvent,
   type RetrievalState,
 } from '@retrieval-agent/contracts'
 import { describe, expect, it } from 'vitest'
@@ -84,9 +85,7 @@ const stoppedState: RetrievalState = {
   gaps: [],
   allowedActions: [],
   budget: {
-    maxRounds: 8,
     maxSearches: 4,
-    maxLatencyMs: 120000,
     modelStepsUsed: 1,
     searchesUsed: 1,
     wallClockElapsedMs: 10,
@@ -116,7 +115,7 @@ const stopped = makeRetrievalEvent({
   data: { state: stoppedState },
 })
 
-function match(seq: number, event: typeof contracted | typeof stopped, role: 'start' | 'update'): ConversationMatch {
+function match(seq: number, event: RetrievalDomainEvent, role: 'start' | 'update'): ConversationMatch {
   return {
     event: { seq, time: 0, type: event.type, data: { event } } as ConversationMatch['event'],
     view: undefined,
@@ -228,5 +227,48 @@ describe('ticket candidate conversation placement', () => {
       location: { kind: 'session' },
       data: { result: { type: 'ticket_collection', stoppingReason: 'no_result' } },
     })
+  })
+
+  it('hides only the corrupted retrieval node when its persisted chain no longer folds', () => {
+    const start = match(6, contracted, 'start')
+    const terminal = match(42, stopped, 'update')
+    const resultAnchor = anchorMatch(60, 'result')
+    const forked = match(50, makeRetrievalEvent({
+      eventId: 'forked-edge',
+      retrievalId,
+      sequence: 2,
+      occurredAt: timestamp,
+      type: 'retrieval/state-patched',
+      data: {
+        patch: {
+          fromStateId: RetrievalStateId('state-sibling-successor'),
+          fromRevision: 0,
+          toStateId: RetrievalStateId('state-forked'),
+          toRevision: 1,
+          operations: [],
+        },
+      },
+    }), 'update')
+    const context = {
+      key: 'ticket-candidates:retrieval-anchor-test',
+      kind: 'ticket-candidates',
+      id: retrievalId,
+      start,
+      current: new Map(),
+    }
+    let state = ticketCandidateDefinition.start(
+      {} as Parameters<typeof ticketCandidateDefinition.start>[0],
+      start,
+      { previous: () => undefined },
+    )
+    state = ticketCandidateDefinition.update({ ...context, matches: [start], state }, terminal)
+    state = ticketCandidateDefinition.update({ ...context, matches: [start, terminal], state }, forked)
+
+    const node = ticketCandidateDefinition.buildViewNode?.({
+      ...context,
+      matches: [start, terminal, forked, resultAnchor],
+      state,
+    })
+    expect(node).toBeNull()
   })
 })

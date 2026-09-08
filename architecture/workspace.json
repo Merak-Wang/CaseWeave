@@ -2,187 +2,90 @@
   "$schema": "./workspace.schema.json",
   "schemaVersion": 1,
   "packageScope": "@retrieval-agent/",
-  "forbiddenGenericPackageNames": [
-    "core",
-    "common",
-    "shared",
-    "utils"
-  ],
-  "testConvention": {
-    "packagePattern": "packages/<package>/src/<name>.spec.ts",
-    "repositoryIntegrationRoot": "tests"
-  },
-  "protocolConvention": {
-    "fileName": "protocol.ts",
-    "allowedExportedTypeSuffixes": [
-      "Params",
-      "Response",
-      "Notification"
-    ]
-  },
   "packages": [
     {
       "directory": "contracts",
       "name": "@retrieval-agent/contracts",
       "kind": "definition",
-      "capability": "跨进程与跨层共享的领域类型、事件和 Provider 端口；不含实现策略。",
-      "allowedInternalDependencies": []
+      "capability": "跨进程与跨层共享的领域类型、事件和 Provider 端口；不含实现策略。"
     },
     {
       "directory": "query-understanding",
       "name": "@retrieval-agent/query-understanding",
       "kind": "query-understanding",
-      "capability": "校验 FastAPI/spaCy 分析，按用户原文编译明确条件、数量及歧义，装配首轮 Hybrid 请求；不拥有检索算法。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts"
-      ]
-    },
-    {
-      "directory": "ticket-collection",
-      "name": "@retrieval-agent/ticket-collection",
-      "kind": "terminal-projection",
-      "capability": "从已停止领域状态确定性投影唯一 TicketResultCollection；不选择候选或生成自然语言。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts"
-      ]
-    },
-    {
-      "directory": "retrieval-replay",
-      "name": "@retrieval-agent/retrieval-replay",
-      "kind": "event-replay",
-      "capability": "相邻检索状态的有界 JSON Patch 编解码与跨应用/UI 的确定性 Session 重放；不执行检索策略。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts"
-      ]
+      "capability": "校验 FastAPI/spaCy 分析，按用户原文编译明确条件、数量及歧义，装配首轮 Hybrid 请求；不拥有检索算法。"
     },
     {
       "directory": "domain",
       "name": "@retrieval-agent/domain",
       "kind": "domain",
-      "capability": "同进程确定性检索控制器、候选资格与判断准入、查询收敛、证据状态及停止策略；使用共享重放与Provider授权。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts",
-        "@retrieval-agent/retrieval-replay"
-      ]
+      "capability": "领域状态、条件与证据约束，以及共享的结果投影和重放；result/replay 子路径不依赖 Node 或 DSH。"
     },
     {
       "directory": "model-service-client",
       "name": "@retrieval-agent/model-service-client",
       "kind": "model-client",
-      "capability": "本地模型数据面的版本化 HTTP 协议、握手、超时、取消、背压错误与响应校验。",
-      "allowedInternalDependencies": []
+      "capability": "本地模型数据面的版本化 HTTP 协议、握手、超时、取消、背压错误与响应校验。"
     },
     {
       "directory": "retrieval-ranking",
       "name": "@retrieval-agent/retrieval-ranking",
       "kind": "retrieval-client",
-      "capability": "Python Retrieval FastAPI 排名与无时限索引准备长任务的版本化 HTTP Consumer、profile 身份、进度观察、主动取消、错误映射与授权候选越界校验。",
-      "allowedInternalDependencies": []
+      "capability": "Python Retrieval FastAPI 排名与无时限索引准备长任务的版本化 HTTP Consumer、profile 身份、进度观察、主动取消、错误映射与授权候选越界校验。"
     },
     {
       "directory": "provider-local",
       "name": "@retrieval-agent/provider-local",
       "kind": "provider",
-      "capability": "开发期只读 Provider、授权快照、来源适配、字段级证据读取与 RAG 排名装配；raw 仅作为受限本地来源存储。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts",
-        "@retrieval-agent/retrieval-ranking"
-      ]
+      "capability": "开发期只读 Provider、授权快照、来源适配、字段级证据读取与 RAG 排名装配；raw 仅作为受限本地来源存储。"
     },
     {
       "directory": "provider-streamcluster",
       "name": "@retrieval-agent/provider-streamcluster",
       "kind": "provider",
-      "capability": "版本化 StreamCluster 只读 HTTP 契约、远端授权传递、超时取消与结构化错误映射。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts"
-      ]
+      "capability": "版本化 StreamCluster 只读 HTTP 契约、远端授权传递、超时取消与结构化错误映射。"
     },
     {
       "directory": "product-api",
       "name": "@retrieval-agent/product-api",
       "kind": "host-api",
-      "capability": "可信 Host 的当前授权呈现、详情读取、带判定及证据身份的候选导出和审计；共享唯一状态到节点投影。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts",
-        "@retrieval-agent/ticket-collection"
-      ]
+      "capability": "可信 Host 的当前授权呈现、详情读取、版本化确认结果分页导出和审计；共享状态投影与浏览器下载客户端。"
     },
     {
       "directory": "ui-ticket-results",
       "name": "@retrieval-agent/ui-ticket-results",
       "kind": "ui",
-      "capability": "重放任务位置，经 Product API 当前再授权后显示确认/待判定候选，按需读取详情并注册 DSH renderer。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts",
-        "@retrieval-agent/product-api",
-        "@retrieval-agent/retrieval-replay"
-      ]
-    },
-    {
-      "directory": "ui-product-shell",
-      "name": "@retrieval-agent/ui-product-shell",
-      "kind": "ui-shell",
-      "capability": "保留原生 DSH 外壳，仅通过公共 slot 提供会话头工单导出入口。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts",
-        "@retrieval-agent/product-api"
-      ]
+      "capability": "DSH 候选与确认结果面板、会话头下载入口；复用 Product API 客户端。"
     },
     {
       "directory": "product-host",
       "name": "@retrieval-agent/product-host",
       "kind": "host-adapter",
-      "capability": "把 Product API 绑定到 DSH Web/Session，恢复可信主体并处理同源导出请求。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts",
-        "@retrieval-agent/product-api",
-        "@retrieval-agent/agent-plugin"
-      ]
+      "capability": "把 Product API 与独立任务工作台绑定到 DSH，装配持久 worker、查询分析器和可信主体，处理命令、快照、SSE 与确认导出。"
     },
     {
       "directory": "dsh-compat",
       "name": "@retrieval-agent/dsh-compat",
       "kind": "compatibility",
-      "capability": "锁定 DSH 0.1.1-rc.2 的唯一兼容边界、版本握手和退出断言。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts"
-      ]
+      "capability": "固定 DSH 0.1.1-rc.2 的事件/Session 兼容与 OpenCode 会话请求头接线、版本握手和退出断言。"
     },
     {
       "directory": "agent-plugin",
       "name": "@retrieval-agent/agent-plugin",
       "kind": "application",
-      "capability": "DSH 工具、提示词、Session 事件与领域控制器编排；不拥有 Provider 算法。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts",
-        "@retrieval-agent/domain",
-        "@retrieval-agent/dsh-compat",
-        "@retrieval-agent/query-understanding",
-        "@retrieval-agent/ticket-collection"
-      ]
+      "capability": "DSH 工具、上下文与领域控制器编排，MySQL 权威任务、租约和事件提交、Session 镜像恢复；不拥有 Provider 算法。"
     },
     {
       "directory": "bundle",
       "name": "@retrieval-agent/bundle",
       "kind": "composition",
-      "capability": "固定产品 preset、Cordis patch、默认 Provider 与发布闭包装配；不含业务策略。",
-      "allowedInternalDependencies": [
-        "@retrieval-agent/contracts",
-        "@retrieval-agent/domain",
-        "@retrieval-agent/model-service-client",
-        "@retrieval-agent/query-understanding",
-        "@retrieval-agent/retrieval-ranking",
-        "@retrieval-agent/ticket-collection",
-        "@retrieval-agent/provider-local",
-        "@retrieval-agent/provider-streamcluster",
-        "@retrieval-agent/product-api",
-        "@retrieval-agent/product-host",
-        "@retrieval-agent/ui-ticket-results",
-        "@retrieval-agent/ui-product-shell",
-        "@retrieval-agent/dsh-compat",
-        "@retrieval-agent/agent-plugin"
-      ]
+      "capability": "固定产品 preset、Cordis patch、默认 Provider 与发布闭包装配；不含业务策略。"
+    },
+    {
+      "directory": "provider-database",
+      "name": "@retrieval-agent/provider-database",
+      "kind": "provider",
+      "capability": "版本化 MySQL 字面全集与 Milvus 向量召回、索引发布和增量搜索结果。"
     }
   ]
 }

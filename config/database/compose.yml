@@ -1,0 +1,50 @@
+name: retrieval-agent-database
+services:
+  mysql:
+    image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+      MYSQL_DATABASE: retrieval_agent
+    ports: ['127.0.0.1:${RETRIEVAL_AGENT_MYSQL_PORT:-13306}:3306']
+    volumes: ['mysql-data:/var/lib/mysql']
+    command: ['--character-set-server=utf8mb4', '--collation-server=utf8mb4_bin', '--innodb-buffer-pool-size=1G']
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.23@sha256:a4ff811beaa545972cd993f7d331685e8777c0dcecf5a8ae46069bf792ed4916
+    command: ['etcd', '--config-file', '/etc/etcd/config.yaml']
+    volumes:
+      - milvus-data:/var/lib/milvus
+      - ./embedEtcd.yaml:/etc/etcd/config.yaml:ro
+    healthcheck:
+      test: ['CMD', 'etcdctl', 'endpoint', 'health']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  milvus:
+    image: milvusdb/milvus:v2.6.14@sha256:2f1759559ca11d320ef510f3e0cdd3a3167dccb834d9d0cf64ee79b13d936d93
+    command: ['milvus', 'run', 'standalone']
+    security_opt: ['seccomp:unconfined']
+    depends_on:
+      etcd:
+        condition: service_healthy
+    environment:
+      ETCD_USE_EMBED: 'false'
+      ETCD_ENDPOINTS: etcd:2379
+      COMMON_STORAGETYPE: local
+      DEPLOY_MODE: STANDALONE
+    volumes:
+      - milvus-data:/var/lib/milvus
+    ports: ['127.0.0.1:${RETRIEVAL_AGENT_MILVUS_PORT:-19530}:19530', '127.0.0.1:${RETRIEVAL_AGENT_MILVUS_HEALTH_PORT:-9091}:9091']
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9091/healthz']
+      interval: 5s
+      start_period: 90s
+      timeout: 5s
+      retries: 30
+volumes:
+  mysql-data:
+  milvus-data:

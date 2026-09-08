@@ -5,7 +5,7 @@ type CalendarDate = { year: number; month: number; day: number }
 
 const PROVINCES = /北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆|香港|澳门/gu
 const NUMBER = '[0-9零一二两三四五六七八九十百千万]+'
-const DATE = '(?:[0-9]{4}[-/][0-9]{1,2}[-/][0-9]{1,2}|[0-9]{4}年[0-9]{1,2}月[0-9]{1,2}[日号]?)'
+const DATE = '(?:[0-9]{4}[-/][0-9]{1,2}[-/][0-9]{1,2}|[0-9]{4}\\s*年\\s*[0-9]{1,2}\\s*月\\s*[0-9]{1,2}\\s*[日号]?)'
 
 export function positiveUserCount(text: string): number | undefined {
   const normalized = text.normalize('NFKC')
@@ -36,7 +36,7 @@ export function positiveUserCount(text: string): number | undefined {
 export function explicitUserCount(query: string): number | undefined {
   const patterns = [
     new RegExp(`(?:前|top\\s*)(${NUMBER})(?=\\s*(?:条|个|件|份|工单|cases?\\b|tickets?\\b|[，。,.]|$))`, 'iu'),
-    new RegExp(`(?:找|查找|返回|给我|列出|收集|要|需要|找出|取|推荐|展示)\\s*(${NUMBER})\\s*(?:条|个|件|份)(?!月|星期|小时|天|周|年)`, 'u'),
+    new RegExp(`(?:只需|仅需|找|查找|返回|给我|列出|收集|要|需要|找出|取|推荐|展示)\\s*(${NUMBER})\\s*(?:条|个|件|份)(?!月|星期|小时|天|周|年)`, 'u'),
     new RegExp(`\\b(?:find|return|list|collect)\\s+(${NUMBER})\\s+(?:tickets?|cases?)\\b`, 'iu'),
   ]
   for (const pattern of patterns) {
@@ -96,10 +96,13 @@ function midnight(date: CalendarDate, timeZone: string): number {
   throw new TypeError('请求时区中的日期边界无法唯一解析。')
 }
 
-function timeField(query: string, index: number): string {
+function timeField(query: string, index: number, length: number): string {
   const prefix = query.slice(Math.max(0, index - 20), index)
   if (/(?:解决|办结|关闭)(?:日期|时间)[为在从：:\s]*$/u.test(prefix)) return 'resolvedAt'
   if (/更新(?:日期|时间)[为在从：:\s]*$/u.test(prefix)) return 'updatedAt'
+  // “7月已解决的工单”“已解决的7月工单”都指在7月解决，而不是创建于7月。
+  if (/(?:已)?(?:解决|办结|关闭|完成)(?:的)?\s*$/u.test(prefix)) return 'resolvedAt'
+  if (/^\s*(?:的\s*)?(?:已)?(?:解决|办结|关闭|完成)/u.test(query.slice(index + length))) return 'resolvedAt'
   return 'createdAt'
 }
 
@@ -134,7 +137,7 @@ export function compileUserConditions(query: string, entities: readonly SpacyEnt
     const start = parseDate(match[1]!)
     const end = parseDate(match[2]!)
     if (start === undefined || end === undefined) unresolved(match[0], '日期不是有效的日历日期。')
-    else range(match[0], timeField(query, match.index), start, end)
+    else range(match[0], timeField(query, match.index, match[0].length), start, end)
     remember(match)
   }
   for (const match of query.matchAll(new RegExp(DATE, 'gu'))) {
@@ -145,7 +148,7 @@ export function compileUserConditions(query: string, entities: readonly SpacyEnt
     else {
       const suffix = query.slice(match.index + match[0].length).trimStart()
       const prefix = query.slice(0, match.index)
-      const field = timeField(query, match.index)
+      const field = timeField(query, match.index, match[0].length)
       if (/^(?:以|之)后/u.test(suffix)) add(match[0], [{ field, op: 'gte', value: new Date(midnight(shiftDays(date, 1), timeZone)).toISOString() }])
       else if (/^(?:以|之)前/u.test(suffix)) add(match[0], [{ field, op: 'lte', value: new Date(midnight(date, timeZone) - 1).toISOString() }])
       else if (/^起/u.test(suffix) || /(?:不早于|从|自)\s*$/u.test(prefix)) add(match[0], [{ field, op: 'gte', value: new Date(midnight(date, timeZone)).toISOString() }])
@@ -154,11 +157,11 @@ export function compileUserConditions(query: string, entities: readonly SpacyEnt
     }
     remember(match)
   }
-  for (const match of query.matchAll(/([0-9]{4})年([0-9]{1,2})月/gu)) {
+  for (const match of query.matchAll(/([0-9]{4})\s*年\s*([0-9]{1,2})\s*月/gu)) {
     if (covered(match.index, match.index + match[0].length)) continue
     const start = calendar(Number(match[1]), Number(match[2]), 1)
     if (start === undefined) unresolved(match[0], '月份不是有效的日历月份。')
-    else range(match[0], timeField(query, match.index), start, shiftDays(shiftMonths(start, 1), -1))
+    else range(match[0], timeField(query, match.index, match[0].length), start, shiftDays(shiftMonths(start, 1), -1))
     remember(match)
   }
   const today = localDate(now, timeZone)
@@ -169,7 +172,7 @@ export function compileUserConditions(query: string, entities: readonly SpacyEnt
       const unit = match[2]!
       const start = unit === '月' || unit === '年' ? shiftMonths(today, -amount * (unit === '年' ? 12 : 1))
         : shiftDays(today, -amount * (unit === '周' || unit === '星期' ? 7 : 1))
-      range(match[0], timeField(query, match.index), start, today, now.getTime())
+      range(match[0], timeField(query, match.index, match[0].length), start, today, now.getTime())
     }
     remember(match)
   }
@@ -178,10 +181,10 @@ export function compileUserConditions(query: string, entities: readonly SpacyEnt
     const start = match[0] === '昨天' ? shiftDays(today, -1) : match[0] === '今天' ? today
       : shiftMonths({ ...today, day: 1 }, /上/u.test(match[0]) ? -1 : 0)
     const end = match[0] === '昨天' || match[0] === '今天' ? start : shiftDays(shiftMonths(start, 1), -1)
-    range(match[0], timeField(query, match.index), start, end, /今天|本月|这个月/u.test(match[0]) ? now.getTime() : undefined)
+    range(match[0], timeField(query, match.index, match[0].length), start, end, /今天|本月|这个月/u.test(match[0]) ? now.getTime() : undefined)
     remember(match)
   }
-  for (const match of query.matchAll(/最近|近期|近来|这段时间|[0-9一二三四五六七八九十]+月/gu)) {
+  for (const match of query.matchAll(/最近|近期|近来|这段时间|[0-9一二三四五六七八九十]+\s*月/gu)) {
     if (!covered(match.index, match.index + match[0].length)) unresolved(match[0], '时间条件缺少明确的年份或日期范围。')
   }
   for (const entity of entities) {
@@ -197,8 +200,21 @@ export function compileUserConditions(query: string, entities: readonly SpacyEnt
   for (const match of query.matchAll(macroRegions)) unresolved(match[0], '地域范围需要明确可用的地区名称，当前不支持区域层级推断。')
   const regions = [...new Set(geographic)].filter(text => !/华东|华南|华北|华中|东北|西北|西南|附近|当地|本地/u.test(text))
   const distinctRegions = regions.filter(text => !regions.some(other => other !== text && other.includes(text)))
+  // A scoped inclusion plus separately stated exclusions is already unambiguous.
+  // Keep compound alternatives and unscoped mentions for the model/user to resolve.
+  const explicitRegions = distinctRegions.map(text => {
+    const index = query.indexOf(text), prefix = query.slice(0, index)
+    const op = /(?:排除|除了|非|不在|不是|不要)\s*$/u.test(prefix) ? 'neq'
+      : /(?:只看|只查|只查询|只要|仅看|仅查|仅查询|限于|仅限)\s*$/u.test(prefix) ? 'eq' : undefined
+    return { text, op }
+  })
+  const explicitConjunction = distinctRegions.length > 1 && explicitRegions.every(item => item.op)
+    && explicitRegions.filter(item => item.op === 'eq').length <= 1
+    && distinctRegions.every(text => query.indexOf(text) === query.lastIndexOf(text))
+    && !/(?:或|还是|\bor\b)/iu.test(query)
   for (const text of distinctRegions) {
-    if (distinctRegions.length > 1) unresolved(text, '存在多个地域，需确认它们的逻辑关系和字段映射。')
+    if (explicitConjunction) add(text, [{ field: 'region', op: explicitRegions.find(item => item.text === text)!.op as 'eq' | 'neq', value: text.replace(/(?:省|市)$/u, '') }])
+    else if (distinctRegions.length > 1) unresolved(text, '存在多个地域，需确认它们的逻辑关系和字段映射。')
     else if (/^(?:附近|周边)/u.test(query.slice(query.indexOf(text) + text.length))) unresolved(text, '附近或周边地区需要明确地域范围，不能作为该城市的等值条件。')
     else add(text, [{ field: 'region', op: /(?:排除|除了|非|不在|不是|不要)\s*$/u.test(query.slice(0, query.indexOf(text)))
       || /^(?:以外|之外)/u.test(query.slice(query.indexOf(text) + text.length)) ? 'neq' : 'eq', value: text.replace(/(?:省|市)$/u, '') }])
@@ -216,6 +232,14 @@ export function compileUserConditions(query: string, entities: readonly SpacyEnt
     if (!requirements.some(item => match[0].includes(item.text))) add(match[0], [{ field: 'status', op: 'eq', value: match[1]! }])
   }
   const identities = [...query.matchAll(/(?:工单(?:编号|号码|号)|ticket\s*(?:id|number)|编号)\s*[:：#为]?\s*([A-Za-z0-9][A-Za-z0-9_.:/-]{0,127})/giu)]
+  // “工单 ESFT-…”省略“号”的说法：只有紧跟完整编号形态（字母+数字+连字符）才按已知工单编译，
+  // 数量、日期或普通名词不会被误当成编号。
+  if (identities.length === 0) {
+    for (const match of query.matchAll(/(?:工单|ticket)\s*[:：#]?\s*([A-Za-z0-9][A-Za-z0-9_.:/-]{0,127})/giu)) {
+      const value = match[1]!
+      if (/[A-Za-z]/u.test(value) && /[0-9]/u.test(value) && value.includes('-')) identities.push(match)
+    }
+  }
   if (identities.length === 0) identities.push(...query.matchAll(/\bTKT-[0-9]+\b/gu))
   for (const match of identities) {
     if (identities.length > 1) unresolved(match[0], '多个工单编号需要集合查询，不能编译成相互冲突的等值条件。')

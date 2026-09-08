@@ -7,9 +7,48 @@ import {
   type TicketQueryChange,
   type TicketQueryDelta,
   type TicketRetrievalSpec,
+  type QueryExpression,
+  type QueryPlan,
 } from '@retrieval-agent/contracts'
 
 const MAX_QUERY_CHANGES_PER_SEARCH = 8
+
+function filterPredicate(f: TicketFilter): QueryExpression {
+  if (f.op === 'gte' || f.op === 'lte') return { kind: 'field', field: f.field, op: 'range', ...(f.op === 'gte' ? { lower: f.value } : { upper: f.value, upperInclusive: true }) }
+  const e: QueryExpression = { kind: 'field', field: f.field, op: f.op === 'contains' ? 'in' : 'eq', values: [f.value] }
+  return f.op === 'neq' ? { kind: 'not', child: e } : e
+}
+
+/** Called only after Controller admission; the feedback/repair event retains the new source text. */
+export function resolvePlanRequirements(plan: QueryPlan, resolutions: readonly { text: string; filters: readonly TicketFilter[] }[]): QueryPlan {
+  const replacements = new Map(plan.requirements.flatMap(requirement => {
+    const resolution = resolutions.find(item => item.text === requirement.span.text && item.filters.length > 0)
+    return requirement.status === 'unresolved' && resolution ? [[requirement.id, { kind: 'and', children: resolution.filters.map(filterPredicate) } as QueryExpression] as const] : []
+  }))
+  const replace = (e: QueryExpression): QueryExpression => {
+    if (e.kind === 'unknown') return replacements.get(e.requirementId) ?? e
+    if (e.kind === 'and' || e.kind === 'or') return { ...e, children: e.children.map(replace) }
+    if (e.kind === 'not') return { ...e, child: replace(e.child) }
+    return e
+  }
+  return { ...plan, keyword: replace(plan.keyword), hard: replace(plan.hard), unresolved: plan.unresolved.filter(id => !replacements.has(id)),
+    requirements: plan.requirements.map(r => replacements.has(r.id) ? { ...r, status: 'compiled', expression: replacements.get(r.id)! } : r) }
+}
+
+/** Explicit user field revisions supersede that field in both scoped branches and the common hard AST. */
+export function reviseQueryPlan(plan: QueryPlan, incoming: readonly TicketFilter[]): QueryPlan {
+  const fields = new Set(incoming.map(f => f.field))
+  const remove = (e: QueryExpression): QueryExpression => {
+    if (e.kind === 'field' && fields.has(e.field)) return { kind: 'constant', value: true }
+    if (e.kind === 'not' && e.child.kind === 'field' && fields.has(e.child.field)) return { kind: 'constant', value: true }
+    if (e.kind === 'and' || e.kind === 'or') return { ...e, children: e.children.map(remove) }
+    if (e.kind === 'not') return { ...e, child: remove(e.child) }
+    return e
+  }
+  // Incoming filters are already controller-admitted, sourced direct-user conditions.
+  const additions = incoming.map(filterPredicate)
+  return { ...plan, hard: { kind: 'and', children: [remove(plan.hard), ...additions] }, keyword: remove(plan.keyword) }
+}
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values.map(value => value.normalize('NFKC').trim()).filter(Boolean))]
@@ -28,6 +67,15 @@ export function applyQueryDelta(spec: TicketRetrievalSpec, delta: TicketQueryDel
     (current, change) => applyQueryChange(current, change),
     spec,
   )
+}
+
+/** add_filter 修复可声明它把哪条待确认的用户要求编译成了结构化条件。 */
+export function deltaRequirementResolutions(delta: TicketQueryDelta | undefined): { readonly text: string; readonly field: string }[] {
+  if (delta === undefined) return []
+  const changes = delta.kind === 'batch' ? delta.changes : [delta]
+  return changes.flatMap(change => change.kind === 'add_filter' && change.resolves !== undefined
+    ? [{ text: change.resolves, field: change.filter.field }]
+    : [])
 }
 
 function isRangeFilter(filter: TicketFilter): boolean {

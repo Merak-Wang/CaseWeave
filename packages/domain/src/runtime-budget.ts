@@ -1,16 +1,19 @@
 import type { RetrievalBudgetState } from '@retrieval-agent/contracts'
 
 export interface ModelRequestMeasurement {
+  readonly outputReservedTokens?: number
+  readonly protocolMarginTokens?: number
   readonly estimatedInputTokens: number
   readonly serializationBytes: number
   readonly wallClockElapsedMs: number
   readonly modelContextWindow?: number
   readonly deploymentContextLimit?: number
   readonly effectiveContextLimit?: number
-  readonly rejectionReason?: 'model_context' | 'deployment_context' | 'model_steps' | 'wall_clock'
+  readonly rejectionReason?: 'model_context' | 'deployment_context'
   readonly accepted: boolean
 }
 export interface ModelResponseMeasurement {
+  readonly inputTokens?: number
   readonly modelLatencyMs: number
   readonly outputTokens: number
   readonly wallClockElapsedMs: number
@@ -31,6 +34,7 @@ export function modelRequestBudget(budget: RetrievalBudgetState, input: ModelReq
 export function modelResponseBudget(budget: RetrievalBudgetState, input: ModelResponseMeasurement): RetrievalBudgetState {
   return {
     ...budget,
+    ...(input.inputTokens === undefined ? {} : { totalMeasuredInputTokens: (budget.totalMeasuredInputTokens ?? 0) + input.inputTokens }),
     wallClockElapsedMs: Math.max(budget.wallClockElapsedMs ?? 0, input.wallClockElapsedMs),
     modelLatencyMs: (budget.modelLatencyMs ?? 0) + input.modelLatencyMs,
     totalOutputTokens: (budget.totalOutputTokens ?? 0) + input.outputTokens,
@@ -45,6 +49,7 @@ export function toolCallBudget(
     ...budget,
     successfulToolCalls: (budget.successfulToolCalls ?? 0) + (input.success ? 1 : 0),
     failedToolCalls: (budget.failedToolCalls ?? 0) + (input.success ? 0 : 1),
+    consecutiveToolErrors: input.success ? 0 : (budget.consecutiveToolErrors ?? 0) + 1,
     serializationBytes: (budget.serializationBytes ?? 0) + input.serializationBytes,
   }
 }

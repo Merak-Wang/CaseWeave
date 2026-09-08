@@ -15,6 +15,7 @@ import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  RetrievalError,
   TicketCandidateRef,
   TicketEvidenceId,
   type EvidenceReadRequest,
@@ -25,8 +26,9 @@ import {
   type TicketSearchOptions,
   type TicketSnapshot,
 } from '@retrieval-agent/contracts'
-import { createTicketResultCollection } from '@retrieval-agent/ticket-collection'
+import { createTicketResultCollection } from '@retrieval-agent/domain/result'
 import { readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
+import { foldRetrievalEvents } from '@retrieval-agent/domain'
 import type { QueryAnalysisResponse, TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
 import { installRetrievalRuntimeBudget } from './context-budget.js'
 import { installAutomaticRetrievalStart } from './pre-step.js'
@@ -279,6 +281,30 @@ class FirstRequestAnswerAdapter extends LlmAdapter {
 }
 
 describe('RetrievalAgentService Cordis binding', () => {
+  it('keeps a working state larger than 8K under the requested 256K ceiling and respects smaller model windows', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(StubPrincipalProvider)
+      await ctx.plugin(UnionTicketProvider)
+      await ctx.plugin(RetrievalAgentService)
+      const session = Session.create(SessionId('large-working-context'))
+      const agent = sessionAgent(session)
+      session.append('request/context', { provider: 'mock', model: 'model', contextWindow: 1_000_000 })
+      const query = '副卡解绑。' + '保留处理记录与原始业务要求。'.repeat(800)
+      await ctx.retrievalAgent.start(agent, { target: 'ranked_cases', query })
+      await expect(ctx.retrievalAgent.projectContext(agent, 8000)).rejects.toMatchObject({ code: 'CAPACITY_EXCEEDED' })
+      const selection = await ctx.retrievalAgent.projectContext(agent)
+      expect(selection.tokenBudget).toBe(262_144)
+      expect(selection.estimatedTokens).toBeGreaterThan(8000)
+      expect(selection.rendered).toContain(query)
+      expect(ctx.retrievalAgent.current(agent).phase).not.toBe('stopped')
+      session.append('request/context', { provider: 'mock', model: 'smaller-model', contextWindow: 32_768 })
+      expect(ctx.retrievalAgent.workingContextBudget(agent)).toBeLessThan(32_768)
+      expect(ctx.retrievalAgent.workingContextBudget(agent)).toBeGreaterThan(8000)
+      await expect(ctx.retrievalAgent.projectContext(agent, 25)).rejects.toMatchObject({ code: 'CAPACITY_EXCEEDED' })
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('stops an unstructured model response explicitly while retaining unjudged candidates', async () => {
     const ctx = new Context()
     let disposeAgent: (() => Promise<void>) | undefined
@@ -291,7 +317,8 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(TokenMeter)
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
-      await ctx.plugin(RetrievalAgentService, { maxContextTokens: 4_096 })
+      // The phase-3 decision schema and explicit output reserve need more than the legacy 4K envelope.
+      await ctx.plugin(RetrievalAgentService, { maxContextTokens: 8_192 })
       installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
       installRetrievalTools(ctx, ctx.retrievalAgent)
       installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
@@ -311,6 +338,10 @@ describe('RetrievalAgentService Cordis binding', () => {
       await handle.agent.whenIdle()
 
       expect(adapter.requests).toHaveLength(1)
+      // 用户输入在 pre-step 提前落库后不能被 DSH 重复追加；快照是 plugin 来源，不计入。
+      expect(handle.agent.session.events
+        .filter(event => event.type === 'user/message' && JSON.stringify(event.data).includes('"kind":"user"')))
+        .toHaveLength(1)
       const request = adapter.requests[0]!
       expect(request.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining([
         'ticket_decide',
@@ -331,7 +362,7 @@ describe('RetrievalAgentService Cordis binding', () => {
         .filter(event => event.type === 'retrieval/model-request-measured')
       expect(requests).toHaveLength(1)
       expect(requests[0]?.data).toMatchObject({ accepted: true })
-      expect(requests[0]?.data.estimatedInputTokens).toBeLessThanOrEqual(4_096)
+      expect(requests[0]?.data.estimatedInputTokens).toBeLessThanOrEqual(8_192)
       expect(handle.agent.session.events.filter(event => event.type === 'request/header')).toHaveLength(1)
     } finally {
       if (disposeAgent !== undefined) await disposeAgent()
@@ -377,7 +408,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       })
 
       const refs = state.candidates.map(candidate => candidate.ref)
-      ctx.retrievalAgent.projectContext(agent)
+      await ctx.retrievalAgent.projectContext(agent)
       state = await ctx.retrievalAgent.decide(agent, {
         stateId: ctx.retrievalAgent.current(agent).stateId, judgments: [],
         gaps: [{
@@ -406,7 +437,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       })
       expect(ctx.ticketPrincipalProvider).toMatchObject({ operations: ['snapshot_open', 'evidence_read'] })
       expect(readRetrievalSessionEvents(agent.session)).toContainEqual(expect.objectContaining({ type: 'retrieval/evidence-promoted' }))
-      const context = ctx.retrievalAgent.projectContext(agent)
+      const context = await ctx.retrievalAgent.projectContext(agent)
       expect(context.includedEvidenceIds).toEqual(state.promotedEvidence.map(evidence => evidence.evidenceId))
       const visible = ctx.retrievalAgent.current(agent)
       await expect(ctx.retrievalAgent.decide(agent, {
@@ -445,7 +476,8 @@ describe('RetrievalAgentService Cordis binding', () => {
         budget: { modelStepsUsed: 1, totalInputTokens: 14_674, serializationBytes: 80_685 },
         frozenEvidence: { stoppingReason: 'budget_exhausted' },
       })
-      expect(createTicketResultCollection(ctx.retrievalAgent.current(agent)).undeterminedCandidates?.length).toBeGreaterThan(0)
+      expect(createTicketResultCollection(ctx.retrievalAgent.current(agent))).not.toHaveProperty('undeterminedCandidates')
+      expect(ctx.retrievalAgent.current(agent).candidates.length).toBeGreaterThan(0)
       const requests = readRetrievalSessionEvents(session)
         .filter(event => event.type === 'retrieval/model-request-measured')
       expect(requests.map(event => event.data.accepted)).toEqual([true, false])
@@ -484,28 +516,28 @@ describe('RetrievalAgentService Cordis binding', () => {
     }
   })
 
-  it('persists an explicit budget_exhausted stop when the wall-clock hook fires', async () => {
+  it('keeps measured model steps and wall-clock time observational instead of terminating the task', async () => {
     const ctx = new Context()
     try {
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
-      await ctx.plugin(RetrievalAgentService, { maxLatencyMs: 120_000 })
-      const session = Session.create(SessionId('wall-clock-budget-agent'))
+      await ctx.plugin(RetrievalAgentService)
+      const session = Session.create(SessionId('observed-not-terminated-agent'))
       const agent = sessionAgent(session)
-      await ctx.retrievalAgent.start(agent, { target: 'ranked_cases', query: '副卡' })
+      const started = await ctx.retrievalAgent.start(agent, { target: 'ranked_cases', query: '副卡' })
+      expect(started.phase).not.toBe('stopped')
 
-      await expect(ctx.retrievalAgent.stopForWallClockBudget(agent)).resolves.toMatchObject({
-        phase: 'stopped',
-        termination: 'budget_exhausted',
-      })
-      expect(ctx.retrievalAgent.current(agent)).toMatchObject({
-        phase: 'stopped',
-        termination: 'budget_exhausted',
-        frozenEvidence: { stoppingReason: 'budget_exhausted' },
-      })
-      expect(createTicketResultCollection(ctx.retrievalAgent.current(agent)).undeterminedCandidates?.length).toBeGreaterThan(0)
-      expect(readRetrievalSessionEvents(session).filter(event => event.type === 'retrieval/stopped').at(-1)?.data)
-        .toMatchObject({ reason: 'budget_exhausted' })
+      for (let step = 0; step < 10; step += 1) {
+        await expect(ctx.retrievalAgent.admitModelRequest(agent, {
+          estimatedInputTokens: 1_000, serializationBytes: 1_100,
+          wallClockElapsedMs: 600_000 + step,
+        })).resolves.toEqual({ accepted: true })
+      }
+
+      const current = ctx.retrievalAgent.current(agent)
+      expect(current.phase).not.toBe('stopped')
+      expect(current.termination).toBe('active')
+      expect(current.budget).toMatchObject({ modelStepsUsed: 10, wallClockElapsedMs: 600_009 })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -577,7 +609,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       expect(ctx.retrievalAgent.current(agent).query.original).toBe(rawQuery)
 
       const nextDirect = createUserMessage({
-        content: [{ type: 'text', text: '第二次查询' }],
+        content: [{ type: 'text', text: '新任务：第二次查询' }],
         source: { kind: 'user' },
       })
       const nextDecision = await agentEvents(ctx, agent).waterfall(
@@ -590,8 +622,63 @@ describe('RetrievalAgentService Cordis binding', () => {
       expect(nextDecision.messages).toEqual([])
       expect(readRetrievalSessionEvents(session)
         .filter(event => event.type === 'retrieval/query-contracted')
-        .map(event => event.data.spec.originalQuery)).toEqual([rawQuery, '第二次查询'])
-      expect(ctx.retrievalAgent.current(agent).query.original).toBe('第二次查询')
+        .map(event => event.data.spec.originalQuery)).toEqual([rawQuery, '新任务：第二次查询'])
+      expect(ctx.retrievalAgent.current(agent).query.original).toBe('新任务：第二次查询')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('persists the accepted user message before a slow first ranking completes', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(StubPrincipalProvider)
+      let releaseSearch!: () => void
+      const gate = new Promise<void>(resolve => { releaseSearch = resolve })
+      class GatedTicketProvider extends UnionTicketProvider {
+        override async search(principal: unknown, snapshotId: TicketSnapshotId, query: TicketRetrievalSpec, options: TicketSearchOptions): Promise<TicketSearchPage> {
+          await gate
+          return super.search(principal, snapshotId, query, options)
+        }
+      }
+      await ctx.plugin(GatedTicketProvider)
+      await ctx.plugin(RetrievalAgentService)
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
+      const session = Session.create(SessionId('slow-first-pass-visibility'))
+      const agent = sessionAgent(session)
+      const direct = createUserMessage({
+        content: [{ type: 'text', text: '帮我找副卡解绑的工单' }],
+        source: { kind: 'user' },
+      })
+
+      let settled = false
+      const pending = agentEvents(ctx, agent).waterfall(
+        'agent/pre-step',
+        { messages: [direct], turn: 1, step: 1, signal: SIGNAL },
+        () => Promise.resolve({ kind: 'enter' as const, messages: [direct] }),
+      ).then(decision => { settled = true; return decision })
+
+      // 首轮 Hybrid 排名仍被 Provider 阻塞期间，用户输入必须已经在 Session 表面可见。
+      for (let flush = 0; flush < 20 && !settled; flush += 1) {
+        await new Promise(resolve => setTimeout(resolve, 0))
+        if (session.events.some(event => event.type === 'user/message')) break
+      }
+      expect(settled).toBe(false)
+      expect(session.events
+        .filter(event => event.type === 'user/message')
+        .map(event => event.data)).toEqual([direct])
+
+      releaseSearch()
+      const decision = await pending
+      expect(decision.kind).toBe('enter')
+      if (decision.kind !== 'enter') throw new Error('pre-step unexpectedly rejected')
+      // 返回给 DSH 的只剩快照；用户消息不重复落库。
+      expect(decision.messages).toHaveLength(1)
+      expect(decision.messages[0]?.source).toMatchObject({
+        kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
+      })
+      expect(session.events.filter(event => event.type === 'user/message')).toHaveLength(1)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -645,7 +732,15 @@ describe('RetrievalAgentService Cordis binding', () => {
       )
       expect(decision.kind).toBe('enter')
       if (decision.kind !== 'enter') throw new Error('natural product entry unexpectedly rejected')
-      expect(decision.messages).toHaveLength(2)
+      // 用户消息在首轮检索前已落库；返回给 DSH 的只剩知识状态快照。
+      expect(decision.messages).toHaveLength(1)
+      expect(decision.messages[0]?.source).toMatchObject({
+        kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
+      })
+      const persistedUser = session.events.filter(event => event.type === 'user/message')
+      expect(persistedUser.map(event => event.data)).toEqual([direct])
+      const firstRetrievalSeq = session.events.find(event => event.type.startsWith('retrieval/'))?.seq
+      expect(persistedUser[0]?.seq).toBeLessThan(firstRetrievalSeq ?? -1)
 
       let state = ctx.retrievalAgent.current(agent)
       expect(state.task).toMatchObject({ target: 'ranked_cases', requestedCount: 2, countPolicy: 'explicit' })
@@ -661,7 +756,7 @@ describe('RetrievalAgentService Cordis binding', () => {
         gaps: [{ kind: 'coverage', status: 'open', evaluator: 'model', evidenceRefs: [TicketCandidateRef('candidate-1')], description: '当前只有一条，还缺一条相同业务案例。' }],
         action: { kind: 'search', mode: 'dense', delta: { kind: 'semantic_hint', text: '解绑后仍共享' } },
       })
-      ctx.retrievalAgent.projectContext(agent)
+      await ctx.retrievalAgent.projectContext(agent)
       state = await ctx.retrievalAgent.decide(agent, {
         stateId: ctx.retrievalAgent.current(agent).stateId,
         judgments: ['candidate-3', 'candidate-1'].map(ref => ({
@@ -738,19 +833,19 @@ describe('RetrievalAgentService Cordis binding', () => {
         requestedCount: 3,
       })
 
-      ctx.retrievalAgent.projectContext(agent)
+      await ctx.retrievalAgent.projectContext(agent)
       state = await ctx.retrievalAgent.decide(agent, {
         stateId: ctx.retrievalAgent.current(agent).stateId, judgments: [],
         gaps: [{ kind: 'coverage', status: 'open', evaluator: 'model', evidenceRefs: [TicketCandidateRef('candidate-1')], description: '目前一条，还需要更多解绑案例。' }],
         action: { kind: 'search', mode: 'keyword', delta: { kind: 'add_terms', terms: ['解绑'] } },
       })
-      ctx.retrievalAgent.projectContext(agent)
+      await ctx.retrievalAgent.projectContext(agent)
       state = await ctx.retrievalAgent.decide(agent, {
         stateId: ctx.retrievalAgent.current(agent).stateId, judgments: [],
         gaps: [{ kind: 'coverage', status: 'open', evaluator: 'model', evidenceRefs: [TicketCandidateRef('candidate-2')], description: '已有两个候选，还需要一个共享关系案例。' }],
         action: { kind: 'search', mode: 'dense', delta: { kind: 'semantic_hint', text: '解绑后仍共享' } },
       })
-      ctx.retrievalAgent.projectContext(agent)
+      await ctx.retrievalAgent.projectContext(agent)
       state = await ctx.retrievalAgent.decide(agent, {
         stateId: ctx.retrievalAgent.current(agent).stateId,
         judgments: ['candidate-1', 'candidate-2', 'candidate-3'].map(ref => ({
@@ -765,6 +860,41 @@ describe('RetrievalAgentService Cordis binding', () => {
         frozenEvidence: { complete: false, topKAccepted: true, resultPagesExhausted: true },
       })
       expect(ctx.ticketRetrievalProvider).toMatchObject({ modes: ['hybrid', 'keyword', 'dense'] })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps persisted revisions linear when projection and metering meet an in-flight search', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(StubPrincipalProvider)
+      await ctx.plugin(UnionTicketProvider)
+      await ctx.plugin(RetrievalAgentService)
+      const agent = sessionAgent(Session.create(SessionId('queued-projection-agent')))
+      const started = await ctx.retrievalAgent.start(agent, {
+        target: 'ranked_cases', query: '副卡', requestedCount: 3,
+      })
+
+      // The keyword fixture sleeps inside the queued mutation; projection and
+      // tool metering must queue behind it instead of writing sibling edges.
+      const searching = ctx.retrievalAgent.search(agent, {
+        mode: 'keyword', delta: { kind: 'add_terms', terms: ['解绑'] },
+      })
+      const [state, selection] = await Promise.all([
+        searching,
+        await ctx.retrievalAgent.projectContext(agent),
+        ctx.retrievalAgent.recordToolCall(agent, { success: true, serializationBytes: 128 }),
+      ])
+      expect(state.revision).toBeGreaterThan(started.revision)
+      expect(selection.includedCandidateRefs.length).toBeGreaterThan(0)
+
+      const events = readRetrievalSessionEvents(agent.session)
+        .filter(event => event.retrievalId === state.retrievalId)
+      expect(events.filter(event => event.type === 'retrieval/context-projected')).toHaveLength(1)
+      const folded = foldRetrievalEvents(events)
+      expect(folded?.revision).toBe(ctx.retrievalAgent.current(agent).revision)
+      expect(folded?.stateId).toBe(ctx.retrievalAgent.current(agent).stateId)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -807,11 +937,26 @@ class PublicEvidenceProvider extends TwoCandidateTicketProvider {
       }))), warnings: [] }
   }
 }
-async function publicSetup(query = '帮我找副卡工单') {
+class TimingOutTicketProvider extends PublicEvidenceProvider {
+  override async search(): Promise<TicketSearchPage> {
+    throw new RetrievalError('TIMEOUT', 'RAG 排名请求超时。', { retryable: true })
+  }
+}
+class ExpiringSnapshotProvider extends PublicEvidenceProvider {
+  expired = false
+  override async status() {
+    return {
+      providerId: this.providerId, ready: true, readOnly: true as const,
+      snapshotValid: !this.expired, sourceVersion: 'fixture-v1', warnings: [],
+    }
+  }
+}
+
+async function publicSetup(query = '帮我找副卡工单', Provider: typeof PublicEvidenceProvider = PublicEvidenceProvider) {
   const ctx = new Context()
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(StubPrincipalProvider)
-  await ctx.plugin(PublicEvidenceProvider)
+  await ctx.plugin(Provider)
   await ctx.plugin(RetrievalAgentService)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
@@ -853,6 +998,65 @@ describe('public knowledge-state acceptance A1-A8', () => {
       expect(createTicketResultCollection(ctx.retrievalAgent.current(agent)).tickets.map(ticket => ticket.displayId)).toEqual(['TKT-2'])
     } finally { await ctx.fiber.dispose() }
   })
+  it('A7 restarts retrieval with the merged query and confirmed conditions when the snapshot expires mid-session', async () => {
+    const { ctx, agent, message } = await publicSetup('帮我找副卡工单', ExpiringSnapshotProvider)
+    try {
+      await message('只看上海的工单，重点核对解绑后的同步处理', 2)
+      const confirmed = ctx.retrievalAgent.current(agent)
+      expect(confirmed.query.spec.filters).toContainEqual({ field: 'region', op: 'eq', value: '上海' })
+      ;(ctx.ticketRetrievalProvider as unknown as ExpiringSnapshotProvider).expired = true
+
+      const reply = await message('日期范围是 2026-07-01 到 2026-07-31，其他条件不变', 3)
+      const restarted = ctx.retrievalAgent.current(agent)
+      expect(restarted.retrievalId).not.toBe(confirmed.retrievalId)
+      expect(restarted.termination).not.toBe('snapshot_invalid')
+      expect(restarted.query.original).toContain('帮我找副卡工单')
+      expect(restarted.query.original).toContain('日期范围是 2026-07-01 到 2026-07-31')
+      expect(restarted.query.confirmedConstraints).toContainEqual({ field: 'region', op: 'eq', value: '上海' })
+      const createdRange = restarted.query.confirmedConstraints.filter(filter => filter.field === 'createdAt')
+      expect(createdRange.map(filter => filter.op).sort()).toEqual(['gte', 'lte'])
+      expect(new Date(createdRange.find(filter => filter.op === 'gte')!.value).getTime())
+        .toBeLessThan(Date.UTC(2026, 6, 15))
+      expect(new Date(createdRange.find(filter => filter.op === 'lte')!.value).getTime())
+        .toBeGreaterThan(Date.UTC(2026, 6, 15))
+      expect(restarted.candidates.map(candidate => candidate.displayId)).toEqual(['TKT-2'])
+      const replayed = ctx.retrievalAgent.current(sessionAgent(agent.session))
+      expect(replayed.retrievalId).toBe(restarted.retrievalId)
+      expect(replayed.query.confirmedConstraints).toContainEqual({ field: 'region', op: 'eq', value: '上海' })
+      expect(JSON.stringify(reply)).toContain('<ticket_knowledge_context>')
+
+      // 快照失效后明确的“新任务”不再被旧快照挡住，也不会并入原查询。
+      await message('新任务：查找宽带故障工单', 4)
+      const fresh = ctx.retrievalAgent.current(agent)
+      expect(fresh.retrievalId).not.toBe(restarted.retrievalId)
+      expect(fresh.termination).not.toBe('snapshot_invalid')
+      expect(fresh.query.original).toContain('宽带故障')
+      expect(fresh.query.original).not.toContain('帮我找副卡工单')
+    } finally { await ctx.fiber.dispose() }
+  })
+  it('A7 restarts retrieval from user input when a restored session replays an expired snapshot', async () => {
+    const { ctx, agent, message } = await publicSetup('帮我找副卡工单', ExpiringSnapshotProvider)
+    try {
+      await message('只看上海的工单，重点核对解绑后的同步处理', 2)
+      const confirmed = ctx.retrievalAgent.current(agent)
+      ;(ctx.ticketRetrievalProvider as unknown as ExpiringSnapshotProvider).expired = true
+
+      const replayed = sessionAgent(agent.session)
+      const direct = createUserMessage({ content: [{ type: 'text', text: '日期范围是 2026-07-01 到 2026-07-31，其他条件不变' }], source: { kind: 'user' } })
+      const reply = await agentEvents(ctx, replayed).waterfall('agent/pre-step',
+        { messages: [direct], turn: 3, step: 1, signal: SIGNAL },
+        () => Promise.resolve({ kind: 'enter' as const, messages: [direct] }))
+
+      const restarted = ctx.retrievalAgent.current(replayed)
+      expect(restarted.retrievalId).not.toBe(confirmed.retrievalId)
+      expect(restarted.termination).not.toBe('snapshot_invalid')
+      expect(restarted.query.original).toContain('帮我找副卡工单')
+      expect(restarted.query.original).toContain('日期范围是 2026-07-01 到 2026-07-31')
+      expect(restarted.query.confirmedConstraints).toContainEqual({ field: 'region', op: 'eq', value: '上海' })
+      expect(restarted.candidates.map(candidate => candidate.displayId)).toEqual(['TKT-2'])
+      expect(JSON.stringify(reply)).toContain('<ticket_knowledge_context>')
+    } finally { await ctx.fiber.dispose() }
+  })
   it('A5 recognizes cancellation and an explicit new task during active retrieval', async () => {
     const { ctx, agent, message } = await publicSetup()
     try {
@@ -892,9 +1096,39 @@ describe('public knowledge-state acceptance A1-A8', () => {
       expect(ctx.retrievalAgent.current(agent).task.countPolicy).toBe('adaptive')
       expect(ctx.retrievalAgent.current(agent).query.contract?.resultPolicy).toBe('adaptive_top_k')
       expect((await decide({ kind: 'finish', reason: 'satisfied', explanation: '此解绑案例有参考价值。' }, [accept('c2')])).isError).toBe(false)
-      expect(createTicketResultCollection(ctx.retrievalAgent.current(agent)).undeterminedCandidates?.map(ticket => ticket.displayId)).toEqual(['TKT-1'])
+      expect(createTicketResultCollection(ctx.retrievalAgent.current(agent))).not.toHaveProperty('undeterminedCandidates')
+      expect(ctx.retrievalAgent.current(agent).candidates.map(ticket => ticket.displayId)).toContain('TKT-1')
     } finally { await ctx.fiber.dispose() }
   })
+  it('A5 reopens a finished task for feedback without retaining its previous confirmation or replacing its identity', async () => {
+    const { ctx, agent, message, decide } = await publicSetup()
+    try {
+      expect((await decide({ kind: 'finish', reason: 'satisfied', explanation: '原摘要符合要求。' }, [accept('c2')])).isError).toBe(false)
+      const before = ctx.retrievalAgent.current(agent)
+      const originalResult = createTicketResultCollection(before)
+      await message('这条不相关，请重新核对解绑后的共享问题', 2)
+      const reviewing = ctx.retrievalAgent.current(agent)
+      expect(reviewing.retrievalId).toBe(before.retrievalId)
+      expect(reviewing.phase).toBe('assessed')
+      expect(reviewing.selectedCandidateRefs).toEqual([])
+      expect(reviewing.excludedCandidateRefs).toEqual([])
+      expect(reviewing.frozenEvidence).toBeUndefined()
+      expect(reviewing.stopExplanation).toBeUndefined()
+      expect(reviewing.userFeedback?.at(-1)?.text).toContain('这条不相关')
+      expect(() => createTicketResultCollection(reviewing)).toThrow(/尚未结束/u)
+      expect((await decide({ kind: 'finish', reason: 'satisfied', explanation: '结合摘要复核后保留原判断。' }, [accept('c2')])).isError).toBe(false)
+      const after = ctx.retrievalAgent.current(agent)
+      const revised = createTicketResultCollection(after)
+      expect(revised.tickets.map(ticket => ticket.displayId)).toEqual(['TKT-2'])
+      expect(revised.resultRevision).not.toBe(originalResult.resultRevision)
+      expect(originalResult.tickets.map(ticket => ticket.displayId)).toEqual(['TKT-2'])
+      expect(ctx.retrievalAgent.current(sessionAgent(agent.session))).toMatchObject({
+        retrievalId: before.retrievalId, selectedCandidateRefs: after.selectedCandidateRefs,
+        frozenEvidence: after.frozenEvidence,
+      })
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('A2 filters out historical candidates from final collection after condition narrowing', async () => {
     const { ctx, agent, decide } = await publicSetup()
     try {
@@ -944,7 +1178,7 @@ describe('public knowledge-state acceptance A1-A8', () => {
       expect((await decide({ kind: 'finish', reason: 'satisfied', explanation: '只有上海解绑案例匹配。' }, [accept('c2'), { candidate_alias: 'c1', verdict: 'exclude', evidence_aliases: ['c1'], reason: '北京共享场景没有解绑现象。' }])).isError).toBe(false)
       const collection = createTicketResultCollection(ctx.retrievalAgent.current(agent))
       expect(collection.tickets.map(ticket => ticket.displayId)).toEqual(['TKT-2'])
-      expect(collection.undeterminedCandidates).toEqual([])
+      expect(collection).not.toHaveProperty('undeterminedCandidates')
     } finally { await ctx.fiber.dispose() }
   })
   it('A4 updates controlled evidence, frozen references and replay in the same state', async () => {
@@ -970,7 +1204,8 @@ describe('public knowledge-state acceptance A1-A8', () => {
       await agentEvents(ctx, agent).serial('agent/turn-stopping', { turn: 1, signal: SIGNAL })
       const collection = createTicketResultCollection(ctx.retrievalAgent.current(agent))
       expect(collection.tickets).toEqual([])
-      expect(collection.undeterminedCandidates?.map(ticket => ticket.displayId)).toEqual(['TKT-1', 'TKT-2'])
+      expect(collection).not.toHaveProperty('undeterminedCandidates')
+      expect(ctx.retrievalAgent.current(agent).candidates.map(ticket => ticket.displayId)).toEqual(['TKT-1', 'TKT-2'])
       expect(collection.explanation).toContain('未提交')
     } finally { await ctx.fiber.dispose() }
   })
@@ -983,7 +1218,21 @@ describe('public knowledge-state acceptance A1-A8', () => {
       const state = ctx.retrievalAgent.current(agent)
       expect(state.termination).toBe('permission_blocked')
       expect(createTicketResultCollection(state).tickets).toEqual([])
-      expect(createTicketResultCollection(state).undeterminedCandidates).toEqual([])
+      expect(createTicketResultCollection(state)).not.toHaveProperty('undeterminedCandidates')
+    } finally { await ctx.fiber.dispose() }
+  })
+  it('A7 keeps a ranking deadline distinguishable instead of masking it as a generic source failure', async () => {
+    const { ctx, agent } = await publicSetup('帮我找副卡工单', TimingOutTicketProvider)
+    try {
+      const state = ctx.retrievalAgent.current(agent)
+      expect(state).toMatchObject({ phase: 'stopped', termination: 'backend_error',
+        stopErrorCode: 'TIMEOUT', stopExplanation: 'RAG 排名请求超时。' })
+      expect(createTicketResultCollection(state).explanation).toBe('RAG 排名请求超时。')
+      expect(readRetrievalSessionEvents(agent.session))
+        .toContainEqual(expect.objectContaining({ type: 'retrieval/stopped',
+          data: expect.objectContaining({ reason: 'backend_error', errorCode: 'TIMEOUT' }) }))
+      const replayed = ctx.retrievalAgent.current(sessionAgent(agent.session))
+      expect(replayed).toMatchObject({ stopErrorCode: 'TIMEOUT', stopExplanation: 'RAG 排名请求超时。' })
     } finally { await ctx.fiber.dispose() }
   })
 })
@@ -1012,6 +1261,31 @@ class KnowledgeLoopAdapter extends LlmAdapter {
     const block = { type: 'tool-call' as const, id: CallId(`loop-${turn}`), name: 'ticket_decide', arguments: JSON.stringify(args) }
     yield { type: 'block-start', index: 0, blockType: 'tool-call' }
     yield { type: 'block-end', index: 0, block }
+    yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 60 } }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  }
+}
+
+class PersistentRepairAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = []
+  constructor(private readonly repairTurns: number, private readonly jumpMsPerTurn = 0) { super() }
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options)
+    const strings = (value: unknown): string[] => typeof value === 'string' ? [value] : Array.isArray(value)
+      ? value.flatMap(strings) : value !== null && typeof value === 'object' ? Object.values(value).flatMap(strings) : []
+    const text = [...strings(options.messages), options.system ?? ''].join('\n')
+    const headers = [...text.matchAll(/<ticket_knowledge_context>(.*?)<\/ticket_knowledge_context>/gu)].map(match => JSON.parse(match[1]!))
+    const state_id = headers.findLast(header => header.knowledgeState?.stateId !== undefined)?.knowledgeState.stateId
+    if (typeof state_id !== 'string') throw new Error('Model did not receive a current knowledge-state token')
+    const turn = this.requests.length
+    if (this.jumpMsPerTurn > 0) vi.setSystemTime(Date.now() + this.jumpMsPerTurn)
+    const args = turn > this.repairTurns
+      ? { state_id, judgments: [accept('c2')], semantic_gaps: [],
+        action: { kind: 'finish', reason: 'satisfied', explanation: '可见候选摘要已满足任务。' } }
+      : { state_id, judgments: [], semantic_gaps: [],
+        action: { kind: 'search', mode: 'keyword', changes: [{ type: 'add_terms', terms: [`缓存${turn}`] }] } }
+    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`persist-${turn}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
     yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 60 } }
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
@@ -1060,6 +1334,71 @@ describe('actual DSH message and ToolRuntime loop with a deterministic model ada
       expect(final.promotedEvidence[0]?.readers).toContain('model')
       expect(final.budget.failedToolCalls).toBe(0)
       expect(final.budget.wallClockElapsedMs).toBeLessThan(10_000)
+    } finally { vi.useRealTimers(); if (dispose !== undefined) await dispose(); await ctx.fiber.dispose() }
+  })
+
+  it('keeps admitting model steps beyond the legacy round cap until the task is semantically finished', async () => {
+    const ctx = new Context()
+    const toolErrors: unknown[] = []
+    let dispose: (() => Promise<void>) | undefined
+    try {
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(LlmRuntime)
+      await ctx.plugin(ToolRuntime)
+      ctx.on('tools/result', (_exec, result) => { if (result.isError) toolErrors.push(result.content) })
+      await ctx.plugin(SystemPrompt)
+      await ctx.plugin(TokenMeter)
+      await ctx.plugin(StubPrincipalProvider)
+      await ctx.plugin(UnionTicketProvider)
+      await ctx.plugin(RetrievalAgentService)
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
+      installRetrievalTools(ctx, ctx.retrievalAgent)
+      installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
+      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      const adapter = new PersistentRepairAdapter(10)
+      ctx.llm.registerAdapter(['persistent-repair'], adapter)
+      const handle = await ctx.agents.create({ sessionId: SessionId('persistent-repair-loop'), agentOptions: { provider: 'persistent-repair', model: 'deterministic-fixture' } })
+      dispose = handle.dispose
+      handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: '帮我找副卡解绑的工单' }], source: { kind: 'user' } }))
+      await handle.agent.whenIdle()
+
+      const final = ctx.retrievalAgent.current(handle.agent)
+      expect(adapter.requests, JSON.stringify(toolErrors)).toHaveLength(11)
+      expect(final.termination).toBe('top_k_accepted')
+      expect(final.budget).toMatchObject({ modelStepsUsed: 11, searchesUsed: 11 })
+    } finally { if (dispose !== undefined) await dispose(); await ctx.fiber.dispose() }
+  })
+
+  it('keeps admitting model requests beyond the legacy wall-clock cap while still measuring elapsed time', async () => {
+    const ctx = new Context()
+    let dispose: (() => Promise<void>) | undefined
+    try {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(LlmRuntime)
+      await ctx.plugin(ToolRuntime)
+      await ctx.plugin(SystemPrompt)
+      await ctx.plugin(TokenMeter)
+      await ctx.plugin(StubPrincipalProvider)
+      await ctx.plugin(UnionTicketProvider)
+      await ctx.plugin(RetrievalAgentService)
+      installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
+      installRetrievalTools(ctx, ctx.retrievalAgent)
+      installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
+      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      const adapter = new PersistentRepairAdapter(2, 61_000)
+      ctx.llm.registerAdapter(['slow-repair'], adapter)
+      const handle = await ctx.agents.create({ sessionId: SessionId('wall-clock-observational-loop'), agentOptions: { provider: 'slow-repair', model: 'deterministic-fixture' } })
+      dispose = handle.dispose
+      handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: '帮我找副卡解绑的工单' }], source: { kind: 'user' } }))
+      await handle.agent.whenIdle()
+
+      const final = ctx.retrievalAgent.current(handle.agent)
+      expect(adapter.requests).toHaveLength(3)
+      expect(final.termination).toBe('top_k_accepted')
+      expect(final.budget.wallClockElapsedMs).toBeGreaterThanOrEqual(122_000)
     } finally { vi.useRealTimers(); if (dispose !== undefined) await dispose(); await ctx.fiber.dispose() }
   })
 })

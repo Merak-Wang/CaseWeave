@@ -128,6 +128,7 @@ export class ModelServiceClient implements RetrievalModelGateway {
     if (input.texts.length > ready.limits.maxBatchSize) throw new ModelServiceClientError('BATCH_LIMIT', 'Embedding 批次超过服务上限。', false)
     const requestId = randomUUID()
     const body: EmbedTextsParams = {
+      ...(input.requireCompleteInput === undefined ? {} : { requireCompleteInput: input.requireCompleteInput }),
       protocolVersion: MODEL_SERVICE_PROTOCOL_VERSION,
       requestId,
       model: this.#embeddingModel,
@@ -139,6 +140,8 @@ export class ModelServiceClient implements RetrievalModelGateway {
       ...(input.deadlineMs === undefined ? {} : { deadlineMs: input.deadlineMs }),
     }
     const response = await this.#request<EmbedTextsResponse>('/v1/embeddings', body, input.signal, input.deadlineMs ?? this.#defaultDeadlineMs)
+    if (input.requireCompleteInput && response.inputComplete !== true) throw new ModelServiceClientError('PROTOCOL_MISMATCH', '模型未证明输入已完整嵌入。', false)
+    if (response.timings && Object.values(response.timings).every(value => Number.isFinite(value) && value >= 0)) input.onTiming?.(response.timings)
     if (response.protocolVersion !== MODEL_SERVICE_PROTOCOL_VERSION || response.requestId !== requestId
       || response.model !== this.#embeddingModel || response.dimensions !== this.#embeddingDimensions
       || (this.#embeddingRevision !== undefined && response.revision !== this.#embeddingRevision)

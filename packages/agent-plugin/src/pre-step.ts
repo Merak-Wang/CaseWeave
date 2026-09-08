@@ -14,13 +14,16 @@ const PLUGIN_NAME = 'retrieval-agent'
 const SNAPSHOT_SECTION = 'retrieval-agent:state'
 
 export interface AutomaticRetrievalApplication {
+  readonly coordinator?: { isExpert(agent: Agent): boolean }
+  receiveUserInput?(agent: Agent, text: string, operationId: string): Promise<void>
+  driveAllowed?(agent: Agent): boolean
   currentOrUndefined(agent: Agent): RetrievalState | undefined
   start(agent: Agent, request: TicketRetrievalRequest, signal?: AbortSignal): Promise<RetrievalState>
   resumeClarification(agent: Agent, answer: RetrievalClarificationAnswer, signal?: AbortSignal): Promise<RetrievalState>
   applyUserFeedback(agent: Agent, answer: RetrievalClarificationAnswer, signal?: AbortSignal): Promise<RetrievalState>
   cancel(agent: Agent): Promise<RetrievalState>
   ensureModelAccess(agent: Agent, signal?: AbortSignal): Promise<RetrievalState | undefined>
-  projectContext(agent: Agent): EvidenceContextSelection
+  projectContext(agent: Agent): Promise<EvidenceContextSelection>
 }
 
 export interface AutomaticRetrievalStartConfig {
@@ -47,29 +50,37 @@ function originalQuery(messages: readonly UserMessage[]): string | undefined {
   return query.trim().length === 0 ? undefined : query
 }
 
-function insertAfterLastDirectUser(
+/**
+ * 在最后一条 direct-user 输入处切开已准入消息：head 在耗时检索前落库，
+ * 快照随后追加，tail（如下游上下文）保持原有相对顺序。
+ */
+function splitAfterLastDirectUser(
   messages: readonly UserMessage[],
-  context: UserMessage,
-): UserMessage[] {
+): { head: UserMessage[]; tail: UserMessage[] } {
   let lastDirect = -1
   for (let index = 0; index < messages.length; index += 1) {
     if (messages[index]?.source.kind === 'user') lastDirect = index
   }
-  if (lastDirect < 0) return [...messages, context]
-  return [...messages.slice(0, lastDirect + 1), context, ...messages.slice(lastDirect + 1)]
+  return {
+    head: [...messages.slice(0, lastDirect + 1)],
+    tail: [...messages.slice(lastDirect + 1)],
+  }
 }
 
 /**
- * DSH 会把已准入但消息为空的第一步视为无需 LLM 的已完成轮次。
- * 因此这里主动持久化已经准入的消息，避免走公开快路径时从 Session 表面丢失用户 query 或后续持久上下文。
+ * DSH 会把已准入但消息为空的第一步视为无需 LLM 的已完成轮次，因此无模型分支在返回前
+ * 主动持久化消息；耗时分支之前的提前落库则保证长检索期间用户输入对 Session/界面可见。
  */
-function persistCompletedPreStep(agent: Agent, messages: readonly UserMessage[]): void {
+function persistAcceptedMessages(agent: Agent, messages: readonly UserMessage[]): void {
   for (const message of messages) {
     agent.session.append('user/message', message, { surfaceOp: 'append' })
   }
 }
 
-/** 在第一次模型请求前用已接受的 direct-user 输入启动检索，并把持久化状态快照追加到同一次请求。 */
+/**
+ * 在第一次模型请求前用已接受的 direct-user 输入启动检索，并把持久化状态快照追加到同一次请求。
+ * 用户输入在进入耗时的首轮分析与排名之前落库；返回给 DSH 的决定只携带尚未记录的增量消息。
+ */
 export function installAutomaticRetrievalStart(
   ctx: Context,
   application: AutomaticRetrievalApplication,
@@ -81,31 +92,49 @@ export function installAutomaticRetrievalStart(
   ): Promise<PreStepDecision> => {
     const decision = await next()
     if (decision.kind === 'reject' || signal.aborted) return decision
+    if (application.coordinator?.isExpert(agent)) return decision
+
+    const direct = acceptedDirectMessages(proposed, decision.messages)
+    const query = originalQuery(direct)
+
+    if (query !== undefined && application.receiveUserInput) {
+      await application.receiveUserInput(agent, query, String(direct.at(-1)!.id))
+      persistAcceptedMessages(agent, decision.messages)
+      return { kind: 'enter', messages: [] }
+    }
+    if (application.driveAllowed && !application.driveAllowed(agent)) return { kind: 'reject' }
 
     const restored = application.currentOrUndefined(agent)?.accessValidation === 'required'
     const authorized = await application.ensureModelAccess(agent, signal)
-    if (restored && authorized?.phase === 'stopped' && ['permission_blocked', 'snapshot_invalid', 'backend_error'].includes(authorized.termination)) {
-      persistCompletedPreStep(agent, decision.messages)
+    // 撤销与暂时不可用维持原边界；快照失效只有在没有新的用户输入时才结束本轮。
+    // 有补充时落到下方重启检索，不再把输入吞进一个注定失败的重新授权。
+    if (restored === true && authorized !== undefined && authorized.phase === 'stopped'
+      && (['permission_blocked', 'backend_error'].includes(authorized.termination)
+        || (authorized.termination === 'snapshot_invalid' && query === undefined))) {
+      persistAcceptedMessages(agent, decision.messages)
       return { kind: 'enter', messages: [] }
     }
-    const direct = acceptedDirectMessages(proposed, decision.messages)
-    const query = originalQuery(direct)
     if (query === undefined) return decision
+
+    // 用户输入先落库再进入 spaCy 分析与首轮 Hybrid 排名；长检索不再把消息藏到失败之后。
+    const { head, tail } = splitAfterLastDirectUser(decision.messages)
+    persistAcceptedMessages(agent, head)
 
     const current = application.currentOrUndefined(agent)
     const active = current !== undefined && current.phase !== 'stopped'
     if (active && /^(?:取消|停止|算了|cancel|stop)[。.!！\s]*$/iu.test(query.trim())) {
       await application.cancel(agent)
-      persistCompletedPreStep(agent, decision.messages)
+      persistAcceptedMessages(agent, tail)
       return { kind: 'enter', messages: [] }
     }
 
     // 在首次模型请求之前完成 spaCy 分析和固定 Hybrid 计划，模型只能在看到首轮知识状态后决定是否修复查询。
     // An explicit new-task marker ends the active task; ordinary free-form replies
     // return to the original state for semantic interpretation by the model.
-    const newTask = active && /^(?:新任务|另一个任务|重新检索|new task)\s*[:：]?/iu.test(query.trim())
-    if (newTask) await application.cancel(agent)
-    const feedback = active && !newTask
+    const newTask = /^(?:新任务|另一个任务|重新检索|new task)\s*[:：]?/iu.test(query.trim())
+    if (active && newTask) await application.cancel(agent)
+    const feedback = current !== undefined && !newTask
+      && !['permission_blocked', 'snapshot_invalid', 'backend_error'].includes(current.termination)
       ? {
           accepted: true, answer: query,
           ...(() => {
@@ -116,19 +145,40 @@ export function installAutomaticRetrievalStart(
             }
           })(),
         } : undefined
-    const state = feedback === undefined
-      ? await application.start(agent, await buildFastTicketRequest(query, { analyzer: config.analyzer, signal }), signal)
-      : current?.termination === 'needs_clarification'
+
+    // 快照已失效时原查询与已确认条件并入本次补充，同一轮完成重启检索。
+    const restartAfterExpiry = async (expired: RetrievalState): Promise<RetrievalState> => {
+      const original = expired.query.original.trim()
+      const merged = original.length > 0 && `${original}\n\n${query}`.length <= 2_000 ? `${original}\n\n${query}` : query
+      return await application.start(agent, await buildFastTicketRequest(merged, {
+        analyzer: config.analyzer,
+        signal,
+        ...(expired.query.confirmedConstraints.length === 0 ? {} : { inheritedFilters: expired.query.confirmedConstraints }),
+      }), signal)
+    }
+
+    let state: RetrievalState
+    if (feedback !== undefined) {
+      state = current?.termination === 'needs_clarification'
         ? await application.resumeClarification(agent, feedback, signal)
         : await application.applyUserFeedback(agent, feedback, signal)
-    if (signal.aborted) return decision
+      // 反馈路径上的快照失效同样不吞掉输入：用合并查询重启。
+      if (state.phase === 'stopped' && state.termination === 'snapshot_invalid') {
+        state = await restartAfterExpiry(state)
+      }
+    } else {
+      state = current !== undefined && current.termination === 'snapshot_invalid' && !newTask
+        ? await restartAfterExpiry(current)
+        : await application.start(agent, await buildFastTicketRequest(query, { analyzer: config.analyzer, signal }), signal)
+    }
+    if (signal.aborted) return { kind: 'enter', messages: [] }
 
     if (state.phase === 'stopped' && ['permission_blocked', 'snapshot_invalid', 'backend_error'].includes(state.termination)) {
-      persistCompletedPreStep(agent, decision.messages)
+      persistAcceptedMessages(agent, tail)
       return { kind: 'enter', messages: [] }
     }
 
-    const selection = application.projectContext(agent)
+    const selection = await application.projectContext(agent)
     const snapshot = createUserMessage({
       content: [{ type: 'text', text: selection.rendered }],
       source: {
@@ -138,14 +188,13 @@ export function installAutomaticRetrievalStart(
         sections: [{ name: SNAPSHOT_SECTION, text: selection.rendered }],
       },
     })
-    const messages = insertAfterLastDirectUser(decision.messages, snapshot)
     if (state.phase === 'stopped') {
-      persistCompletedPreStep(agent, messages)
+      persistAcceptedMessages(agent, [snapshot, ...tail])
       return { kind: 'enter', messages: [] }
     }
     return {
       kind: 'enter',
-      messages,
+      messages: [snapshot, ...tail],
     }
   }, { prepend: true })
 }

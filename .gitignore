@@ -1,29 +1,70 @@
+# JavaScript dependencies and generated build/test output.
 node_modules/
 lib/
 dist/
 coverage/
-.tmp/
-.cache/
-.env
-.env.*
-!.env.example
 *.tsbuildinfo
-*.tgz
-*.log
+
+# Python environments and caches.
 .venv/
 __pycache__/
+*.py[cod]
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local configuration, credentials and persistent sessions.
+# Keep the public configuration template tracked.
+.env
+.env.*
+!.env.example
+.credentials.yaml
+.credentials.yml
+.credentials.json
+sessions/
+artifacts/private/
+
+# Runtime output, evaluation records and temporary acceptance checkouts.
+.tmp/
+.cache/
+output/
+*.log
 .inspect_ai/
 eval-logs/
-artifacts/private/
-models/
 .playwright-cli/
-.vscode/
+
+# Model weights and downloaded/preprocessed data are reproduced from manifests.
+# Keep data/README.md, manifests, evaluation definitions and source fixtures.
+models/
 data/raw/deepseek-esft/*.jsonl
 data/raw/deepseek-esft/*.part
 data/tickets/esft/*.jsonl
 data/tickets/esft/*.part
 data/evals/esft-summary-v1/tickets.jsonl
 data/evals/esft-summary-v1/*.part
+
+# Confidential Wiki provenance belongs to a separate, unversioned audit directory.
+wiki/.private/
+wiki/provenance/
+wiki/sources/
+wiki/sources.json
+wiki/releases/enterprise-retrieval-v1/
+wiki/.publish.lock
+wiki/.staging/
+
+# Local bundles and exported container images; this does not alter Git history.
+/package.zip
+*.tgz
+*.tar
+*.tar.gz
+*.tar.zst
+
+# Editor and operating-system files.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

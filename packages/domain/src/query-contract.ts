@@ -18,8 +18,9 @@ export function fallbackQueryContract(spec: TicketRetrievalSpec): TicketQueryCon
     constraints: spec.filters,
     userRequirements: [
       ...spec.filters.map(filter => ({ text: spec.originalQuery, status: 'compiled' as const, filters: [filter] })),
+      // 与编译器契约一致：待确认需求的身份是用户原文，而不是带原因后缀的歧义文本。
       ...spec.ambiguities.filter(ambiguity => ambiguity.kind !== 'quantity').map(ambiguity => ({
-        text: ambiguity.text, status: 'unresolved' as const, filters: [], reason: '尚未编译为可执行条件',
+        text: ambiguity.text.split('：')[0]!, status: 'unresolved' as const, filters: [], reason: '尚未编译为可执行条件',
       })),
     ],
     ...(spec.requiredConcepts === undefined || spec.requiredConcepts.length === 0

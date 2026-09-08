@@ -82,12 +82,18 @@ export const ticketCandidateDefinition: ConversationNodeDefinition<CandidateConv
   },
   buildViewNode: (context): ChatConversationViewNode | null => {
     if (context.start === undefined || context.state === undefined) return null
-    const data = projectTicketCandidateNode(context.state.events, context.state.retrievalId)
+    let data: ReturnType<typeof projectTicketCandidateNode>
+    try {
+      data = projectTicketCandidateNode(context.state.events, context.state.retrievalId)
+    } catch {
+      // A corrupted event chain must only hide its own node, never fail the session projection.
+      return null
+    }
     const phase: RetrievalPresentationPhase = data.result === undefined ? 'candidates' : 'result'
     const anchor = presentationMatch(context.matches, phase)
-    // Pre-step domain events intentionally arrive before the visible query.
-    // Publish nothing until Harness records the post-query candidate boundary;
-    // likewise hide terminal data until every parallel tool row has drained.
+    // The visible query is persisted before pre-step retrieval starts, but the
+    // candidate node publishes nothing until Harness records the post-query
+    // candidate boundary; likewise hide terminal data until every parallel tool row has drained.
     if (anchor === undefined) return null
     return {
       key: context.key,

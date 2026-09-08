@@ -4,6 +4,7 @@ import type {
   TicketCandidateRef,
   TicketEvidenceId,
 } from './brand.js'
+import type { RetrievalErrorCode } from './errors.js'
 import type { TicketSearchStage } from './ranking.js'
 import type {
   TicketCandidate,
@@ -57,6 +58,8 @@ export interface RetrievalKnowledgeAssessment {
 
 /** A judgment is supported only by evidence actually delivered to this model. */
 export interface RetrievalCandidateJudgment {
+  readonly adoptedFindingId?: string
+  readonly conflictResolution?: { readonly kind: import('./agent-context.js').DisagreementKind; readonly reason: string; readonly evidenceRefs: readonly string[] }
   readonly candidateRef: TicketCandidateRef
   readonly verdict: 'accept' | 'exclude' | 'undetermined'
   readonly evidenceRefs: readonly string[]
@@ -70,9 +73,13 @@ export interface RetrievalDecision {
   readonly gaps: readonly RetrievalGap[]
   readonly action:
     | { readonly kind: 'search'; readonly mode?: 'keyword' | 'dense'; readonly delta?: TicketQueryDelta; readonly continueRanking?: boolean }
-    | { readonly kind: 'inspect'; readonly candidateRefs?: readonly TicketCandidateRef[]; readonly fields?: readonly TicketEvidenceField[]; readonly nextWindow?: boolean; readonly tokenBudget?: number }
+    | { readonly kind: 'inspect'; readonly candidateRefs?: readonly TicketCandidateRef[]; readonly fields?: readonly TicketEvidenceField[]; readonly nextWindow?: boolean; readonly tokenBudget?: number; readonly position?: import('./agent-context.js').EvidencePosition; readonly level?: 'L2' | 'L3'; readonly history?: boolean }
+    | { readonly kind: 'delegate'; readonly assignments: readonly import('./agent-context.js').ExpertAssignment[] }
     | { readonly kind: 'clarify'; readonly question: string; readonly candidateRefs: readonly TicketCandidateRef[]; readonly evidenceRefs: readonly string[]; readonly facet?: string; readonly options?: readonly string[] }
-    | { readonly kind: 'finish'; readonly reason?: 'satisfied' | 'no_result' | 'incomplete'; readonly explanation: string }
+    | { readonly kind: 'finish'; readonly reason?: 'satisfied' | 'no_result' | 'incomplete'; readonly explanation: string;
+        readonly coverage?: { readonly checked: readonly string[]; readonly remaining: readonly string[];
+          readonly nextAction: string; readonly nextActionValue: 'useful' | 'low' | 'none';
+          readonly expertReviews?: readonly { readonly taskId: string; readonly reason: string; readonly evidenceRefs: readonly string[] }[] } }
 }
 
 /** One immutable ranking observation; active ranking is derived across observations. */
@@ -102,9 +109,10 @@ export interface RetrievalAllowedAction {
 }
 
 export interface RetrievalBudgetState {
-  readonly maxRounds: number
+  /** Cross-action Provider page ceiling. */
   readonly maxSearches: number
-  readonly maxLatencyMs: number
+  readonly maxConsecutiveToolErrors?: number
+  readonly consecutiveToolErrors?: number
   readonly searchesUsed: number
   /** Actual conversation-model requests admitted by the Harness. */
   readonly modelStepsUsed: number
@@ -115,6 +123,7 @@ export interface RetrievalBudgetState {
   readonly wallClockElapsedMs: number
   readonly serializationBytes?: number
   readonly totalInputTokens?: number
+  readonly totalMeasuredInputTokens?: number
   readonly totalOutputTokens?: number
 }
 
@@ -135,6 +144,7 @@ export type RetrievalTermination =
   | 'needs_clarification'
   | 'partial'
   | 'budget_exhausted'
+  | 'capacity_exceeded'
   | 'permission_blocked'
   | 'backend_error'
   | 'snapshot_invalid'
@@ -183,13 +193,14 @@ export interface FrozenEvidencePack {
 /**
  * The only terminal product value. It is a deterministic collection, never a
  * model-authored natural-language answer. `tickets` contains the accepted
- * current candidates; valid candidates lacking a decision are separate.
+ * current candidates. Unjudged candidates belong only to the progress projection.
  */
 export interface TicketResultCollection {
   readonly type: 'ticket_collection'
-  readonly schemaVersion: 1
+  readonly schemaVersion: 2
   readonly retrievalId: RetrievalId
   readonly packId?: string
+  readonly resultRevision: string
   readonly query: string
   readonly target: TicketTaskTarget
   readonly snapshotShortId?: string
@@ -202,8 +213,7 @@ export interface TicketResultCollection {
   readonly resultMayBeIncomplete: boolean
   readonly nextPageAvailable: boolean
   readonly tickets: readonly TicketCandidate[]
-  /** Valid candidates that were not accepted or excluded; never confirmed results. */
-  readonly undeterminedCandidates?: readonly TicketCandidate[]
+  readonly judgments: readonly RetrievalCandidateJudgment[]
   readonly explanation?: string
   readonly evidence: readonly TicketEvidenceSegment[]
   readonly remainingGapKinds: readonly RetrievalGapKind[]
@@ -211,6 +221,17 @@ export interface TicketResultCollection {
 
 /** Complete domain state, reconstructable from versioned events. */
 export interface RetrievalState {
+  readonly projectionVersion?: 2
+  /** Increments for every accepted user update, including semantic feedback. */
+  readonly inputGeneration?: number
+  readonly contextManifests?: readonly import('./agent-context.js').ContextManifest[]
+  readonly knowledgeCatalog?: import('./agent-context.js').RetrievalKnowledgeCatalog
+  readonly expertTasks?: readonly import('./agent-context.js').ExpertTask[]
+  readonly expertConflicts?: readonly import('./agent-context.js').ExpertConflict[]
+  readonly sharedSearches?: readonly { readonly key: string; readonly spec: TicketRetrievalSpec; readonly page: TicketSearchPage; readonly inputGeneration: number }[]
+  readonly evidenceReadPosition?: import('./agent-context.js').EvidencePosition | undefined
+  readonly contextCandidateRefs?: readonly TicketCandidateRef[] | undefined
+  readonly searchProgress?: import('./provider.js').TicketSearchProgress | undefined
   readonly retrievalId: RetrievalId
   readonly stateId: RetrievalStateId
   readonly previousStateId?: RetrievalStateId
@@ -243,7 +264,9 @@ export interface RetrievalState {
   readonly measurementStateIds?: readonly RetrievalStateId[]
   readonly candidateWindowOffset?: number
   readonly evidenceWindowOffset?: number
-  readonly stopExplanation?: string
+  /** Preserved provider failure identity behind a stopped termination. */
+  readonly stopErrorCode?: RetrievalErrorCode | undefined
+  readonly stopExplanation?: string | undefined
   readonly userFeedback?: readonly { readonly text: string; readonly receivedAt: string }[]
   /** Waiting time is excluded from the online execution limit. */
   readonly executionClock?: { readonly waitingSince?: string; readonly totalWaitingMs: number }
@@ -284,6 +307,7 @@ export interface RetrievalStatePatch {
 }
 
 export interface EvidenceContextSelection {
+  readonly manifest?: import('./agent-context.js').ContextManifest
   readonly retrievalId: RetrievalId
   readonly stateId: RetrievalStateId
   readonly policyVersion: string
@@ -306,6 +330,8 @@ export interface CandidateExportReceipt {
   readonly fields: readonly string[]
   readonly contentSha256: string
   readonly auditId: string
+  /** Absent only on receipts created before versioned confirmation downloads. */
+  readonly resultRevision?: string
 }
 
 /** Durable metadata for an authorized on-demand detail read; ticket content is not persisted here. */
@@ -321,6 +347,11 @@ export interface CandidateDetailReadReceipt {
 
 /** Candidate node is a deterministic UI projection, never model-authored Markdown. */
 export interface TicketCandidateNode {
+  /** Bounded task snapshots carry authoritative totals; terminal arrays are fetched via dedicated APIs. */
+  readonly collectionWindow?: { readonly current: number; readonly history: number; readonly confirmed: number; readonly version: string; readonly limit: number }
+  readonly expertProgress?: readonly { readonly id: string; readonly domainId: string; readonly goal: string; readonly status: import('./agent-context.js').ExpertTask['status']; readonly findingCount: number; readonly failure?: string }[]
+  readonly openExpertConflicts?: number
+  readonly searchProgress?: import('./provider.js').TicketSearchProgress
   readonly retrievalId: RetrievalId
   readonly version: number
   readonly querySummary: string
@@ -336,6 +367,8 @@ export interface TicketCandidateNode {
   readonly normalizedQuery?: string
   readonly resultPolicy?: TicketQueryContract['resultPolicy']
   readonly fastQuery?: TicketQueryContract['fastQuery']
+  /** Current effective keyword terms; falls back to the immutable first-round plan. */
+  readonly keywordTerms?: readonly string[]
   readonly queryAmbiguities?: TicketQueryContract['ambiguities']
   readonly status: 'searching' | 'results' | 'empty' | 'partial' | 'snapshot_invalid' | 'permission_blocked' | 'error' | 'stopped'
   readonly candidates: readonly TicketCandidate[]

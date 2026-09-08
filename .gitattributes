@@ -1,0 +1,9 @@
+# Wiki releases and manifests are content-addressed. A Windows clone must not
+# rewrite their line endings (or the integrity check will reject the release).
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.zip binary

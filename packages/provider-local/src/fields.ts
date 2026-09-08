@@ -21,10 +21,16 @@ export const LEGACY_FIELD_CATALOG: readonly TicketFieldDescriptor[] = [
     filterOperators: [] as const, sensitivity: 'source_controlled' as const,
   })),
   { key: 'summary', label: '摘要', valueKind: 'text', accessLevel: 'L1', filterOperators: [], sensitivity: 'source_controlled' },
+  { key: 'source.raw_dialogue', label: '完整对话（按说话人和顺序）', valueKind: 'text', accessLevel: 'L3', filterOperators: [], sensitivity: 'source_controlled' },
 ]
 
 export function evidenceFieldValues(record: NormalizedTicketRecord, field: TicketEvidenceField): readonly string[] {
   switch (field) {
+    case 'source.raw_dialogue': {
+      const turns = record.rawSource?.payload.raw_dialogue
+      return Array.isArray(turns) ? turns.flatMap(turn => typeof turn === 'object' && turn !== null
+        && typeof turn.text === 'string' ? [JSON.stringify({ speaker: typeof turn.speaker === 'string' ? turn.speaker : 'unknown', text: turn.text })] : []) : []
+    }
     case 'summary': return [record.summary]
     case 'problemDescription': return record.problemDescription === undefined ? [] : [record.problemDescription]
     case 'conversationOrUpdates': return record.conversationOrUpdates

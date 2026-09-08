@@ -1,129 +1,45 @@
 import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
-import { createTicketResultCollection } from '@retrieval-agent/ticket-collection'
-import { InMemoryRetrievalEventJournal, RetrievalController } from '@retrieval-agent/domain'
 import { ModelServiceClient } from '@retrieval-agent/model-service-client'
-import { LocalTicketProvider, parseTicketDatasetJsonl, rankingDocuments } from '@retrieval-agent/provider-local'
+import { parseTicketDatasetJsonl, rankingDocuments } from '@retrieval-agent/provider-local'
 import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
 import { bundledDefaultTicketPaths } from '@retrieval-agent/bundle/startup'
 import { loadModelDependencyManifest } from './model-dependencies.mjs'
 
+// Actual inference/transport smoke. Semantic Agent judgments and Recall use the independent public acceptance driver.
 const rerankerEnabled = process.argv.includes('--reranker')
-const baseUrlArgument = process.argv.find(argument => argument.startsWith('--base-url='))
-const baseUrl = baseUrlArgument?.slice('--base-url='.length) ?? process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
-const modelManifest = (await loadModelDependencyManifest(process.cwd(), process.env)).roles
-const embeddingModel = modelManifest.embedding.model
-const embeddingRevision = modelManifest.embedding.revision
-const rerankerModel = modelManifest.reranker.model
-const rerankerRevision = modelManifest.reranker.revision
-
-const records = (await Promise.all(bundledDefaultTicketPaths()
-  .map(async path => parseTicketDatasetJsonl(await readFile(path, 'utf8'))))).flat()
-if (records.length !== 19_587) throw new Error(`expected 19,587 ESFT development records, received ${records.length}`)
-
-const gateway = new ModelServiceClient({
-  baseUrl,
-  embeddingModel,
-  embeddingRevision,
-  embeddingDimensions: modelManifest.embedding.dimensions,
-  ...(rerankerEnabled ? { rerankerModel, rerankerRevision } : {}),
-  defaultDeadlineMs: 180_000,
+const baseUrl = process.argv.find(a => a.startsWith('--base-url='))?.slice(11)
+  ?? process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
+const models = (await loadModelDependencyManifest(process.cwd(), process.env)).roles
+const gateway = new ModelServiceClient({ baseUrl, embeddingModel: models.embedding.model,
+  embeddingRevision: models.embedding.revision, embeddingDimensions: models.embedding.dimensions,
+  ...(rerankerEnabled ? { rerankerModel: models.reranker.model, rerankerRevision: models.reranker.revision } : {}) })
+const records = (await Promise.all(bundledDefaultTicketPaths().map(async p => parseTicketDatasetJsonl(await readFile(p, 'utf8'))))).flat()
+if (records.length !== 19_587) throw new Error('Expected 19,587 ESFT development records, received ' + records.length)
+const selected = [records.find(r => r.displayId === 'ESFT-SUMMARY-TRAIN-013309'), ...records.slice(0, 7)]
+if (selected.some(r => !r)) throw new Error('Pinned smoke source record is missing')
+// These are explicitly bounded excerpts; full indexing is exercised separately by db:prepare/db:verify.
+const documents = rankingDocuments(selected).map(d => {
+  const value = { ...d, body: [...d.body].slice(0, 360).join(''), metadata: '' }
+  return { ...value, contentHash: createHash('sha256').update(JSON.stringify(value)).digest('hex') }
 })
+const query = '跨域主副卡解绑，线上暂不支持办理'
 const ready = await gateway.ready()
-const ranker = new HybridRankingEngine({
-  baseUrl,
-  embeddingIdentity: { model: embeddingModel, revision: embeddingRevision, dimensions: modelManifest.embedding.dimensions },
-  ...(rerankerEnabled ? { rerankerIdentity: { model: rerankerModel, revision: rerankerRevision } } : {}),
-  modelDeadlineMs: 180_000,
-  rerankerEnabled,
-  rerankTopN: 8,
-})
-const prepared = await ranker.prepare(rankingDocuments(records))
-const now = new Date()
-const principal = {
-  tenantId: 'demo',
-  subjectId: 'development-admin',
-  entitlementVersion: 'development-admin-v1',
-  purpose: 'ticket_retrieval',
-  attributes: { group: ['admin'], region: ['cn'], role: ['administrator'], environment: ['development'] },
-  issuedAt: new Date(now.getTime() - 60_000).toISOString(),
-  expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+const vectors = await gateway.embed({ texts: [query, query], inputType: 'query' })
+if (vectors.length !== 2 || vectors.some(v => v.length !== 1024 || v.some(n => !Number.isFinite(n)))) throw new Error('Invalid real embedding response')
+if (vectors[0].some((v, i) => Math.abs(v - vectors[1][i]) > 1e-5)) throw new Error('Repeated query embeddings disagree')
+const ranker = new HybridRankingEngine({ baseUrl,
+  embeddingIdentity: { model: models.embedding.model, revision: models.embedding.revision, dimensions: 1024 },
+  ...(rerankerEnabled ? { rerankerIdentity: { model: models.reranker.model, revision: models.reranker.revision } } : {}),
+  rerankerEnabled, rerankTopN: 4 })
+const started = performance.now()
+const result = await ranker.rank(documents, { text: query, mode: 'hybrid', fastPath: false, semanticHints: [], excludedTerms: [] }, { maxScan: documents.length })
+if (!result.hits.length || result.hits.some(h => !documents.some(d => d.id === h.documentId) || !Number.isFinite(h.score))) throw new Error('Invalid real ranking result')
+for (const channel of ['keyword', 'vector', ...(rerankerEnabled ? ['reranker'] : [])]) {
+  if (!result.execution.channels.some(c => c.channel === channel)) throw new Error('Missing ' + channel + ' execution')
 }
-const provider = new LocalTicketProvider(records, { now: () => now, ranker, defaultMode: 'hybrid' })
-
-let serial = 0
-const checks = []
-for (const query of [
-  '主副卡解绑后仍共享流量',
-  '主副卡解绑后仍共享流量 补充背景 宽带',
-]) {
-  const journal = new InMemoryRetrievalEventJournal({ now: () => now, eventId: () => `real-model-event-${serial++}` })
-  const controller = new RetrievalController(provider, journal, undefined, {
-    now: () => now,
-    id: () => `real-model-domain-${serial++}`,
-    searchTopK: 8,
-  })
-  const started = performance.now()
-  let state = await controller.start(principal, {
-    target: 'ranked_cases', query, requestedCount: 8, countPolicy: 'adaptive',
-  })
-  const trace = state.lastPage?.trace
-  if (trace?.stage !== 'initial_hybrid' || trace.executedMode !== 'hybrid') throw new Error('initial search did not execute Hybrid')
-  for (const channel of ['keyword', 'vector']) {
-    if (!trace.channels.some(item => item.channel === channel)) throw new Error(`initial search missed ${channel} channel`)
-  }
-  if (rerankerEnabled && !trace.channels.some(item => item.channel === 'reranker')) throw new Error('reranker was enabled but not applied')
-  const expected = state.candidates.find(candidate => candidate.displayId === 'TKT-0029')
-  if (expected === undefined) throw new Error(`expected TKT-0029 in top 8 for query: ${query}`)
-  // This script validates the real Embedding/Reranker data plane, not Agent
-  // judgment quality. Use an explicit deterministic smoke assessment so the
-  // diagnostic cannot silently reintroduce the removed "count == sufficient"
-  // product rule.
-  state = await controller.assess(state, {
-    decision: 'accept_current_top_k',
-    selectedCandidateRefs: [expected.ref],
-    excludedCandidateRefs: [],
-    gaps: [],
-    nextAction: 'accept_current_top_k',
-    evaluator: 'model',
-  })
-  state = controller.freeze(state, state.selectedCandidateRefs)
-  if (state.phase !== 'stopped' || state.termination !== 'top_k_accepted') {
-    throw new Error('deterministic smoke assessment did not produce a structured collection')
-  }
-  const collection = createTicketResultCollection(state)
-  if (collection.type !== 'ticket_collection' || collection.tickets[0]?.displayId !== 'TKT-0029') {
-    throw new Error('terminal value is not the expected structured ticket collection')
-  }
-  checks.push({
-    query,
-    elapsedMs: Math.round(performance.now() - started),
-    topIds: state.candidates.map(candidate => candidate.displayId),
-    expectedRank: expected.rank,
-    channelElapsedMs: Object.fromEntries(trace.channels.map(channel => [channel.channel, Math.round(channel.elapsedMs)])),
-    warnings: state.lastPage?.warnings ?? [],
-    terminalType: collection.type,
-    terminalTicketIds: collection.tickets.map(ticket => ticket.displayId),
-  })
-}
-
-console.log(JSON.stringify({
-  recordCount: records.length,
-  modelService: {
-    protocolVersion: ready.protocolVersion,
-    serviceVersion: ready.serviceVersion,
-    device: ready.device,
-    models: ready.models.map(model => ({
-      kind: model.kind, model: model.model, revision: model.revision, dtype: model.dtype,
-      dimensions: model.dimensions, loaded: model.loaded,
-    })),
-  },
-  retrievalProfileVersion: ranker.profileVersion,
-  preparation: prepared,
-  rerankerEnabled,
-  evidenceLevel: 'real_model_provider_data_plane_smoke',
-  evaluatedPath: 'provider_and_ranking_with_deterministic_smoke_assessment',
-  productAgentModelMeasured: false,
-  productQualityConclusionAllowed: false,
-  checks,
-}, undefined, 2))
+console.log(JSON.stringify({ scope: '8 bounded real ESFT excerpts; actual embedding/ranking/reranker, no semantic Agent assessment',
+  productAgentModelMeasured: false, productQualityConclusionAllowed: false, totalSourceRecords: records.length,
+  sourceDisplayIds: selected.map(r => r.displayId), modelService: ready, repeatedEmbedding: 'passed',
+  elapsedMs: performance.now() - started, profileVersion: ranker.profileVersion, result }, null, 2))

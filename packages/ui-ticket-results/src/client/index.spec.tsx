@@ -4,6 +4,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('./CandidatePanel.js', () => ({ CandidatePanel: () => null }))
+vi.mock('./HeaderExport.js', () => ({ ProductHeaderExport: () => null }))
 vi.mock('./definition.js', () => ({ ticketCandidateDefinition: { kind: 'ticket-candidates' } }))
 
 import { apply } from './index.js'
@@ -23,6 +24,8 @@ describe('ticket-results client registration', () => {
     } as unknown as ClientContext
 
     apply(ctx)
+
+    expect(registered).toContainEqual(expect.objectContaining({ name: 'conversation.session.header.utilities' }))
 
     expect(registered).toContainEqual({
       name: 'conversation.chat.node',
