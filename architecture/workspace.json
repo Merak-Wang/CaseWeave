@@ -25,13 +25,7 @@
       "directory": "model-service-client",
       "name": "@retrieval-agent/model-service-client",
       "kind": "model-client",
-      "capability": "本地模型数据面的版本化 HTTP 协议、握手、超时、取消、背压错误与响应校验。"
-    },
-    {
-      "directory": "retrieval-ranking",
-      "name": "@retrieval-agent/retrieval-ranking",
-      "kind": "retrieval-client",
-      "capability": "Python Retrieval FastAPI 排名与无时限索引准备长任务的版本化 HTTP Consumer、profile 身份、进度观察、主动取消、错误映射与授权候选越界校验。"
+      "capability": "同一 Python 模型服务的版本化 HTTP 客户端；主入口提供 embedding/rerank，ranking 子入口提供排名、授权候选校验及可取消的索引准备长任务。"
     },
     {
       "directory": "provider-local",

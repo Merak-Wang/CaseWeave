@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@retrieval-agent/contracts": "workspace:*",
-    "@retrieval-agent/retrieval-ranking": "workspace:*"
+    "@retrieval-agent/model-service-client": "workspace:*"
   },
   "publishConfig": {
     "access": "public"

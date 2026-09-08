@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
-import { HybridRankingEngine } from '../packages/retrieval-ranking/lib/index.js'
+import { HybridRankingEngine } from '../packages/model-service-client/lib/ranking/index.js'
 
 const baseUrl = process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
 const afterRestart = process.argv.includes('--after-restart')

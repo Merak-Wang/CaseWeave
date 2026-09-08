@@ -1,7 +1,5 @@
 import type {
-  FrozenEvidencePack,
   RetrievalState,
-  TicketCandidate,
   TicketCandidateRef,
 } from '@retrieval-agent/contracts'
 

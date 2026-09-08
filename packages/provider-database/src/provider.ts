@@ -3,7 +3,7 @@ import { RetrievalError, assertTrustedPrincipal, evaluateQuery, validateQueryExp
   type TicketRetrievalRequest, type TicketRetrievalSpec, type TicketSearchOptions, type TicketSearchPage, type TicketSearchProgress,
   type TicketSnapshot, type TrustedPrincipalContext, type NormalizedTicketRecord, type QueryExpression } from '@retrieval-agent/contracts'
 import { LocalTicketProvider, canRead, principalBinding, sha256, stableJson } from '@retrieval-agent/provider-local'
-import type { RankingResult, RankingHit } from '@retrieval-agent/retrieval-ranking'
+import type { RankingResult, RankingHit } from '@retrieval-agent/model-service-client/ranking'
 import type { RetrievalModelGateway } from '@retrieval-agent/model-service-client'
 import { TicketDatabase, type Generation, type IndexGeneration } from './store.js'
 import { MilvusClient } from './milvus.js'

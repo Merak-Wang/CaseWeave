@@ -14,7 +14,11 @@
       "types": "./lib/protocol.d.ts",
       "default": "./lib/protocol.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./ranking": {
+      "types": "./lib/ranking/index.d.ts",
+      "default": "./lib/ranking/index.js"
+    }
   },
   "files": [
     "lib",

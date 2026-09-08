@@ -7,7 +7,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { type RetrievalDecision, type RetrievalState } from '@retrieval-agent/contracts'
-import { installRetrievalTools, visibleRetrievalTools, type RetrievalToolApplication } from './tools.js'
+import { installRetrievalTools, type RetrievalToolApplication } from './tools.js'
 
 const SIGNAL = new AbortController().signal
 function fakeAgent(): Agent {
@@ -48,9 +48,6 @@ describe('public decision tool', () => {
       const schema = JSON.stringify(ctx.tools.schemas())
       expect(schema).not.toContain('raw_payload')
       expect(schema).not.toContain('cursor')
-      expect(visibleRetrievalTools(undefined)).toEqual(new Set(['ticket_decide']))
-      expect(visibleRetrievalTools({ ...state(), termination: 'needs_clarification' })).toEqual(new Set(['ticket_decide']))
-      expect(visibleRetrievalTools({ ...state(), phase: 'stopped' })).toEqual(new Set(['ticket_decide']))
     } finally { await ctx.fiber.dispose() }
   })
   it('submits accepts and exclusions with search changes in one call without selecting other tickets', async () => {

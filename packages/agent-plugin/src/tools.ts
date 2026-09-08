@@ -17,26 +17,17 @@ export interface RetrievalToolApplication {
   recordToolCall(agent: Agent, input: { readonly success: boolean; readonly serializationBytes: number }): Promise<RetrievalState>
   stopIncomplete(agent: Agent, reason: string): Promise<RetrievalState>
 }
-export function visibleRetrievalTools(state: RetrievalState | undefined): ReadonlySet<string> {
-  // DSH assembles schemas before pre-step admits a reply or starts the next task.
-  // Keep the decision entry available; domain validates the live state on execution.
-  return new Set(['ticket_decide'])
-}
 /** One public ToolRuntime submission owns judgment and its next action. */
 export function installRetrievalTools(ctx: Context, application: RetrievalToolApplication): void {
   ctx.systemPrompt.section({ name: 'retrieval-agent:policy', order: 55, text: context => context.agent?.session.header.origin === 'subagent' ? '' : `${POLICY} For a claim-checking task, read the processing fields for a small set of decisive cases covering distinct causes; assess whether those cases settle the claim and requested distinctions before expanding. Choose exactly one search form: continue_ranking alone for an available next page, changes for keyword/filter repair, or query for a new semantic expression.` })
-  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
-    const assembled = await next()
-    if (context.agent === undefined) return assembled
-    const visible = visibleRetrievalTools(application.currentOrUndefined(context.agent))
-    return { ...assembled, tools: assembled.tools.filter(tool => tool.name !== 'ticket_decide' || visible.has(tool.name)) }
-  })
   ctx.on('agent/turn-stopping', async ({ agent }) => {
     if (application.coordinator?.isExpert(agent)) return
     const state = application.currentOrUndefined(agent)
     if (state === undefined || state.phase === 'stopped' || state.termination === 'needs_clarification') return
     await application.stopIncomplete(agent, '模型结束本轮但未提交可校验的完成判断。')
   })
+  // Keep the schema available before pre-step admits a reply or starts a task;
+  // execution below validates the current Agent and authoritative state.
   ctx.tools.register(defineTool({
     name: 'ticket_decide',
     description: 'Judge visible ticket evidence and execute one search, inspect, clarify, or finish action in the same state-version-bound submission. Evidence aliases cN refer to visible candidate summaries and eN to controlled read segments. Inspect has two exclusive forms: {kind:"inspect",next_window:true} displays the next context window; {kind:"inspect",candidate_aliases:["c1"],fields:["declared field"]} reads source evidence, with optional position for continuation. Never combine the two forms. Search changes use only declared filterCapabilities; never relax a user hard requirement.',

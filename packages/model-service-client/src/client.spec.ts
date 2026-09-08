@@ -56,20 +56,23 @@ describe('ModelServiceClient', () => {
     expect(seen).toMatchObject([{ inputType: 'query', input: ['query', 'second'] }])
   })
 
-  it('rejects reordered embedding rows and model revision drift', async () => {
+  it.each([
+    { reason: 'model revision drift', revision: 'embed-v2', index: 0, code: 'PROTOCOL_MISMATCH' },
+    { reason: 'reordered embedding rows', revision: 'embed-v1', index: 1, code: 'INVALID_VECTOR' },
+  ])('rejects $reason independently', async ({ revision, index, code }) => {
     const fetchImplementation = (async (input: string | URL | Request, init?: RequestInit) => {
       if (String(input).endsWith('/health/ready')) return response(READY)
       const body = JSON.parse(String(init?.body)) as { requestId: string }
       return response({
         protocolVersion: MODEL_SERVICE_PROTOCOL_VERSION,
         requestId: body.requestId,
-        model: 'embedding', revision: 'embed-v2', dimensions: 2, normalization: 'l2',
-        data: [{ index: 1, embedding: [1, 0] }], elapsedMs: 1,
+        model: 'embedding', revision, dimensions: 2, normalization: 'l2',
+        data: [{ index, embedding: [1, 0] }], elapsedMs: 1,
       })
     }) as typeof fetch
 
     await expect(client(fetchImplementation).embed({ texts: ['one'], inputType: 'document' }))
-      .rejects.toMatchObject({ code: 'PROTOCOL_MISMATCH' } satisfies Partial<ModelServiceClientError>)
+      .rejects.toMatchObject({ code } satisfies Partial<ModelServiceClientError>)
   })
 
   it('rejects finite vectors that violate the advertised L2 normalization', async () => {

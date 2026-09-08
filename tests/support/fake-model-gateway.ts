@@ -3,7 +3,7 @@ import type {
   RankingHit,
   RankingQuery,
   RetrievalRanker,
-} from '@retrieval-agent/retrieval-ranking'
+} from '@retrieval-agent/model-service-client/ranking'
 
 const DIMENSIONS = 32
 

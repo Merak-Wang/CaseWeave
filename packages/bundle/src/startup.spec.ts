@@ -96,7 +96,7 @@ describe('installLocalProductAssets', () => {
   it('removes only product-owned preset and fixture directories', async () => {
     const root = await mkdtemp(join(tmpdir(), 'retrieval-agent-assets-'))
     temporaryRoots.push(root)
-    const receipt = await installLocalProductAssets(root, false, await esftDataRoot(root))
+    await installLocalProductAssets(root, false, await esftDataRoot(root))
     const unrelated = join(root, 'keep.txt')
     await writeFile(unrelated, 'keep', 'utf8')
 

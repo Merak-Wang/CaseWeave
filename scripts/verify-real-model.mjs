@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { ModelServiceClient } from '@retrieval-agent/model-service-client'
 import { parseTicketDatasetJsonl, rankingDocuments } from '@retrieval-agent/provider-local'
-import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
+import { HybridRankingEngine } from '@retrieval-agent/model-service-client/ranking'
 import { bundledDefaultTicketPaths } from '@retrieval-agent/bundle/startup'
 import { loadModelDependencyManifest } from './model-dependencies.mjs'
 

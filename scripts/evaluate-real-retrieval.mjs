@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { ModelServiceClient } from '@retrieval-agent/model-service-client'
 import { LocalTicketProvider, parseTicketDatasetJsonl } from '@retrieval-agent/provider-local'
-import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
+import { HybridRankingEngine } from '@retrieval-agent/model-service-client/ranking'
 import { loadModelDependencyManifest } from './model-dependencies.mjs'
 
 const baseUrlArgument = process.argv.find(argument => argument.startsWith('--base-url='))

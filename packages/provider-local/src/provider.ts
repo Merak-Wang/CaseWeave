@@ -33,12 +33,12 @@ import {
   RankingError,
   type RankingResult,
   type RetrievalRanker,
-} from '@retrieval-agent/retrieval-ranking'
+} from '@retrieval-agent/model-service-client/ranking'
 import { sha256, shortOpaque, stableJson } from './hash.js'
 import { canRead, principalBinding } from './authorization.js'
 import { evidenceFieldValues, LEGACY_FIELD_CATALOG } from './fields.js'
 import { candidateL0, matchFragment, matchesFilter, rankingDocuments, queryDocument } from './search-projection.js'
-import { estimateTokens, tokenize, truncateToEstimatedTokens } from './text.js'
+import { estimateTokens, truncateToEstimatedTokens } from './text.js'
 
 export interface LocalTicketProviderConfig {
   readonly providerId?: string
@@ -219,8 +219,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     }
     if (!Number.isSafeInteger(options.maxScan) || options.maxScan < 1) throw new RetrievalError('INVALID_REQUEST', 'maxScan 无效。')
     const queryFingerprint = sha256(stableJson(query))
-    const offset = this.#decodeCursor(options.cursor, snapshotId, queryFingerprint)
-    const terms = tokenize(`${query.keywordQuery?.terms.join(' ') ?? ''} ${query.semanticHints.join(' ')}`)
+    this.#decodeCursor(options.cursor, snapshotId, queryFingerprint)
     const filtered = entry.records.filter(record => query.filters.every(filter => matchesFilter(record, filter)))
     const eligible = query.queryPlan === undefined ? filtered : filtered.filter(record => evaluateQuery(query.queryPlan!.hard, queryDocument(record)) === true)
     const documents = rankingDocuments(eligible)

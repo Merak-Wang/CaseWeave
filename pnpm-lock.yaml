@@ -38,9 +38,6 @@ importers:
       '@retrieval-agent/query-understanding':
         specifier: workspace:*
         version: link:packages/query-understanding
-      '@retrieval-agent/retrieval-ranking':
-        specifier: workspace:*
-        version: link:packages/retrieval-ranking
       '@retrieval-agent/ui-ticket-results':
         specifier: workspace:*
         version: link:packages/ui-ticket-results
@@ -174,9 +171,6 @@ importers:
       '@retrieval-agent/query-understanding':
         specifier: workspace:*
         version: link:../query-understanding
-      '@retrieval-agent/retrieval-ranking':
-        specifier: workspace:*
-        version: link:../retrieval-ranking
       '@retrieval-agent/ui-ticket-results':
         specifier: workspace:*
         version: link:../ui-ticket-results
@@ -280,9 +274,6 @@ importers:
       '@retrieval-agent/provider-local':
         specifier: workspace:*
         version: link:../provider-local
-      '@retrieval-agent/retrieval-ranking':
-        specifier: workspace:*
-        version: link:../retrieval-ranking
       mysql2:
         specifier: 3.14.5
         version: 3.14.5
@@ -292,9 +283,9 @@ importers:
       '@retrieval-agent/contracts':
         specifier: workspace:*
         version: link:../contracts
-      '@retrieval-agent/retrieval-ranking':
+      '@retrieval-agent/model-service-client':
         specifier: workspace:*
-        version: link:../retrieval-ranking
+        version: link:../model-service-client
 
   packages/provider-streamcluster:
     dependencies:
@@ -307,8 +298,6 @@ importers:
       '@retrieval-agent/contracts':
         specifier: workspace:*
         version: link:../contracts
-
-  packages/retrieval-ranking: {}
 
   packages/ui-ticket-results:
     dependencies:

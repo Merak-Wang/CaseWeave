@@ -1,4 +1,4 @@
-import { normalizeLiteral, type NormalizedTicketRecord, type QueryDocument, type QueryFieldCapability } from '@retrieval-agent/contracts'
+import { normalizeLiteral, type NormalizedTicketRecord, type QueryFieldCapability } from '@retrieval-agent/contracts'
 import { sha256, LEGACY_FIELD_CATALOG } from '@retrieval-agent/provider-local'
 
 export { queryDocument } from '@retrieval-agent/provider-local'

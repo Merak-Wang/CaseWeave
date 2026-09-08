@@ -62,7 +62,6 @@
     "@retrieval-agent/provider-local": "workspace:*",
     "@retrieval-agent/provider-streamcluster": "workspace:*",
     "@retrieval-agent/query-understanding": "workspace:*",
-    "@retrieval-agent/retrieval-ranking": "workspace:*",
     "@retrieval-agent/ui-ticket-results": "workspace:*",
     "@types/node": "22.20.0",
     "@types/react": "~18.3.1",

@@ -67,7 +67,6 @@
     "@retrieval-agent/product-api": "workspace:*",
     "@retrieval-agent/product-host": "workspace:*",
     "@retrieval-agent/query-understanding": "workspace:*",
-    "@retrieval-agent/retrieval-ranking": "workspace:*",
     "@retrieval-agent/ui-ticket-results": "workspace:*",
     "@deepseek-ai/schemastery": "3.18.1"
   },

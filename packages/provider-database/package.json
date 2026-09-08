@@ -23,7 +23,6 @@
   "dependencies": {
     "@retrieval-agent/contracts": "workspace:*",
     "@retrieval-agent/provider-local": "workspace:*",
-    "@retrieval-agent/retrieval-ranking": "workspace:*",
     "@retrieval-agent/model-service-client": "workspace:*",
     "mysql2": "3.14.5"
   },

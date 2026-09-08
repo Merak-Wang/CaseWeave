@@ -269,13 +269,11 @@ export class HybridRankingEngine implements RetrievalRanker {
       options: { maxScan: Math.max(1, documents.length) },
     }
     const controller = new AbortController()
-    let abortKind: 'caller' | 'progress' | undefined
     let progressError: RankingError | undefined
     let lastRevision = 0
     let pollRunning = false
     let closed = false
     const onCallerAbort = (): void => {
-      abortKind = 'caller'
       controller.abort(options.signal?.reason)
     }
     const poll = async (): Promise<void> => {
@@ -290,7 +288,6 @@ export class HybridRankingEngine implements RetrievalRanker {
       } catch (error) {
         if (error instanceof RankingError && error.code === 'PROTOCOL_MISMATCH') {
           progressError = error
-          abortKind = 'progress'
           controller.abort(error)
         }
       } finally {

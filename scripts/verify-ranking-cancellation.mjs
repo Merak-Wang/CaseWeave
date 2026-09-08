@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { writeFile, mkdir } from 'node:fs/promises'
-import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
+import { HybridRankingEngine } from '@retrieval-agent/model-service-client/ranking'
 import { ModelServiceClient } from '@retrieval-agent/model-service-client'
 import { loadModelDependencyManifest } from './model-dependencies.mjs'
 

@@ -1,6 +1,6 @@
 import type { QueryDocument } from '@retrieval-agent/contracts'
 import type { NormalizedTicketRecord, TicketFilter, TicketL0 } from '@retrieval-agent/contracts'
-import type { RankingDocument } from '@retrieval-agent/retrieval-ranking'
+import type { RankingDocument } from '@retrieval-agent/model-service-client/ranking'
 
 /** Versioned local-provider projection shared by online ranking and the development index builder. */
 export function rankingDocuments(records: readonly NormalizedTicketRecord[]): RankingDocument[] {

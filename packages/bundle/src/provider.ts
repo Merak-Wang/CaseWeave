@@ -19,7 +19,7 @@ import {
 } from '@retrieval-agent/contracts'
 import { TicketRetrievalProviderService } from '@retrieval-agent/agent-plugin'
 import { LocalTicketProvider, parseTicketDatasetJsonl, rankingDocuments } from '@retrieval-agent/provider-local'
-import { HybridRankingEngine, type RetrievalRanker } from '@retrieval-agent/retrieval-ranking'
+import { HybridRankingEngine, type RetrievalRanker } from '@retrieval-agent/model-service-client/ranking'
 import { DatabaseTicketProvider, TicketDatabase, MilvusClient } from '@retrieval-agent/provider-database'
 import { ModelServiceClient } from '@retrieval-agent/model-service-client'
 import type { TicketRetrievalProvider } from '@retrieval-agent/contracts'

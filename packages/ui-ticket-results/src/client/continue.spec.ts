@@ -6,7 +6,7 @@ afterEach(() => { vi.unstubAllGlobals() })
 
 describe('continue retrieval client', () => {
   it('sends only the session and retrieval identities; the browser never owns the Provider cursor', async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify({
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
       retrievalId: 'retrieval-ui-continue', candidateCount: 12, nextPageAvailable: false,
     }), { status: 200, headers: { 'content-type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)

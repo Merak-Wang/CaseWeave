@@ -6,7 +6,7 @@ import {
 } from '@retrieval-agent/contracts'
 import { normalizeFixtureTicket, type FixtureTicketInput } from './fixture.js'
 import { LocalTicketProvider } from './provider.js'
-import { RankingError, type RetrievalRanker } from '@retrieval-agent/retrieval-ranking'
+import { RankingError, type RetrievalRanker } from '@retrieval-agent/model-service-client/ranking'
 import { testHybridRanker } from '../../../tests/support/fake-model-gateway.js'
 
 const BASE_TIME = new Date('2026-08-27T00:00:00.000Z')

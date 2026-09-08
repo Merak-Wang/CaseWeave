@@ -4,7 +4,6 @@ import {
   type RetrievalErrorCode,
   TicketCandidateRef,
   TicketEvidenceId,
-  TicketId,
   TicketSnapshotId,
   type RetrievalDecision,
   type RetrievalState,
@@ -16,7 +15,7 @@ import {
 } from '@retrieval-agent/contracts'
 import { createTicketResultCollection } from './result.js'
 import { EvidenceContextPolicy } from './context.js'
-import { RetrievalController, type RetrievalSearchInput } from './controller.js'
+import { RetrievalController } from './controller.js'
 import { InMemoryRetrievalEventJournal } from './journal.js'
 import { foldRetrievalEvents } from './replay.js'
 

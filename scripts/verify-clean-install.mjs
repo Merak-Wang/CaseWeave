@@ -257,7 +257,7 @@ import { RetrievalAgentService, SessionRetrievalEventJournal } from '@retrieval-
 import { installDshSessionCompatibility } from '@retrieval-agent/dsh-compat'
 import { MODEL_SERVICE_PROTOCOL_VERSION, ModelServiceClient } from '@retrieval-agent/model-service-client'
 import { LocalTicketProvider, parseTicketDatasetJsonl } from '@retrieval-agent/provider-local'
-import { HybridRankingEngine } from '@retrieval-agent/retrieval-ranking'
+import { HybridRankingEngine } from '@retrieval-agent/model-service-client/ranking'
 import { FixturePrincipalProviderService, LocalTicketProviderService } from '@retrieval-agent/bundle'
 import { CandidateDetailService, InMemoryDetailReadAuditSink, projectTicketCandidateState } from '@retrieval-agent/product-api'
 

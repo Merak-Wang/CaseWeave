@@ -7,7 +7,7 @@ afterEach(() => { vi.unstubAllGlobals() })
 describe('ticket detail client', () => {
   it('sends only the opaque candidate ref and returns the authorized Host detail', async () => {
     const ref = TicketCandidateRef('candidate-opaque-1')
-    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify({
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
       details: [{
         candidateRef: ref,
         displayId: 'TKT-0007',
