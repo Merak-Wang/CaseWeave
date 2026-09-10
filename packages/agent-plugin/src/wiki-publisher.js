@@ -5,7 +5,9 @@
 import { mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import { openWiki, validateEntry, assertSafeProse, sha256 } from './wiki-store.js'
+import { mapWikiFiles } from './wiki-io.js'
 
 const idPattern = { test: value => typeof value === 'string' && /^[a-z][a-z0-9-]{1,90}$/u.test(value) }
 const assert = (ok, message) => { if (!ok) throw new Error(message) }
@@ -37,6 +39,18 @@ async function atomic(file, bytes) {
   const temp = `${file}.${randomUUID()}.tmp`
   await durableFile(temp, bytes)
   try { await rename(temp, file) } finally { await rm(temp, { force: true }) }
+}
+async function renameRelease(source, destination, signal) {
+  for (let attempt = 0; ; attempt++) {
+    signal?.throwIfAborted()
+    try { await rename(source, destination); return }
+    catch (error) {
+      // Windows can briefly deny directory renames after files close. Keep the
+      // publication lock and retry the same validated directory, never its data.
+      if (process.platform !== 'win32' || attempt >= 4 || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error
+      await delay(25 * 2 ** attempt, undefined, { signal })
+    }
+  }
 }
 async function locked(root, work, signal) {
   await mkdir(root, { recursive: true })
@@ -115,7 +129,7 @@ export async function publishWiki(root, suppliedDelta, options = {}) {
       ancestor = idPattern.test(manifest.baseRelease) ? manifest.baseRelease : null
     }
     if (options.requireBaseRelease) assert(delta.baseRelease === current.releaseId, 'Wiki changed; learning requires fresh semantic validation')
-    const base = delta.baseRelease ? await openWiki(canonical, { releaseId: delta.baseRelease }) : null
+    const base = delta.baseRelease === current.releaseId ? current : delta.baseRelease ? await openWiki(canonical, { releaseId: delta.baseRelease }) : null
     const original = new Map(base ? wikiEntries(base).map(e => [e.id, e]) : [])
     const entries = new Map(wikiEntries(current).map(e => [e.id, e]))
     const graph = new Map(current.lineage().map(entry => [entry.id, entry]))
@@ -158,13 +172,12 @@ export async function publishWiki(root, suppliedDelta, options = {}) {
     const stagingId = `stage-${randomUUID()}`
     const releasePath = await directory(canonical, `.staging/${stagingId}`)
     await directory(canonical, `.staging/${stagingId}/entries`)
-    const refs = []
-    for (const entry of [...entries.values()].sort((a, b) => a.id.localeCompare(b.id))) {
+    const refs = await mapWikiFiles([...entries.values()].sort((a, b) => a.id.localeCompare(b.id)), async entry => {
       validateEntry(entry)
       const bytes = json(entry), file = path.join(releasePath, 'entries', `${entry.id}.json`)
       await durableFile(file, bytes)
-      refs.push({ id: entry.id, revision: entry.revision, sha256: sha256(bytes) })
-    }
+      return { id: entry.id, revision: entry.revision, sha256: sha256(bytes) }
+    })
     const manifest = { schemaVersion: 2, releaseId, baseRelease: current.releaseId, kind: options.audit ? 'evidence-reviewed-learning' : 'file-edit', operationHash,
       revoked: [...revoked].map(([id, revision]) => ({ id, revision })).sort((a, b) => a.id.localeCompare(b.id)),
       domains: [...domains].map(([id, title]) => ({ id, title, knowledgeRefs: [...entries.values()].filter(e => e.domain === id).map(e => e.id).sort() })).filter(d => d.knowledgeRefs.length), entries: refs,
@@ -173,10 +186,14 @@ export async function publishWiki(root, suppliedDelta, options = {}) {
     await durableFile(path.join(releasePath, 'manifest.json'), manifestBytes)
     await directory(canonical, 'releases')
     const destination = path.join(canonical, 'releases', releaseId)
-    try { await rename(releasePath, destination) }
+    try { await renameRelease(releasePath, destination, options.signal) }
     catch (e) {
       // Complete but uncommitted releases can be reused after a failed source fence or process restart.
-      assert(await readFile(path.join(destination, 'manifest.json'), 'utf8') === manifestBytes, 'Immutable publication conflict')
+      const existing = await readFile(path.join(destination, 'manifest.json'), 'utf8').catch(error => {
+        if (error.code === 'ENOENT') throw e
+        throw error
+      })
+      assert(existing === manifestBytes, 'Immutable publication conflict')
       await rm(releasePath, { recursive: true })
     }
     await openWiki(canonical, { releaseId })

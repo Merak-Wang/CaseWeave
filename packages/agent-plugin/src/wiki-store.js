@@ -5,6 +5,7 @@
 import { readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { mapWikiFiles } from './wiki-io.js'
 
 /** @param {string | Uint8Array} data */
 export const sha256 = data => createHash('sha256').update(data).digest('hex')
@@ -86,9 +87,12 @@ async function readWiki(root, releaseId, pointerFile) {
   if (pointer) assert(sha256(bytes) === pointer.manifestSha256, 'Manifest hash mismatch')
   const manifest = JSON.parse(bytes)
   assert(manifest.schemaVersion === 2 && manifest.releaseId === id && Array.isArray(manifest.entries) && Array.isArray(manifest.domains), 'Invalid manifest')
-  const entries = new Map()
+  const entryIds = new Set()
   for (const ref of manifest.entries) {
-    assert(identifier.test(ref.id) && hashPattern.test(ref.sha256) && !entries.has(ref.id), 'Invalid entry manifest')
+    assert(identifier.test(ref.id) && hashPattern.test(ref.sha256) && !entryIds.has(ref.id), 'Invalid entry manifest')
+    entryIds.add(ref.id)
+  }
+  const loaded = await mapWikiFiles(manifest.entries, async ref => {
     // File path comes from validated IDs, never an arbitrary manifest/source path.
     const body = await safeRead(`releases/${id}/entries/${ref.id}.json`)
     assert(sha256(body) === ref.sha256, 'Entry hash mismatch')
@@ -96,8 +100,9 @@ async function readWiki(root, releaseId, pointerFile) {
     validateEntry(entry)
     // The shipped v2 import identifies entries by hash only; new releases also record their revision.
     assert(entry.id === ref.id && (ref.revision === undefined || entry.revision === ref.revision), 'Entry identity mismatch')
-    entries.set(entry.id, entry)
-  }
+    return entry
+  })
+  const entries = new Map(loaded.map(entry => [entry.id, entry]))
   // Keep only identities and replacement edges for inactive entries. Their bodies stay in old releases.
   const lineage = new Map([...entries.values()].map(({ id, revision, supersedes }) => [id, { id, revision, supersedes }]))
   assert(manifest.retired === undefined || Array.isArray(manifest.retired), 'Invalid retired lineage')
