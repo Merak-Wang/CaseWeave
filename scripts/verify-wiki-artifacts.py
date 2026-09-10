@@ -11,19 +11,33 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--private')
     ap.add_argument('--output')
+    ap.add_argument('--wiki', help='Published Wiki directory; defaults to the repository Wiki')
     args = ap.parse_args()
     repo = Path(__file__).resolve().parent.parent
-    wiki = repo / 'wiki'
-    pointer = json.loads((wiki / 'current.json').read_text(encoding='utf-8'))
+    wiki = Path(args.wiki).resolve() if args.wiki else repo / 'wiki'
+    content = json.loads((wiki / 'curation.json').read_text(encoding='utf-8'))
+    # Editable Markdown belongs to the offline curation release. Later file edits
+    # and learned entries are immutable runtime JSON, with no Markdown mirror.
+    pointer = {'releaseId': content['releaseId']}
     manifest = json.loads((wiki / 'releases' / pointer['releaseId'] / 'manifest.json').read_text(encoding='utf-8'))
     errors, sizes = [], []
+    def label(path):
+        return path.relative_to(repo).as_posix() if path.is_relative_to(repo) else 'wiki/' + path.relative_to(wiki).as_posix()
+    current = json.loads((wiki / 'current.json').read_text(encoding='utf-8'))
+    runtime = subprocess.run(['node', str(repo / 'scripts/wiki-store.mjs'), 'verify', '--wiki', str(wiki)], capture_output=True)
+    if runtime.returncode != 0:
+        errors.append({'file': 'wiki/current.json', 'kind': 'runtime-release-invalid'})
+    elif json.loads(runtime.stdout)['releaseId'] != current['releaseId']:
+        errors.append({'file': 'wiki/current.json', 'kind': 'runtime-release-fallback'})
     for ref in manifest['entries']:
         path = wiki / 'releases' / pointer['releaseId'] / 'entries' / (ref['id'] + '.json')
         raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != ref['sha256']:
+            errors.append({'file': ref['id'], 'kind': 'offline-release-hash-mismatch'})
         e = json.loads(raw)
         md = wiki / 'domains' / e['domain'] / 'concepts' / (e['id'] + '.md')
-        if md.read_text(encoding='utf-8') != e['bodyMarkdown']:
-            errors.append({'file': md.relative_to(repo).as_posix(), 'kind': 'markdown-release-mismatch'})
+        if not md.is_file() or md.read_text(encoding='utf-8') != e['bodyMarkdown']:
+            errors.append({'file': label(md), 'kind': 'markdown-release-mismatch'})
         for section in ['### 专有名词与业务对象', '### 业务关系与判断逻辑', '### 典型业务场景', '## 工单中应核对的证据', '## 适用边界与反例']:
             if section not in e['bodyMarkdown']:
                 errors.append({'file': ref['id'], 'kind': 'missing-section'})
@@ -35,7 +49,7 @@ def main():
                 continue
             link_count += 1
             if not (md.parent / target.split('#')[0]).exists():
-                errors.append({'file': md.relative_to(repo).as_posix(), 'kind': 'broken-link'})
+                errors.append({'file': label(md), 'kind': 'broken-link'})
     candidates = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], cwd=repo).decode().split('\0')
     count = 0
     confidential_ids, confidential_hashes, roots = set(), set(), []
@@ -66,9 +80,10 @@ def main():
         normal = text.replace('\\\\', '\\').replace('\\', '/').casefold()
         if any(r.replace('\\', '/').casefold() in normal for r in roots):
             errors.append({'file': name, 'kind': 'confidential-location'})
-    content = json.loads((wiki / 'curation.json').read_text(encoding='utf-8'))
     specs = [e for d in content['domains'] for e in d['entries']]
-    report = {'releaseId': pointer['releaseId'], 'domains': len(manifest['domains']), 'entries': len(sizes),
+    report = {'releaseId': pointer['releaseId'], 'runtimeReleaseId': current['releaseId'],
+              'runtimeIntegrity': 'passed' if not any(e['kind'].startswith('runtime-') for e in errors) else 'failed',
+              'domains': len(manifest['domains']), 'entries': len(sizes),
               'termDefinitions': sum(len(e['terms']) for e in specs), 'illustrativeScenarios': sum(len(e['scenarios']) for e in specs),
               'markdownCharacters': {'min': min(sizes), 'max': max(sizes), 'total': sum(sizes)},
               'relativeLinksChecked': link_count, 'gitEligibleTextFilesScanned': count,

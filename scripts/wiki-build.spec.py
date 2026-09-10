@@ -67,9 +67,31 @@ class PublicationTests(unittest.TestCase):
             subprocess.run(['node', str(SCRIPTS / 'wiki-store.mjs'), 'checkout', '--wiki', str(wiki), '--id', 'demo-entry', '--out', str(draft)], check=True, capture_output=True)
             edited = json.loads(draft.read_text(encoding='utf-8'))
             edited['changes'][0]['entry']['scope'] = '修改后的费用复核范围。'
+            edited['changes'][0]['entry']['bodyMarkdown'] += '\n补充范围：核对实际收款证据。\n'
             write(draft, edited)
             subprocess.run(['node', str(SCRIPTS / 'wiki-store.mjs'), 'publish', '--wiki', str(wiki), '--delta', str(draft)], check=True, capture_output=True)
             published_pointer = (wiki / 'current.json').read_bytes()
+            audit = ['python', str(SCRIPTS / 'verify-wiki-artifacts.py'), '--wiki', str(wiki)]
+            result = subprocess.run(audit, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace') + result.stdout.decode(errors='replace'))
+            report = json.loads(result.stdout)
+            self.assertEqual(report['releaseId'], 'demo-v2')
+            self.assertEqual(report['runtimeReleaseId'], json.loads(published_pointer)['releaseId'])
+            self.assertEqual(report['runtimeIntegrity'], 'passed')
+            markdown = wiki / 'domains/demo/concepts/demo-entry.md'
+            original_markdown = markdown.read_bytes()
+            markdown.write_text('unexpected change', encoding='utf-8')
+            result = subprocess.run(audit, capture_output=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('markdown-release-mismatch', result.stdout.decode())
+            markdown.write_bytes(original_markdown)
+            runtime_entry = wiki / 'releases' / report['runtimeReleaseId'] / 'entries/demo-entry.json'
+            original_runtime_entry = runtime_entry.read_bytes()
+            runtime_entry.write_text('{}', encoding='utf-8')
+            result = subprocess.run(audit, capture_output=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout)['runtimeIntegrity'], 'failed')
+            runtime_entry.write_bytes(original_runtime_entry)
             result = subprocess.run(command, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b'cannot replace a newer publication', result.stderr)

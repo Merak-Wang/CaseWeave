@@ -31,6 +31,8 @@ jobs:
       - run: pnpm verify:workspace
       - run: pnpm verify:source
       - run: node scripts/wiki-store.mjs verify
+      - run: python scripts/wiki-build.spec.py
+      - run: python scripts/verify-wiki-artifacts.py
   app-image:
     runs-on: ubuntu-latest
     timeout-minutes: 30
