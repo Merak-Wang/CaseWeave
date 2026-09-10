@@ -7,8 +7,21 @@ import { compileUserConditions } from './conditions.js'
 
 const doc = (title: string, body: string, region: string | null = null): QueryDocument => ({ texts: { title: [title], body: [body] }, fields: { region, status: null } })
 describe('sourced Boolean QueryPlan', () => {
+  it('recalls either topic in ordinary language while preserving explicit intersections', () => {
+    const query = '查找副卡与跨域有关的工单'
+    const plan = compileQueryPlan(query, ['副卡', '跨域'])
+    for (const body of ['副卡解绑', '跨域业务', '跨域副卡']) expect(evaluateQuery(plan.keyword, doc('', body))).toBe(true)
+    expect(evaluateQuery(plan.keyword, doc('', '普通宽带'))).toBe(false)
+    for (const query of ['副卡 AND 跨域', '查找必须同时包含副卡与跨域的工单']) {
+      const explicit = compileQueryPlan(query, ['副卡', '跨域'])
+      expect(evaluateQuery(explicit.keyword, doc('副卡', '跨域'))).toBe(true)
+      expect(evaluateQuery(explicit.keyword, doc('副卡', '普通业务'))).toBe(false)
+    }
+    const scoped = compileQueryPlan('只看上海的副卡与跨域工单', ['副卡', '跨域'])
+    expect(evaluateQuery(scoped.hard, doc('', '跨域', '广东'))).toBe(false)
+  })
   it('keeps an explicit result count outside the literal business expression', () => {
-    const plan = compileQueryPlan('查找跨域副卡解绑工单，只需1条。', ['跨域', '副卡解绑', '需', '工单'])
+    const plan = compileQueryPlan('查找必须同时包含跨域和副卡解绑的工单，只需1条。', ['跨域', '副卡解绑', '需', '工单'])
     expect(evaluateQuery(plan.keyword, doc('副卡解绑', '跨域办理失败'))).toBe(true)
     expect(evaluateQuery(plan.keyword, doc('副卡解绑', '本地办理失败'))).toBe(false)
   })

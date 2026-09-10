@@ -305,7 +305,7 @@ describe('RetrievalAgentService Cordis binding', () => {
     } finally { await ctx.fiber.dispose() }
   })
 
-  it('stops an unstructured model response explicitly while retaining unjudged candidates', async () => {
+  it('automatically retries an unstructured model response before explicit failure while retaining unjudged candidates', async () => {
     const ctx = new Context()
     let disposeAgent: (() => Promise<void>) | undefined
     try {
@@ -317,8 +317,9 @@ describe('RetrievalAgentService Cordis binding', () => {
       await ctx.plugin(TokenMeter)
       await ctx.plugin(StubPrincipalProvider)
       await ctx.plugin(UnionTicketProvider)
-      // The phase-3 decision schema and explicit output reserve need more than the legacy 4K envelope.
-      await ctx.plugin(RetrievalAgentService, { maxContextTokens: 8_192 })
+      // This exercises protocol repair, with a declared 32K request envelope. The
+      // separate 4K admission test below owns the insufficient-capacity behavior.
+      await ctx.plugin(RetrievalAgentService, { maxContextTokens: 32_768 })
       installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
       installRetrievalTools(ctx, ctx.retrievalAgent)
       installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
@@ -337,7 +338,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       }))
       await handle.agent.whenIdle()
 
-      expect(adapter.requests).toHaveLength(1)
+      expect(adapter.requests).toHaveLength(3)
       // 用户输入在 pre-step 提前落库后不能被 DSH 重复追加；快照是 plugin 来源，不计入。
       expect(handle.agent.session.events
         .filter(event => event.type === 'user/message' && JSON.stringify(event.data).includes('"kind":"user"')))
@@ -356,13 +357,13 @@ describe('RetrievalAgentService Cordis binding', () => {
       expect(ctx.retrievalAgent.current(handle.agent)).toMatchObject({
         phase: 'stopped', termination: 'partial',
         task: { target: 'ranked_cases', countPolicy: 'adaptive', completenessRequirement: 'top_k' },
-        budget: { modelStepsUsed: 1, successfulToolCalls: 0, failedToolCalls: 0 },
+        budget: { modelStepsUsed: 3, successfulToolCalls: 0, failedToolCalls: 0 },
       })
       const requests = readRetrievalSessionEvents(handle.agent.session)
         .filter(event => event.type === 'retrieval/model-request-measured')
-      expect(requests).toHaveLength(1)
+      expect(requests).toHaveLength(3)
       expect(requests[0]?.data).toMatchObject({ accepted: true })
-      expect(requests[0]?.data.estimatedInputTokens).toBeLessThanOrEqual(8_192)
+      expect(requests[0]?.data.estimatedInputTokens).toBeLessThanOrEqual(32_768)
       expect(handle.agent.session.events.filter(event => event.type === 'request/header')).toHaveLength(1)
     } finally {
       if (disposeAgent !== undefined) await disposeAgent()
@@ -1184,9 +1185,13 @@ describe('public knowledge-state acceptance A1-A8', () => {
   it('A4 updates controlled evidence, frozen references and replay in the same state', async () => {
     const { ctx, agent, decide } = await publicSetup()
     try {
-      const read = await decide({ kind: 'inspect', candidate_aliases: ['c2'], fields: ['resolution'] }, [], [gap('depth', ['c2'], '处理过程是否确认为解绑同步延迟')])
+      // A previous focused summary read must not hide another ticket's newly requested source.
+      expect((await decide({ kind: 'inspect', candidate_aliases: ['c1'], fields: [], history: true })).isError).toBe(false)
+      const read = await ctx.tools.execute({ signal: SIGNAL, callId: CallId('focused-source-read'), name: 'ticket_read', agent,
+        arguments: { state_id: ctx.retrievalAgent.current(agent).stateId, candidate_aliases: ['c2'], fields: ['resolution'], reason: '核对处理结果' } })
       expect(read.isError).toBe(false)
       const state = ctx.retrievalAgent.current(agent)
+      expect(state.gaps.filter(g => g.evaluator === 'model')).toEqual([])
       expect(state.promotedEvidence).toHaveLength(1)
       expect(state.promotedEvidence[0]).toMatchObject({ field: 'resolution', readers: ['provider', 'model'], evidenceLevel: 'L2' })
       expect(read.content).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('重新同步') })]))
@@ -1201,7 +1206,7 @@ describe('public knowledge-state acceptance A1-A8', () => {
   it('A7 retains valid unjudged candidates when the model cannot finish, and explains the stop', async () => {
     const { ctx, agent } = await publicSetup()
     try {
-      await agentEvents(ctx, agent).serial('agent/turn-stopping', { turn: 1, signal: SIGNAL })
+      for (let i = 0; i < 3; i++) await agentEvents(ctx, agent).serial('agent/turn-stopping', { turn: 1, signal: SIGNAL })
       const collection = createTicketResultCollection(ctx.retrievalAgent.current(agent))
       expect(collection.tickets).toEqual([])
       expect(collection).not.toHaveProperty('undeterminedCandidates')
@@ -1311,7 +1316,18 @@ describe('actual DSH message and ToolRuntime loop with a deterministic model ada
       installRetrievalTools(ctx, ctx.retrievalAgent)
       installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
       await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
-      const adapter = new KnowledgeLoopAdapter()
+      class RecoverableAnswerAdapter extends KnowledgeLoopAdapter {
+        proseSent = false
+        override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+          if (!this.proseSent) {
+            this.proseSent = true
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: '已分析，还未提交结构化结果。' } }
+            yield { type: 'finish', reason: { kind: 'stop' } }; return
+          }
+          yield* super.stream(options)
+        }
+      }
+      const adapter = new RecoverableAnswerAdapter()
       ctx.llm.registerAdapter(['knowledge-loop'], adapter)
       const handle = await ctx.agents.create({ sessionId: SessionId('knowledge-actual-loop'), agentOptions: { provider: 'knowledge-loop', model: 'deterministic-fixture' } })
       dispose = handle.dispose

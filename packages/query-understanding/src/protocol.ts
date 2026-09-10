@@ -12,7 +12,7 @@ export interface SpacyAnalyzerDescriptorResponse {
   readonly components: readonly string[]
 }
 
-/** 单个 spaCy token 的表面位置、词性和依存信息；head 是当前 tokens 数组中的下标。 */
+/** 单个 spaCy token 的表面位置、词性和依存信息；start/end 为 UTF-16 偏移，head 是当前 tokens 数组中的下标。 */
 export interface SpacyTokenResponse {
   readonly text: string
   readonly start: number
@@ -26,7 +26,7 @@ export interface SpacyTokenResponse {
   readonly entityType: string
 }
 
-/** 可进入关键词通道的原文候选；source 区分领域短语合并和普通 POS 提取。 */
+/** 可进入关键词通道的原文候选；start/end 为 UTF-16 偏移，source 区分领域短语合并和普通 POS 提取。 */
 export interface SpacyCandidateResponse {
   readonly text: string
   readonly start: number
@@ -35,6 +35,7 @@ export interface SpacyCandidateResponse {
   readonly pos: readonly string[]
 }
 
+/** 实体来源 start/end 为原查询中的 UTF-16 偏移，与 JavaScript slice 一致。 */
 export interface SpacyEntityResponse {
   readonly text: string
   readonly label: string

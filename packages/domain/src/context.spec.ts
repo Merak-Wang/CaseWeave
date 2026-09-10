@@ -49,10 +49,52 @@ function stateWithFieldCatalog(): RetrievalState {
 }
 
 describe('EvidenceContextPolicy', () => {
+  it('keeps a short source dialogue and its late correction together when the token budget fits', () => {
+    const base = stateWithFieldCatalog()
+    const ref = TicketCandidateRef('dialogue-ticket')
+    const candidate = { ref, title: '关系解除受阻', summary: '初始诉求可能混淆', l0: {} }
+    const evidence = Array.from({ length: 26 }, (_, part) => ({ evidenceId: TicketEvidenceId(`dialogue-${part}`),
+      candidateRef: ref, field: 'source.raw_dialogue', part, start: 0, end: 20, fieldLength: 20,
+      text: part === 24 ? '后续纠正：关系已经解除，现在只查后续账单。' : `第${part}轮：业务办理背景。`,
+      trust: 'untrusted_ticket_evidence', truncated: false }))
+    const state = { ...base, candidates: [candidate], candidateHistory: [candidate], promotedEvidence: evidence } as unknown as RetrievalState
+    const policy = new EvidenceContextPolicy()
+    const ample = policy.select(state, 10000)
+    expect(ample.includedEvidenceIds).toEqual(evidence.map(e => e.evidenceId))
+    expect(ample.rendered).toContain('后续纠正：关系已经解除')
+    expect(ample.estimatedTokens).toBeLessThanOrEqual(10000)
+    const bounded = policy.select(state, 2500)
+    expect(bounded.estimatedTokens).toBeLessThanOrEqual(2500)
+    expect(bounded.includedEvidenceIds.length).toBeLessThan(evidence.length)
+    const offset = policy.nextEvidenceWindowOffset({ ...state, modelVisibleEvidenceIds: bounded.includedEvidenceIds })
+    const tail = policy.select({ ...state, evidenceWindowOffset: offset }, 10000)
+    expect(tail.includedEvidenceIds).toContain(evidence[24]!.evidenceId)
+    expect(tail.rendered).toContain('"alias":"e25"')
+  })
+  it('keeps superseded expert findings out of the current model window after a supplement', () => {
+    const base = stateWithFieldCatalog()
+    const state = { ...base, inputGeneration: 2, expertTasks: [{ id: 'old-expert', inputGeneration: 1,
+      status: 'superseded', finding: { id: 'obsolete-finding', judgments: [] } }] } as unknown as RetrievalState
+    const selection = new EvidenceContextPolicy().select(state)
+    expect(selection.rendered).toContain('"archivedTaskCount":1')
+    expect(selection.rendered).not.toContain('obsolete-finding')
+    expect(selection.rendered).not.toContain('old-expert')
+  })
   it('never removes user requirements, feedback or a pending question to fit a tiny context', () => {
     const base = stateWithFieldCatalog()
     const state = { ...base, userFeedback: [{ text: '排除仅欠费停机，必须有处理记录', receivedAt: '2026-09-07' }] }
     expect(() => new EvidenceContextPolicy().select(state, 25)).toThrow(/容量|要求|context/i)
+  })
+  it('advertises every required expert review even when older findings are outside the display window', () => {
+    const base = stateWithFieldCatalog()
+    const state = { ...base, inputGeneration: 2, expertTasks: Array.from({ length: 8 }, (_, i) => ({
+      id: `expert-${i}`, inputGeneration: 2, status: i === 0 ? 'failed' : 'completed', candidateRefs: [], knowledgeRefs: [],
+      finding: { id: `finding-${i}`, judgments: [], counterEvidenceRefs: [],
+        gaps: i === 1 ? [{ kind: 'depth', status: 'open', evidenceRefs: [], description: '仍需主 Agent 查证' }] : [], nextAction: '主 Agent 核对' },
+    })) } as unknown as RetrievalState
+    const rendered = new EvidenceContextPolicy().select(state).rendered
+    expect(rendered).toContain('"requiredExpertReviews":["expert-0","expert-1"]')
+    expect(rendered).not.toContain('finding-0')
   })
 
   it('keeps a thousand historical judgments outside the working prompt and exposes history lookup', () => {

@@ -162,7 +162,7 @@ describe('DSH product Host adapter', () => {
   it('can invoke the report model from the declared Cordis product Host scope', async () => {
     const ctx = new Context()
     const invoked = vi.fn()
-    for (const name of ['webServer', 'agents', 'agentPresets', 'workspaceRegistry']) ctx.reflect.provide(name as never, {} as never)
+    for (const name of ['webServer', 'agents', 'agentPresets', 'workspaceRegistry', 'settings', 'credentials', 'agentDefaultModel']) ctx.reflect.provide(name as never, {} as never)
     await ctx.plugin({ name: 'report-model-provider', apply(provider: Context) {
       provider.reflect.provide('llm', { async *stream() {
         invoked()
@@ -171,7 +171,7 @@ describe('DSH product Host adapter', () => {
       } } as never)
     } })
     const agent = { session: { requestContext: () => ({ provider: 'fixture', model: 'fixture', contextWindow: 32000 }) } } as unknown as Agent
-    const invoke = (inject: string[]) => new Promise<unknown>((resolve, reject) => {
+    const invoke = (inject: typeof productHostInject) => new Promise<unknown>((resolve, reject) => {
       void Promise.resolve(ctx.plugin({ name: 'product-host-report-scope', inject, async apply(scope: Context) {
         try { resolve(await callReportModel(scope, agent, 'report-scope', 'write', {}, new AbortController().signal, async () => {})) }
         catch (error) { reject(error) }

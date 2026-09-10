@@ -45,7 +45,7 @@ export const Config: z<Config> = z.object({
   wikiRoot: z.string(),
   wikiLearning: z.boolean().default(true),
   maxSearches: z.number().step(1).min(1).default(2_500),
-  maxConsecutiveToolErrors: z.number().step(1).min(1).default(6),
+  maxRepeatedToolErrors: z.number().step(1).min(1),
   searchTopK: z.number().step(1).min(1).max(50).default(20),
   searchMaxScan: z.number().step(1).min(1).default(50_000),
   contextTokenBudget: z.number().step(1).min(1),

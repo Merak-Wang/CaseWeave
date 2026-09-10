@@ -1,12 +1,16 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type { RetrievalState } from '@retrieval-agent/contracts'
-import { estimateContextTokens } from '@retrieval-agent/domain'
 import { requestManifest } from './request-manifest.js'
+import { contextCompactions, contextCompressionStats, inputContextTokens, installContextRecovery, requestTokens } from './context-recovery.js'
+export { contextCompressionStats } from './context-recovery.js'
 
 export interface RetrievalRuntimeBudgetApplication {
+  modelContextTokenLimit?(agent: Agent): number | undefined
+  projectContext?(agent: Agent, tokenBudget?: number): Promise<{ rendered: string }>
   updateExpert?(agent: Agent, generation: number, update: import('@retrieval-agent/domain').ExpertUpdate): Promise<RetrievalState>
   readonly coordinator?: { isExpert(agent: Agent): boolean }
   currentOrUndefined(agent: Agent): RetrievalState | undefined
@@ -17,6 +21,8 @@ export interface RetrievalRuntimeBudgetApplication {
     readonly modelContextWindow?: number
     readonly outputReservedTokens?: number
     readonly protocolMarginTokens?: number
+    readonly compactionCount?: number
+    readonly compression?: import('@retrieval-agent/contracts').ContextCompressionStats
   }): Promise<{ readonly accepted: boolean }>
   recordModelResponse(agent: Agent, input: {
     readonly modelLatencyMs: number
@@ -24,7 +30,7 @@ export interface RetrievalRuntimeBudgetApplication {
     readonly inputTokens?: number
     readonly wallClockElapsedMs: number
   }): Promise<RetrievalState>
-  recordToolCall(agent: Agent, input: { readonly success: boolean; readonly serializationBytes: number }): Promise<RetrievalState>
+  recordToolCall(agent: Agent, input: { readonly success: boolean; readonly serializationBytes: number; readonly failureSignature?: string }): Promise<RetrievalState>
 }
 
 function elapsedSince(state: RetrievalState): number {
@@ -35,6 +41,15 @@ function elapsedSince(state: RetrievalState): number {
 
 function serializedBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8')
+}
+
+/** Parameter order and measurement state IDs are not progress; changed arguments/evidence are. */
+export function toolFailureSignature(name: string, args: unknown, message: string, state: RetrievalState): string {
+  const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
+    ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'state_id').sort(([a], [b]) => a.localeCompare(b)).map(([key, v]) => [key, canonical(v)])) : value
+  return createHash('sha256').update(JSON.stringify({ name, args: canonical(args), message, generation: state.inputGeneration ?? 0,
+    evidence: state.promotedEvidence.map(e => e.evidenceId), candidates: state.candidates.map(c => c.ref),
+    judgments: state.judgments, conflicts: state.expertConflicts })).digest('hex')
 }
 
 function rejectedStream(): AsyncIterable<StreamChunk> {
@@ -57,6 +72,10 @@ export function installRetrievalRuntimeBudget(
   ctx: Context,
   application: RetrievalRuntimeBudgetApplication,
 ): void {
+  if (application.projectContext) installContextRecovery(ctx, {
+    owns: agent => Boolean(application.currentOrUndefined(agent)) && !application.coordinator?.isExpert(agent),
+    limit: agent => application.modelContextTokenLimit?.(agent), render: async (agent, budget) => (await application.projectContext!(agent, budget)).rendered,
+  })
   const pendingToolMetrics = new WeakMap<Agent, Promise<void>>()
   ctx.on('llm/stream', (options, next): AsyncIterable<StreamChunk> => {
     if (!isOrdinaryConversationRequest(options) || options.sessionId === undefined) return next()
@@ -72,12 +91,12 @@ export function installRetrievalRuntimeBudget(
       const modelContextWindow = agent.session.requestContext()?.contextWindow
       const outputReservedTokens = options.maxTokens ?? Math.min(2048, Math.floor((modelContextWindow ?? 32000) * 0.15))
       const protocolMarginTokens = Math.min(512, Math.floor((modelContextWindow ?? 32000) * 0.05))
-      const estimatedInputTokens = Math.max(ctx.tokenMeter.measure(agent.session).totalTokens,
-        options.messages.reduce((total, m) => total + ctx.tokenMeter.estimateMessage(m), 0)
-        + estimateContextTokens(JSON.stringify({ system: options.system, tools: options.tools })))
+      const estimatedInputTokens = requestTokens(ctx, options)
       await application.updateExpert?.(agent, initial.inputGeneration ?? 0, { kind: 'manifest', manifest: requestManifest(initial, options, 'main', estimatedInputTokens) })
       const admission = await application.admitModelRequest(agent, {
         estimatedInputTokens,
+        compactionCount: contextCompactions(agent),
+        compression: contextCompressionStats(agent),
         outputReservedTokens, protocolMarginTokens,
         serializationBytes: serializedBytes({ system: options.system, tools: options.tools, messages: options.messages }),
         wallClockElapsedMs: elapsedSince(initial),
@@ -93,7 +112,7 @@ export function installRetrievalRuntimeBudget(
       let inputTokens: number | undefined
       try {
         for await (const chunk of next()) {
-          if (chunk.type === 'usage') { outputTokens = chunk.usage.outputTokens; inputTokens = chunk.usage.inputTokens }
+          if (chunk.type === 'usage') { outputTokens = chunk.usage.outputTokens; inputTokens = inputContextTokens(chunk.usage) }
           yield chunk
         }
       } finally {
@@ -112,7 +131,11 @@ export function installRetrievalRuntimeBudget(
     if (application.coordinator?.isExpert(exec.agent)) return
     if (!result.isError) return
     const agent = exec.agent
-    const record = () => application.recordToolCall(agent, { success: false, serializationBytes: serializedBytes(result.content) })
+    const record = () => {
+      const state = application.currentOrUndefined(agent)
+      return application.recordToolCall(agent, { success: false, serializationBytes: serializedBytes(result.content),
+        ...(state ? { failureSignature: toolFailureSignature(exec.name, exec.arguments, result.error.message, state) } : {}) })
+    }
     const previous = pendingToolMetrics.get(agent)
     const work = (previous ? previous.then(record) : record()).then(() => {}, error => { ctx.logger.warn('retrieval tool metric failed', error) })
     pendingToolMetrics.set(agent, work)

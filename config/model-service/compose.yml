@@ -39,4 +39,8 @@ services:
       retries: 12
 volumes:
   model-weights:
+    name: ${RETRIEVAL_AGENT_VOLUME_PREFIX:-${COMPOSE_PROJECT_NAME:-retrieval-agent-database}}_model-weights
+    external: ${RETRIEVAL_AGENT_EXISTING_VOLUMES:-false}
   model-cache:
+    name: ${RETRIEVAL_AGENT_VOLUME_PREFIX:-${COMPOSE_PROJECT_NAME:-retrieval-agent-database}}_model-cache
+    external: ${RETRIEVAL_AGENT_EXISTING_VOLUMES:-false}

@@ -106,9 +106,25 @@ function timeField(query: string, index: number, length: number): string {
   return 'createdAt'
 }
 
-export function compileUserConditions(query: string, entities: readonly SpacyEntityResponse[], now: Date, timeZone: string): {
-  filters: TicketFilter[]; ambiguities: TicketQueryAmbiguity[]; userRequirements: TicketUserRequirement[]
+export function compileUserConditions(query: string, entities: readonly SpacyEntityResponse[], now: Date, timeZone: string,
+  options: { mode?: 'request' | 'supplement' } = {}): {
+  filters: TicketFilter[]; ambiguities: TicketQueryAmbiguity[]; userRequirements: TicketUserRequirement[]; removedFilterFields: string[]
 } {
+  // Entity recognition identifies a mention, not a user instruction. Preserve offsets
+  // while excluding quoted/example evidence from deterministic hard-filter compilation.
+  const mask = (text: string): string => ' '.repeat(text.length)
+  query = query.replace(/[（(]\s*(?:例如|比如|如|e\.g\.)[^）)]*[）)]/giu, mask)
+    .replace(/[“「『][^”」』]*[”」』]/gu, mask)
+    .replace(/(?:例如|比如)\s*[^；;。\n]+/gu, mask)
+  const removedFilterFields = new Set<string>()
+  const fieldNames: Record<string, string> = { region: 'region', 地域: 'region', 地区: 'region', 城市: 'region',
+    status: 'status', 状态: 'status', createdAt: 'createdAt', 创建时间: 'createdAt', updatedAt: 'updatedAt', 更新时间: 'updatedAt',
+    resolvedAt: 'resolvedAt', 解决时间: 'resolvedAt', displayId: 'displayId', 工单编号: 'displayId' }
+  const names = Object.keys(fieldNames).join('|')
+  query = query.replace(new RegExp(`(?:移除|取消|删除|去掉|不限制|不限)[^，,；;。\\n]{0,16}?(?:${names})[^，,；;。\\n]*|(?:${names})\\s*(?:不限|不限制)`, 'gu'), text => {
+    for (const name of text.matchAll(new RegExp(names, 'gu'))) removedFilterFields.add(fieldNames[name[0]]!)
+    return mask(text)
+  })
   const requirements: TicketUserRequirement[] = []
   const compiledSpans: { start: number; end: number }[] = []
   const add = (text: string, filters: TicketFilter[]): void => {
@@ -192,32 +208,45 @@ export function compileUserConditions(query: string, entities: readonly SpacyEnt
       && !covered(entity.start, entity.end)) unresolved(entity.text, '时间表达尚不能可靠编译，请明确日期范围。')
   }
 
-  const geographic = [...query.matchAll(PROVINCES)].map(match => match[0])
+  const isRegionInstruction = (text: string, start: number): boolean => {
+    const prefix = query.slice(0, start)
+    // A user's location in a described case is not the ticket's region field.
+    if (/(?:用户|客户|机主)\s*(?:身处|身在|人在|不在|在)\s*$/u.test(prefix)) return false
+    return options.mode !== 'supplement' || query.trim() === text
+      || /(?:只看|只查|只查询|只要|仅看|仅查|仅查询|限于|仅限|排除|除了|不要|地区|地域|region)\s*[:：=为]?\s*$/iu.test(prefix)
+  }
+  const geographic = [...query.matchAll(PROVINCES)].filter(match => isRegionInstruction(match[0], match.index))
+    .map(match => ({ text: match[0], start: match.index }))
   for (const entity of entities) {
-    if (['GPE', 'LOC'].includes(entity.label) && query.slice(entity.start, entity.end) === entity.text) geographic.push(entity.text)
+    if (['GPE', 'LOC'].includes(entity.label) && query.slice(entity.start, entity.end) === entity.text
+      && isRegionInstruction(entity.text, entity.start)) geographic.push({ text: entity.text, start: entity.start })
   }
   const macroRegions = /(?:华东|华南|华北|华中|东北|西北|西南|附近|当地|本地)(?:地区)?/gu
   for (const match of query.matchAll(macroRegions)) unresolved(match[0], '地域范围需要明确可用的地区名称，当前不支持区域层级推断。')
-  const regions = [...new Set(geographic)].filter(text => !/华东|华南|华北|华中|东北|西北|西南|附近|当地|本地/u.test(text))
+  const regions = [...new Set(geographic.map(mention => mention.text))].filter(text => !/华东|华南|华北|华中|东北|西北|西南|附近|当地|本地/u.test(text))
   const distinctRegions = regions.filter(text => !regions.some(other => other !== text && other.includes(text)))
+  // Resolve operators against an admitted instruction, not an earlier case description
+  // that happens to mention the same city. NER and the province matcher may overlap.
+  const regionOffsets = (text: string): number[] => [...new Set(geographic.filter(mention => mention.text === text).map(mention => mention.start))].sort((a, b) => a - b)
+  const regionStart = (text: string): number => regionOffsets(text)[0]!
   // A scoped inclusion plus separately stated exclusions is already unambiguous.
   // Keep compound alternatives and unscoped mentions for the model/user to resolve.
   const explicitRegions = distinctRegions.map(text => {
-    const index = query.indexOf(text), prefix = query.slice(0, index)
+    const index = regionStart(text), prefix = query.slice(0, index)
     const op = /(?:排除|除了|非|不在|不是|不要)\s*$/u.test(prefix) ? 'neq'
       : /(?:只看|只查|只查询|只要|仅看|仅查|仅查询|限于|仅限)\s*$/u.test(prefix) ? 'eq' : undefined
     return { text, op }
   })
   const explicitConjunction = distinctRegions.length > 1 && explicitRegions.every(item => item.op)
     && explicitRegions.filter(item => item.op === 'eq').length <= 1
-    && distinctRegions.every(text => query.indexOf(text) === query.lastIndexOf(text))
+    && distinctRegions.every(text => regionOffsets(text).length === 1)
     && !/(?:或|还是|\bor\b)/iu.test(query)
   for (const text of distinctRegions) {
     if (explicitConjunction) add(text, [{ field: 'region', op: explicitRegions.find(item => item.text === text)!.op as 'eq' | 'neq', value: text.replace(/(?:省|市)$/u, '') }])
     else if (distinctRegions.length > 1) unresolved(text, '存在多个地域，需确认它们的逻辑关系和字段映射。')
-    else if (/^(?:附近|周边)/u.test(query.slice(query.indexOf(text) + text.length))) unresolved(text, '附近或周边地区需要明确地域范围，不能作为该城市的等值条件。')
-    else add(text, [{ field: 'region', op: /(?:排除|除了|非|不在|不是|不要)\s*$/u.test(query.slice(0, query.indexOf(text)))
-      || /^(?:以外|之外)/u.test(query.slice(query.indexOf(text) + text.length)) ? 'neq' : 'eq', value: text.replace(/(?:省|市)$/u, '') }])
+    else if (/^(?:附近|周边)/u.test(query.slice(regionStart(text) + text.length))) unresolved(text, '附近或周边地区需要明确地域范围，不能作为该城市的等值条件。')
+    else add(text, [{ field: 'region', op: /(?:排除|除了|非|不在|不是|不要)\s*$/u.test(query.slice(0, regionStart(text)))
+      || /^(?:以外|之外)/u.test(query.slice(regionStart(text) + text.length)) ? 'neq' : 'eq', value: text.replace(/(?:省|市)$/u, '') }])
   }
   for (const match of query.matchAll(/(?:地域|地区|region)\s*[:：=]\s*([^\s，,；;。]+)/giu)) {
     if (requirements.some(item => match[0].includes(item.text))) continue
@@ -254,5 +283,5 @@ export function compileUserConditions(query: string, entities: readonly SpacyEnt
   const filters = [...new Map(requirements.flatMap(item => item.filters).map(filter => [JSON.stringify(filter), filter])).values()]
   const ambiguities: TicketQueryAmbiguity[] = requirements.filter(item => item.status === 'unresolved')
     .map(item => ({ kind: uncertainQuantities.has(item.text) ? 'quantity' : 'constraint', text: `${item.text}：${item.reason}` }))
-  return { filters, ambiguities, userRequirements }
+  return { filters, ambiguities, userRequirements, removedFilterFields: [...removedFilterFields] }
 }

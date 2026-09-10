@@ -40,6 +40,14 @@ services:
     command: [node, scripts/manage-ticket-data.mjs, all]
 volumes:
   app-state:
+    name: ${RETRIEVAL_AGENT_VOLUME_PREFIX:-${COMPOSE_PROJECT_NAME:-retrieval-agent-database}}_app-state
+    external: ${RETRIEVAL_AGENT_EXISTING_VOLUMES:-false}
   app-data:
+    name: ${RETRIEVAL_AGENT_VOLUME_PREFIX:-${COMPOSE_PROJECT_NAME:-retrieval-agent-database}}_app-data
+    external: ${RETRIEVAL_AGENT_EXISTING_VOLUMES:-false}
   app-wiki:
+    name: ${RETRIEVAL_AGENT_VOLUME_PREFIX:-${COMPOSE_PROJECT_NAME:-retrieval-agent-database}}_app-wiki
+    external: ${RETRIEVAL_AGENT_EXISTING_VOLUMES:-false}
   app-output:
+    name: ${RETRIEVAL_AGENT_VOLUME_PREFIX:-${COMPOSE_PROJECT_NAME:-retrieval-agent-database}}_app-output
+    external: ${RETRIEVAL_AGENT_EXISTING_VOLUMES:-false}

@@ -51,10 +51,12 @@ export interface ExpertTask extends ExpertAssignment {
   readonly knowledgeRefs: readonly string[]
   readonly status: 'pending' | 'running' | 'completed' | 'failed' | 'superseded'
   readonly allowedTools: readonly string[]
+  /** Legacy planning batch size, no longer a hard execution limit. */
   readonly maxActions: number
+  readonly repeatedToolFailure?: { readonly signature: string; readonly count: number }
   readonly actionsUsed: number
   /** A committed execution fact, never the model's private reasoning. */
-  readonly activity?: { readonly kind: 'starting' | 'inspect' | 'search' | 'report'; readonly at: string }
+  readonly activity?: { readonly kind: 'starting' | 'inspect' | 'search' | 'report'; readonly at: string; readonly query?: string }
   readonly modelSteps?: number
   readonly inputTokens?: number
   readonly outputTokens?: number

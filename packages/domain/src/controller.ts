@@ -55,7 +55,7 @@ export interface RetrievalControllerConfig {
   readonly rulesVersion?: string
   readonly promptVersion?: string
   readonly maxSearches?: number
-  readonly maxConsecutiveToolErrors?: number
+  readonly maxRepeatedToolErrors?: number
   readonly searchTopK?: number
   readonly searchMaxScan?: number
   /** Test or alternative Provider seam; not part of serialized product configuration. */
@@ -67,6 +67,8 @@ export interface RetrievalClarificationAnswer {
   readonly accepted: boolean
   readonly answer?: string
   readonly filters?: readonly TicketFilter[]
+  /** Direct user revisions only. Agent search tools cannot grant this permission. */
+  readonly removedFilterFields?: readonly string[]
   readonly requirements?: readonly TicketUserRequirement[]
   readonly ambiguities?: readonly TicketQueryAmbiguity[]
   readonly result?: { readonly countPolicy: 'explicit' | 'adaptive' | 'exhaustive'; readonly requestedCount?: number }
@@ -86,7 +88,7 @@ export class RetrievalController {
   readonly #rulesVersion: string
   readonly #promptVersion: string
   readonly #maxSearches: number
-  readonly #maxConsecutiveToolErrors: number
+  readonly #maxRepeatedToolErrors: number | undefined
   readonly #searchTopK: number
   readonly #searchMaxScan: number
   readonly #now: () => Date
@@ -102,8 +104,8 @@ export class RetrievalController {
     this.#rulesVersion = config.rulesVersion ?? 'retrieval-rules-v1'
     this.#promptVersion = config.promptVersion ?? 'retrieval-prompt-v2'
     this.#maxSearches = config.maxSearches ?? 2_500
-    this.#maxConsecutiveToolErrors = config.maxConsecutiveToolErrors ?? 6
-    if (!Number.isSafeInteger(this.#maxConsecutiveToolErrors) || this.#maxConsecutiveToolErrors < 1) throw new TypeError('maxConsecutiveToolErrors must be a positive integer')
+    this.#maxRepeatedToolErrors = config.maxRepeatedToolErrors ?? 4
+    if (this.#maxRepeatedToolErrors !== undefined && (!Number.isSafeInteger(this.#maxRepeatedToolErrors) || this.#maxRepeatedToolErrors < 1)) throw new TypeError('maxRepeatedToolErrors must be a positive integer')
     this.#searchTopK = config.searchTopK ?? 20
     this.#searchMaxScan = config.searchMaxScan ?? 50_000
     this.#now = config.now ?? (() => new Date())
@@ -180,7 +182,7 @@ export class RetrievalController {
         })),
       ],
       allowedActions: [action('search'), action('read_state')],
-      budget: { ...emptyBudget({ maxSearches: this.#maxSearches }), maxConsecutiveToolErrors: this.#maxConsecutiveToolErrors, consecutiveToolErrors: 0 },
+      budget: { ...emptyBudget({ maxSearches: this.#maxSearches }), ...(this.#maxRepeatedToolErrors === undefined ? {} : { maxRepeatedToolErrors: this.#maxRepeatedToolErrors }), consecutiveToolErrors: 0 },
       progress: { newCandidateRefs: [], newEvidenceIds: [], rankOverlap: 0, newDecisiveEvidence: false, resolvedGaps: [], noProgressStreak: 0 },
       termination: 'active',
       provenance: {
@@ -250,6 +252,11 @@ export class RetrievalController {
       && g.evaluator === 'model' && ['open', 'unknown'].includes(g.status) && selected.some(ref => g.evidenceRefs.includes(ref)))
     if (selected.length < 2 && !pendingConstraint && !groundedAmbiguity) throw new RetrievalError('INVALID_REQUEST', '澄清需引用真实候选差异，或有候选证据支持的未解决业务歧义。')
     const normalizedQuestion = question.trim()
+    const questionKey = (text: string): string => text.normalize('NFKC').replace(/[\s\p{P}]+/gu, '')
+    if ((state.clarification?.answer && questionKey(state.clarification.question) === questionKey(normalizedQuestion))
+      || state.userFeedback?.some(item => item.question && questionKey(item.question) === questionKey(normalizedQuestion))) {
+      throw new RetrievalError('INVALID_REQUEST', '用户已回答这个问题。读取 userFeedback 和 clarification，沿已确认口径继续取证与判断，不要再次询问或重新启动检索。')
+    }
     if (normalizedQuestion.length < 2 || normalizedQuestion.length > 500) {
       throw new RetrievalError('INVALID_REQUEST', '澄清问题或候选差异依据无效。')
     }
@@ -300,9 +307,9 @@ export class RetrievalController {
         facet: state.clarification!.facet, accepted: input.accepted, ...(answer === undefined ? {} : { answer }),
       })
       : this.#journal.append(state.retrievalId, 'retrieval/user-feedback-received', { text: answer ?? '' })
-    const waitingSince = state.executionClock?.waitingSince
+    const waitingSince = state.executionClock?.waitingSince ?? (state.phase === 'stopped' ? state.updatedAt : undefined)
     const waiting = waitingSince === undefined ? 0 : Math.max(0, this.#now().getTime() - Date.parse(waitingSince))
-    const changedFields = new Set((input.filters ?? []).map(filter => filter.field))
+    const changedFields = new Set([...(input.filters ?? []).map(filter => filter.field), ...(input.removedFilterFields ?? [])])
     const updatedFilters = [...state.query.spec.filters.filter(filter => !changedFields.has(filter.field)), ...(input.filters ?? [])]
     const replacedQuantityTexts = input.result === undefined ? [] : state.query.spec.ambiguities
       .filter(item => item.kind === 'quantity').map(item => item.text)
@@ -339,7 +346,8 @@ export class RetrievalController {
       ...(result.countPolicy === 'explicit' ? { requestedCount: result.requestedCount! } : {}),
       completenessRequirement: result.countPolicy === 'exhaustive' ? 'exhaustive' as const : 'top_k' as const }
     const baseSpec = state.query.spec.queryPlan && changesConditions ? { ...state.query.spec,
-      queryPlan: resolvePlanRequirements(reviseQueryPlan(state.query.spec.queryPlan, input.filters ?? []),
+      queryPlan: resolvePlanRequirements(reviseQueryPlan(state.query.spec.queryPlan, input.filters ?? [], input.removedFilterFields ?? [],
+        input.removedFilterFields?.length ? supersededTexts : []),
         supersededTexts.map(text => ({ text, filters: input.filters ?? [] }))) } : state.query.spec
     const spec = result === undefined ? baseSpec : { ...specWithoutCount, ...(baseSpec.queryPlan ? { queryPlan: baseSpec.queryPlan } : {}), countPolicy: result.countPolicy,
       ...(result.countPolicy === 'explicit' ? { requestedCount: result.requestedCount! } : {}) }
@@ -356,7 +364,7 @@ export class RetrievalController {
       unresolvedConstraints: unresolved,
     } : state.query
     const next = advanceRetrievalState(state, {
-      phase: 'assessed', query, task, evidenceWindowOffset: 0,
+      phase: 'assessed', query, task, evidenceWindowOffset: 0, coordinatorActivity: 'working',
       // A user may change a semantic business requirement without changing an L0 filter.
       // Previous accepts/excludes then need a fresh judgment against the new information.
       selectedCandidateRefs: [], excludedCandidateRefs: [], judgments: [],
@@ -373,7 +381,8 @@ export class RetrievalController {
       ...(changesConditions ? { candidates: [], lastPage: undefined,
         modelVisibleCandidateRefs: [], modelVisibleEvidenceIds: [], candidateWindowOffset: 0 } : {}),
       ...(answering ? { clarification: { ...state.clarification!, ...(answer === undefined ? {} : { answer }) } } : {}),
-      userFeedback: [...(state.userFeedback ?? []), ...(answer === undefined ? [] : [{ text: answer, receivedAt: this.#now().toISOString() }])],
+      userFeedback: [...(state.userFeedback ?? []), ...(answer === undefined ? [] : [{ text: answer, receivedAt: this.#now().toISOString(),
+        ...(answering && state.clarification ? { question: state.clarification.question } : {}) }])],
       executionClock: { totalWaitingMs: (state.executionClock?.totalWaitingMs ?? 0) + waiting },
       lastAssessment: undefined,
       allowedActions: [action('assess', changesConditions ? [] : state.candidates.map(candidate => candidate.ref)), action('repair_search'),
@@ -553,12 +562,9 @@ export class RetrievalController {
     const refs = validateRefs(state, input.candidateRefs ?? [])
     const fields = [...new Set(input.fields ?? [])]
     if (refs.length === 0 || refs.length > MAX_EVIDENCE_CANDIDATES_PER_READ || fields.length === 0) throw new RetrievalError('INVALID_REQUEST', '读取必须指定有限候选和受控字段。')
-    validateVisibleEvidence(state, refs)
-    const gapSupportsRead = state.gaps.some(gap => ['depth', 'conflict', 'version_or_prior', 'ambiguity'].includes(gap.kind)
-      && ['open', 'unknown'].includes(gap.status) && refs.some(ref => gap.evidenceRefs.includes(ref)
-        || state.promotedEvidence.some(e => e.candidateRef === ref && gap.evidenceRefs.includes(e.evidenceId))))
-    const conflictSupportsRead = state.expertConflicts?.some(c => c.status === 'open' && refs.includes(c.candidateRef))
-    if (!gapSupportsRead && !conflictSupportsRead) throw new RetrievalError('INVALID_TRANSITION', '深读需有 depth/conflict/version_or_prior/ambiguity 缺口，并在 evidence_aliases 引用待读的 cN；已有未决专家分歧可直接重读本工单。')
+    // Reading establishes visibility; it must not require a previous summary read.
+    // Candidate identity, current access and controlled fields remain authorized
+    // here and by the Provider. Decisions still require actual model delivery.
     if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '没有可用快照。')
     const allowedFields = state.snapshot.fieldCatalog.filter(field => ['L1', 'L2', 'L3'].includes(field.accessLevel) && field.valueKind !== 'raw_json').map(field => field.key)
     if (fields.some(field => !allowedFields.includes(field))) throw new RetrievalError('FIELD_NOT_ALLOWED', `深读字段必须从当前 inspectFields 原样选择，不能猜测名称或读取完整原始载荷。当前可选字段：${allowedFields.join('、')}。`)
@@ -573,7 +579,7 @@ export class RetrievalController {
     }
     if (result.rejectedCandidateRefs.length > 0) throw new RetrievalError('UNAUTHORIZED', '一个或多个候选已失去读取权限。')
     if (result.evidence.length === 0) throw new RetrievalError('FIELD_NOT_ALLOWED', '请求字段没有可读取的授权内容，请选择其他字段或说明仍缺少依据。')
-    return this.#recordEvidence(state, result.evidence, 'provider', result.tokensUsed, result.nextPosition)
+    return this.#recordEvidence(state, result.evidence, 'provider', result.tokensUsed, result.nextPosition, refs)
   }
 
   recordDetailRead(state: RetrievalState, receipt: CandidateDetailReadReceipt, result: TicketDetailResult): RetrievalState {
@@ -620,7 +626,7 @@ export class RetrievalController {
   }
 
   #recordEvidence(state: RetrievalState, received: readonly TicketEvidenceSegment[], reader: 'provider' | 'user', tokensUsed = 0,
-    nextPosition?: import('@retrieval-agent/contracts').EvidencePosition): RetrievalState {
+    nextPosition?: import('@retrieval-agent/contracts').EvidencePosition, focusRefs?: readonly TicketCandidateRef[], background = reader === 'user'): RetrievalState {
     const evidence = new Map(state.promotedEvidence.map(item => [item.evidenceId, item]))
     const added: TicketEvidenceSegment[] = []
     const receivedIds = new Set<string>()
@@ -653,15 +659,25 @@ export class RetrievalController {
     const promotedEvidence = [...evidence.values()]
     const sourceEventIds = [event.eventId]
     // A later detail click records user visibility; it does not revise an Agent-confirmed result.
-    return this.#record(state, { promotedEvidence, evidenceReadPosition: nextPosition,
-      evidenceWindowOffset: 0,
+    return this.#record(state, { promotedEvidence,
+      // A UI read adds user-visible evidence; it does not invalidate an in-flight model decision.
+      ...(background ? { measurementStateIds: [...(state.measurementStateIds ?? []), state.stateId] } : {}),
+      ...(background ? {} : { evidenceReadPosition: nextPosition, evidenceWindowOffset: 0,
+        progress: { ...state.progress, newEvidenceIds: added.map(item => item.evidenceId) } }),
+      // A model-requested read changes its focus; an independent UI detail read does not.
+      ...(focusRefs ? { contextCandidateRefs: focusRefs } : {}),
       candidates: state.candidates.map(candidate => added.some(item => item.candidateRef === candidate.ref && item.evidenceLevel === 'L2')
         ? { ...candidate, evidenceLevel: 'L2' as const } : candidate),
-      progress: { ...state.progress, newEvidenceIds: added.map(item => item.evidenceId) },
       provenance: { ...state.provenance, sourceEventIds } })
   }
 
   /** Trusted coordinator commits only provider receipts and role-bound artifacts, never arbitrary state patches. */
+  setCoordinatorWaiting(state: RetrievalState, waiting: boolean): RetrievalState {
+    if (state.phase === 'stopped') return state
+    return this.#record(state, { coordinatorActivity: waiting ? 'waiting_experts' : 'working',
+      measurementStateIds: [...(state.measurementStateIds ?? []), state.stateId] })
+  }
+
   expertUpdate(state: RetrievalState, generation: number, update: ExpertUpdate): RetrievalState {
     if (generation !== (state.inputGeneration ?? 0) || state.phase === 'stopped') throw new RetrievalError('INVALID_TRANSITION', '专家作业属于过期输入或已停止任务。')
     switch (update.kind) {
@@ -691,9 +707,8 @@ export class RetrievalController {
         const task = state.expertTasks?.find(t => t.id === update.taskId)
         if (!task || task.inputGeneration !== generation) throw new RetrievalError('INVALID_REQUEST', '专家分支不存在。')
         if (task.status === 'failed' && update.patch.status && update.patch.status !== 'failed') throw new RetrievalError('INVALID_TRANSITION', '已失败或失效的专家分支不能由迟到写入重新启用。')
-        const telemetry = !update.patch.status && !update.patch.failure
         return this.#record(state, { expertTasks: state.expertTasks!.map(t => t.id === task.id ? { ...t, ...update.patch } : t),
-          ...(telemetry ? { measurementStateIds: [...(state.measurementStateIds ?? []), state.stateId] } : {}) })
+          measurementStateIds: [...(state.measurementStateIds ?? []), state.stateId] })
       }
       case 'manifest': {
         const m = update.manifest
@@ -704,10 +719,11 @@ export class RetrievalController {
         return this.#record(state, { contextManifests: [...(state.contextManifests ?? []), m],
           measurementStateIds: [...(state.measurementStateIds ?? []), state.stateId] })
       }
-      case 'finding': return this.#record(state, findingPatch(state, update.finding))
+      case 'finding': return this.#record(state, { ...findingPatch(state, update.finding),
+        measurementStateIds: [...(state.measurementStateIds ?? []), state.stateId] })
       case 'evidence': {
         if (update.result.snapshotId !== state.snapshot?.snapshotId || update.result.rejectedCandidateRefs.length) throw new RetrievalError('UNAUTHORIZED', '专家证据未通过当前快照授权。')
-        return this.#recordEvidence(state, update.result.evidence, 'provider', update.result.tokensUsed)
+        return this.#recordEvidence(state, update.result.evidence, 'provider', update.result.tokensUsed, undefined, undefined, true)
       }
       case 'search': {
         const { page, spec } = update
@@ -719,6 +735,7 @@ export class RetrievalController {
           resetEligibility: false, observationStart: state.activeRankingStart ?? 0, previousObservations: state.rankingHistory,
           page: page.candidates, searchEventId: event.eventId, stage: 'repair_search', queryFingerprint: page.queryFingerprint })
         return this.#record(state, { candidates: ranking.active, candidateHistory: ranking.history, rankingHistory: ranking.observations,
+          measurementStateIds: [...(state.measurementStateIds ?? []), state.stateId],
           sharedSearches: [...(state.sharedSearches ?? []), { key: update.key, spec, page, inputGeneration: generation }],
           budget: { ...state.budget, searchesUsed: state.budget.searchesUsed + 1, providerLatencyMs: (state.budget.providerLatencyMs ?? 0) + page.elapsedMs },
           progress: { ...state.progress, newCandidateRefs: page.candidates.filter(c => !state.candidates.some(old => old.ref === c.ref)).map(c => c.ref) } })
@@ -752,11 +769,11 @@ export class RetrievalController {
     })
     return recordMeasuredBudget(this.#journal, state, event.eventId, modelResponseBudget(state.budget, input), this.#now, this.#id)
   }
-  recordToolCall(state: RetrievalState, input: { readonly success: boolean; readonly serializationBytes: number }): RetrievalState {
+  recordToolCall(state: RetrievalState, input: { readonly success: boolean; readonly serializationBytes: number; readonly failureSignature?: string }): RetrievalState {
     const event = this.#journal.append(state.retrievalId, 'retrieval/tool-call-measured', input)
     const measured = recordMeasuredBudget(this.#journal, state, event.eventId, toolCallBudget(state.budget, input), this.#now, this.#id)
-    if (measured.phase !== 'stopped' && (measured.budget.consecutiveToolErrors ?? 0) >= (measured.budget.maxConsecutiveToolErrors ?? this.#maxConsecutiveToolErrors)) {
-      const explained = this.#record(measured, { stopExplanation: `主 Agent 连续 ${measured.budget.consecutiveToolErrors} 次工具调用校验或执行失败，已达到修复资源上限；任务尚未完成，已保存条件、候选与证据。` })
+    if (measured.phase !== 'stopped' && this.#maxRepeatedToolErrors !== undefined && (measured.budget.repeatedToolFailure?.count ?? 0) >= this.#maxRepeatedToolErrors) {
+      const explained = this.#record(measured, { stopExplanation: `检测到工具调用死循环：相同参数和相同错误连续出现 ${measured.budget.repeatedToolFailure!.count} 次，期间没有有效动作或新证据。已保留任务与证据，需要调整模型或补充处理方式后继续。` })
       return this.freezeForInterruption(explained, 'budget_exhausted')
     }
     return measured
@@ -789,6 +806,8 @@ export class RetrievalController {
       phase: 'stopped',
       allowedActions: [],
       termination: reason,
+      executionClock: { totalWaitingMs: state.executionClock?.totalWaitingMs ?? 0,
+        waitingSince: state.executionClock?.waitingSince ?? this.#now().toISOString() },
       ...(state.searchProgress ? { searchProgress: { ...state.searchProgress, channels: state.searchProgress.channels.map(channel => channel.status === 'running'
         ? { ...channel, status: 'failed' as const, error: failure?.code ?? reason } : channel) } } : {}),
       ...(failure === undefined ? {} : { stopErrorCode: failure.code, stopExplanation: failure.publicMessage }),
@@ -853,6 +872,8 @@ export class RetrievalController {
       phase: 'stopped',
       allowedActions: [],
       termination: stoppingReason,
+      executionClock: { totalWaitingMs: state.executionClock?.totalWaitingMs ?? 0,
+        waitingSince: state.executionClock?.waitingSince ?? this.#now().toISOString() },
       frozenEvidence: pack,
       provenance: { ...state.provenance, sourceEventIds: [frozen.eventId, stopped.eventId] },
     }, this.#now, this.#id)

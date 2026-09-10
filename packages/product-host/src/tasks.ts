@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { projectOrchestration } from './orchestration.js'
+import { contextCompressionStats } from '@retrieval-agent/agent-plugin'
+import { installWorkbenchModels, WorkbenchModels } from './models.js'
+import { readActivity } from './activity.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -158,6 +161,7 @@ export class TaskHost {
     if (task.owner_hash !== taskOwner(principal)) throw new RetrievalError('UNAUTHORIZED', '当前身份无权访问任务。')
     return { task, agent, application, principal }
   }
+  async modelAgent(id: string): Promise<Agent> { return (await this.access(id)).agent }
   async snapshot(id: string, attempt = 0): Promise<TaskSnapshot> {
     const { task: identity, agent, application } = await this.access(id)
     let node: TicketCandidateNode | undefined
@@ -166,7 +170,10 @@ export class TaskHost {
       const authorized = await application.authorizePresentation(agent, RetrievalId(id))
       if (authorized.accessValidation !== 'current' && authorized.termination !== 'snapshot_invalid') throw new RetrievalError('UNAUTHORIZED', authorized.stopExplanation ?? '当前工单访问资格未通过。')
       node = windowedNode(authorized, projectTicketCandidateState(authorized, authorized.retrievalId))
-      if (authorized.accessValidation === 'current' && !['snapshot_invalid', 'permission_blocked'].includes(authorized.termination)) orchestration = projectOrchestration(authorized)
+      if (authorized.accessValidation === 'current' && !['snapshot_invalid', 'permission_blocked'].includes(authorized.termination)) {
+        orchestration = projectOrchestration(authorized)
+        if (orchestration.context) orchestration.context = { ...orchestration.context, compression: contextCompressionStats(agent) }
+      }
     }
     const task = (await this.store.rows<{ id: string; session_id: string; event_seq: number; semantic_revision: number;
       query_revision: number; input_revision: number; original_query: string; failure: string | null; state_revision: number | null }>(
@@ -228,6 +235,14 @@ export class TaskHost {
         return
       }
       if (request.method === 'GET' && id && parts.length === 1) { send(response, 200, await this.snapshot(id)); return }
+      if (request.method === 'GET' && id && parts[1] === 'activity' && parts.length === 2) {
+        const after = Number(url.searchParams.get('after') ?? 0)
+        if (!Number.isSafeInteger(after) || after < 0) throw new RetrievalError('INVALID_REQUEST', '轨迹游标无效。')
+        const { agent, application } = await this.access(id)
+        const state = await application.authorizePresentation(agent, RetrievalId(id))
+        if (state.accessValidation !== 'current' || ['snapshot_invalid', 'permission_blocked'].includes(state.termination)) throw new RetrievalError('UNAUTHORIZED', '当前轨迹访问资格已失效。')
+        send(response, 200, await readActivity(this.store, id, state, after)); return
+      }
       if (request.method === 'GET' && id && parts[1] === 'evidence' && parts.length === 2) {
         const { agent, application } = await this.access(id)
         const state = await application.authorizePresentation(agent, RetrievalId(id))
@@ -326,6 +341,7 @@ export class TaskHost {
 }
 
 export async function installTaskHost(ctx: Context, config: { mysqlUrl?: string; workspacePath?: string; queryAnalysisBaseUrl?: string }): Promise<void> {
+  const models = new WorkbenchModels(ctx)
   const workbenchClient = await readFile(new URL('./workbench-client.js', import.meta.url))
   const store = new MySqlTaskStore(config.mysqlUrl, Boolean(process.env.RETRIEVAL_AGENT_WIKI_ROOT) && process.env.RETRIEVAL_AGENT_WIKI_LEARNING !== '0')
   await store.ready
@@ -340,6 +356,7 @@ export async function installTaskHost(ctx: Context, config: { mysqlUrl?: string;
         const handle = create && !saved
           ? await ctx.agents.create({ sessionId: SessionId(id), agentOptions, meta: { agentPreset: 'retrieval-agent', ...(config.workspacePath ? { cwd: config.workspacePath } : {}) }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'retrieval-agent') } })
           : await ctx.agents.resume({ resumeSessionId: SessionId(id), agentOptions, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'retrieval-agent') } })
+        models.bind(handle.agent)
         return handle.agent
       })()
       restoring.set(id, pending)
@@ -362,6 +379,7 @@ export async function installTaskHost(ctx: Context, config: { mysqlUrl?: string;
     onError: (_job, error) => { ctx.logger.warn('retrieval background operation failed', error) },
     onRequestError: error => { ctx.logger.warn('retrieval request failed', error) },
     analyzer: new SpacyQueryAnalyzer({ baseUrl: config.queryAnalysisBaseUrl ?? process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012' }) })
+  installWorkbenchModels(ctx, models, id => host.modelAgent(id))
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: TASKS_ENDPOINT, handler: (request, response) => host.handle(request, response) }))
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/retrieval', handler: (_request, response) => {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); response.end(TASK_WORKBENCH_HTML)

@@ -16,6 +16,7 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
   private readonly states = new WeakMap<Agent, TaskRecord>()
   private readonly jobs = new WeakMap<Agent, TaskJob>()
   private readonly mirrorFlights = new WeakMap<Agent, Promise<void>>()
+  private readonly mutations = new WeakMap<Agent, Promise<void>>()
   private readonly persistentConfig: RetrievalAgentServiceConfig
   constructor(ctx: Context, config: RetrievalAgentServiceConfig, store: MySqlTaskStore) {
     super(ctx, config); this.store = store; this.persistentConfig = config
@@ -38,6 +39,9 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
           || (this.currentOrUndefined(agent)?.inputGeneration ?? 0) !== generation) throw error
       }
     }
+  }
+  override async setCoordinatorWaiting(agent: Agent, waiting: boolean): Promise<RetrievalState> {
+    return this.execute(agent, async (c, s) => c.setCoordinatorWaiting(s, waiting), { semantic: false })
   }
   private async executionTask(agent: Agent): Promise<TaskRecord | undefined> {
     const job = this.jobs.get(agent)
@@ -118,6 +122,18 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
   }
   private async execute(agent: Agent, work: (controller: RetrievalController, state: RetrievalState, journal: TaskJournal) => Promise<RetrievalState>,
     options: { start?: boolean; information?: readonly RetrievalClarificationAnswer[]; semantic?: boolean; taskId?: string } = {}): Promise<RetrievalState> {
+    const previous = this.mutations.get(agent) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(resolve => { release = resolve })
+    this.mutations.set(agent, current)
+    await previous
+    try { return await this.executeCurrent(agent, work, options) }
+    finally { release(); if (this.mutations.get(agent) === current) this.mutations.delete(agent) }
+  }
+  // Serialize state commits for one parent. Model generation and independent expert
+  // Provider I/O stay concurrent; the SQL input revision/worker lease remains the fence.
+  private async executeCurrent(agent: Agent, work: (controller: RetrievalController, state: RetrievalState, journal: TaskJournal) => Promise<RetrievalState>,
+    options: { start?: boolean; information?: readonly RetrievalClarificationAnswer[]; semantic?: boolean; taskId?: string }): Promise<RetrievalState> {
     const execution = options.taskId ? undefined : await this.executionTask(agent)
     const active = execution ?? await this.executionIdentity(agent)
     let base = options.taskId ? await this.store.read(options.taskId) : execution
@@ -263,8 +279,9 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
 }
 
 export function compileTaskInformation(text: string): RetrievalClarificationAnswer {
-  const conditions = compileUserConditions(text, [], new Date(), Intl.DateTimeFormat().resolvedOptions().timeZone)
+  const conditions = compileUserConditions(text, [], new Date(), Intl.DateTimeFormat().resolvedOptions().timeZone, { mode: 'supplement' })
   const result = compileUserResultPolicy(text)
-  return { accepted: true, answer: text, filters: conditions.filters, requirements: conditions.userRequirements, ambiguities: conditions.ambiguities,
+  return { accepted: true, answer: text, filters: conditions.filters, removedFilterFields: conditions.removedFilterFields,
+    requirements: conditions.userRequirements, ambiguities: conditions.ambiguities,
     ...(result?.countPolicy ? { result: { ...result, countPolicy: result.countPolicy } } : {}) }
 }

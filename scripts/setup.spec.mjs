@@ -73,7 +73,7 @@ test('first-run public wizard preserves special characters and configures all de
 
 test('index failure stops before app startup; rerun preserves configuration and never deletes volumes', () => {
   const f = fixture({ mode: 'index-failure' }), before = readFileSync(join(f.dir, '.env'), 'utf8')
-  const failed = f.run(['--non-interactive'])
+  const failed = f.run(['install', '--non-interactive'])
   assert.equal(failed.status, 37, failed.stderr)
   assert.match(failed.stderr, /未完成：\[5\/8\]/u)
   assert.ok(!failed.stdout.includes('部署完成'))
@@ -122,9 +122,9 @@ for (const mode of ['offline', 'windows']) {
   })
 }
 
-test('daily start skips installation, preserves configuration and never builds or downloads', () => {
+for (const args of [['start'], []]) test(`daily start ${JSON.stringify(args)} skips installation, preserves configuration and never builds or downloads`, () => {
   const f = fixture(), before = readFileSync(join(f.dir, '.env'), 'utf8')
-  const result = f.run(['start'])
+  const result = f.run(args)
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /工作台已启动/u)
   const calls = f.calls()

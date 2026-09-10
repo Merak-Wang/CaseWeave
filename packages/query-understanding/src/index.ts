@@ -15,7 +15,7 @@ import {
   type QueryAnalysisResponse,
 } from './protocol.js'
 import { compileUserConditions, explicitUserCount } from './conditions.js'
-import { compileQueryPlan } from './query-plan.js'
+import { compileQueryPlan, hasDisjunction } from './query-plan.js'
 import type { QueryPlanParser } from './query-plan.js'
 export * from './query-plan.js'
 
@@ -88,6 +88,7 @@ function validResponse(value: unknown, requestId: string, query: string): value 
   for (const raw of response.candidates) {
     const item = object(raw)
     if (!nonEmptyString(item?.text) || !query.includes(item.text) || !validOffset(item.start, item.end, query)
+      || query.slice(Number(item.start), Number(item.end)) !== item.text
       || !['domain_lexicon', 'pos'].includes(String(item.source)) || !Array.isArray(item.pos)
       || item.pos.length < 1 || !item.pos.every(pos => nonEmptyString(pos, 50))) return false
   }
@@ -95,6 +96,7 @@ function validResponse(value: unknown, requestId: string, query: string): value 
   for (const raw of response.tokens) {
     const item = object(raw)
     if (!nonEmptyString(item?.text) || !validOffset(item.start, item.end, query) || typeof item.lemma !== 'string'
+      || query.slice(Number(item.start), Number(item.end)) !== item.text
       || !nonEmptyString(item.pos, 50) || !nonEmptyString(item.tag, 50) || !nonEmptyString(item.dep, 100)
       || !Number.isSafeInteger(item.head) || Number(item.head) < 0 || Number(item.head) >= response.tokens.length
       || typeof item.isStop !== 'boolean' || typeof item.entityType !== 'string') return false
@@ -102,7 +104,7 @@ function validResponse(value: unknown, requestId: string, query: string): value 
   for (const raw of response.entities) {
     const item = object(raw)
     if (!nonEmptyString(item?.text) || !nonEmptyString(item.label, 100)
-      || !validOffset(item.start, item.end, query)) return false
+      || !validOffset(item.start, item.end, query) || query.slice(Number(item.start), Number(item.end)) !== item.text) return false
   }
   for (const raw of response.triples) {
     const item = object(raw)
@@ -139,6 +141,7 @@ export class SpacyQueryAnalyzer implements TicketQueryAnalyzer {
 
   async analyze(query: string, signal?: AbortSignal): Promise<QueryAnalysisResponse> {
     if (query.trim().length === 0 || query.length > 2_000) throw new TypeError('query must contain 1-2000 characters')
+    if (signal?.aborted) throw new QueryAnalysisClientError('CANCELLED', 'spaCy 查询分析已取消。', false)
     // requestId 同时写入请求和响应，用于防止连接复用或错误代理返回了另一请求的分析结果。
     const requestId = randomUUID()
     const body: QueryAnalysisParams = { protocolVersion: QUERY_ANALYSIS_PROTOCOL_VERSION, requestId, query }
@@ -155,6 +158,7 @@ export class SpacyQueryAnalyzer implements TicketQueryAnalyzer {
         signal: controller.signal,
       })
       const value: unknown = await response.json().catch(() => undefined)
+      controller.signal.throwIfAborted()
       if (!response.ok) {
         // FastAPI 的结构化错误优先透传；非结构化错误收敛成稳定的 HTTP_ERROR。
         const error = object(object(value)?.error)
@@ -296,10 +300,7 @@ export async function buildFastTicketRequest(
   const conditions = compileUserConditions(rawQuery, analysis.entities, config.now ?? new Date(),
     config.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)
   // Branch-specific conditions cannot be flattened into the legacy global filter list.
-  const hasDisjunction = (expression: import('@retrieval-agent/contracts').QueryExpression): boolean => expression.kind === 'or'
-    || (expression.kind === 'and' && expression.children.some(hasDisjunction))
-    || (expression.kind === 'not' && hasDisjunction(expression.child))
-  const branched = hasDisjunction(queryPlan.keyword) || hasDisjunction(queryPlan.hard)
+  const branched = hasDisjunction(queryPlan.hard)
   const additionalUnresolved = queryPlan.requirements.filter(r => r.status === 'unresolved'
     && !conditions.userRequirements.some(legacy => legacy.text === r.span.text && legacy.status === 'unresolved'))
   const filters = mergeInheritedFilters(config.inheritedFilters, branched ? [] : conditions.filters)
@@ -307,15 +308,17 @@ export async function buildFastTicketRequest(
   // QueryPlan owns the sourced Boolean expression; the flat view only carries
   // its remaining lexical operands for legacy consumers and model context.
   const keywordTerms = [...new Set(queryPlan.requirements.filter(r => r.kind === 'keyword').map(r => r.span.text))].slice(0, 8)
-  const queryLogic = explicitLogic(analysis)
-  // 未识别到显式 OR 时按 AND 查找包含全部关键词的工单；向量文本始终逐字保留用户输入。
+  const recallOperator = hasDisjunction(queryPlan.keyword) ? 'or' as const : 'and' as const
+  const parsedLogic = explicitLogic(analysis)
+  const queryLogic = parsedLogic ? { ...parsedLogic, operator: recallOperator } : undefined
+  // Topic recall uses a union; explicit Boolean constraints remain in the authoritative AST.
   const fastQuery: TicketFastQueryPlan = {
     schemaVersion: 2,
     source: 'direct_user',
     rewriteApplied: false,
     ...(keywordTerms.length === 0 ? {} : { keyword: {
       terms: keywordTerms,
-      operator: analysis.boolean?.operator ?? 'and',
+      operator: recallOperator,
     } }),
     vector: { text: rawQuery },
   }
@@ -409,7 +412,7 @@ export async function buildPlannedTicketRequest(query: string, parser: QueryPlan
   const result = compileUserResultPolicy(query); const countPolicy = result?.countPolicy ?? 'adaptive'; const target = taskTarget(query)
   const terms = [...new Set(plan.requirements.filter(r => r.kind === 'keyword').map(r => r.span.text))].slice(0, 8)
   const fastQuery: TicketFastQueryPlan = { schemaVersion: 2, source: 'direct_user', rewriteApplied: false,
-    ...(terms.length ? { keyword: { terms, operator: 'and' as const } } : {}), vector: { text: query } }
+    ...(terms.length ? { keyword: { terms, operator: hasDisjunction(plan.keyword) ? 'or' as const : 'and' as const } } : {}), vector: { text: query } }
   const ambiguities = plan.requirements.filter(r => r.status === 'unresolved').map(r => ({ kind: 'constraint' as const, text: `${r.span.text}：${r.interpretation}` }))
   const contract: TicketQueryContract = { schemaVersion: 9, queryPlan: plan, original: query, normalized: query.normalize('NFKC').trim(), task: target,
     resultPolicy: countPolicy === 'explicit' ? 'explicit_top_k' : countPolicy === 'exhaustive' ? 'exhaustive_current_snapshot' : 'adaptive_top_k',

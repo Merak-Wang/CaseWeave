@@ -1,13 +1,15 @@
 import { readTicketDetail, detailFailureMessage } from '@retrieval-agent/product-api/detail-client'
 import { displayFieldPart } from './workbench-content.js'
 import { createOrchestrationUI, revealText } from './workbench-orchestration.js'
+import { createModelUI } from './workbench-models.js'
 const $ = id => document.getElementById(id), endpoint = '/api/retrieval-agent/tasks'
 const pendingKey = 'retrieval.pending.commands', taskKey = 'retrieval.tasks'
 let taskId = new URL(location.href).searchParams.get('task'), snapshot, stream, lastSeq = 0, minimumInput = 0
 let generation = 0, refreshing = false, again = false, refreshTimer, artifactTimer, disconnected = false
 let view = 'results', page, pageCursor, previousCursors = [], pageLoading = false
 let pageRequest = 0, detailRequest = 0, reportRequest = 0, artifactRequest = 0, report, feedbackTarget, detailReturn, detailScroll
-let timelineKey = '', expertsKey = '', artifactsKey = '', currentListVersion, sendingInput = false, generatingReport = false, animateNextReport = false
+let timelineKey = '', expertsKey = '', artifactsKey = '', currentListVersion, sendingInput = false, stopping = false, generatingReport = false, animateNextReport = false
+let historyEpoch = 0, historyNoticeTimer
 const saved = (key, fallback = []) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback } }
 function writeSaved(key, value) { localStorage.setItem(key, JSON.stringify(value)) }
 function text(tag, value, cls) { const e = document.createElement(tag); e.textContent = value ?? ''; if (cls) e.className = cls; return e }
@@ -23,6 +25,7 @@ const actualView = () => view === 'results' ? 'confirmed' : $('candidate-view').
 const hasAccess = () => snapshot?.node && !['snapshot_invalid', 'permission_blocked'].includes(snapshot.node.status)
 const deliveryReady = () => hasAccess() && Boolean(snapshot.node.result) && !snapshot.failure
 const orchestrationUI = createOrchestrationUI({ api, endpoint, getSnapshot: () => snapshot, getTaskId: () => taskId, showView: setView, expertDetail })
+const modelUI = createModelUI({ api, getTaskId: () => taskId })
 function error(e, source = 'action') {
   const target = $('feedback-dialog').open ? $('feedback-error') : $('delivery').open ? $('delivery-error') : $('error')
   const message = e.name === 'TypeError' && /fetch/i.test(e.message) ? '网络连接中断，请重试。' : e.name === 'TimeoutError' ? '请求超时，请重试。' : e.message || String(e)
@@ -50,7 +53,7 @@ async function retrySaved() {
     try {
       const r = await api(item.path, item.body); writeSaved(pendingKey, saved(pendingKey).filter(i => i.body.operationId !== item.body.operationId)); clearError()
       if (item.body.kind === 'query' && !taskId) await enterTask(r.taskId)
-      else if (r.taskId === taskId && r.inputRevision) { if (r.inputRevision >= minimumInput) acceptReceipt(r); await refresh() }
+      else if (r.taskId === taskId && r.inputRevision) { if (r.inputRevision >= minimumInput) acceptReceipt(r, item.spec.kind); await refresh() }
     } catch (e) {
       if (e.code && !e.retryable && e.code !== 'PROVIDER_UNAVAILABLE') writeSaved(pendingKey, saved(pendingKey).filter(i => i.body.operationId !== item.body.operationId))
       error(e); break
@@ -62,18 +65,36 @@ function remember(id) {
   history.replaceState(null, '', '?task=' + encodeURIComponent(id)); void historyLinks()
 }
 async function historyLinks() {
+  const ownEpoch = ++historyEpoch
   const ids = saved(taskKey).filter(id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(id)).slice(0, 20)
   $('recent-section').hidden = !ids.length
   for (const target of ['restore', 'recent']) { $(target).replaceChildren(); if (!ids.length) $(target).append(text('p', '还没有检索记录', 'muted')) }
   // Persist only IDs. Names and status come from reauthorized snapshots.
-  for (const id of ids) {
-    let s; try { s = id === taskId && snapshot ? snapshot : await api(endpoint + '/' + id) } catch { /* explicit unavailable entry */ }
+  const entries = await Promise.all(ids.map(async id => { let s; try { s = id === taskId && snapshot ? snapshot : await api(endpoint + '/' + id) } catch { /* explicit unavailable entry */ }; return { id, s } }))
+  if (ownEpoch !== historyEpoch) return
+  for (const { id, s } of entries) {
     for (const target of ['restore', 'recent']) {
       const a = text('a', ''); a.href = '?task=' + encodeURIComponent(id)
-      a.append(text('strong', s?.query || '暂时无法打开'), text('small', s ? ['snapshot_invalid', 'permission_blocked'].includes(s.node?.status) ? '来源或访问资格已失效' : s.failure ? '执行未完成' : s.question ? '需要补充' : s.node?.result ? '已结束' : '检索中' : '点击重试'))
-      if (id === taskId) a.setAttribute('aria-current', 'page'); $(target).append(a)
+      a.append(text('strong', s?.query || '暂时无法打开'), text('small', s ? taskStatus(s) : '点击重试'))
+      if (id === taskId) a.setAttribute('aria-current', 'page')
+      const row = text('div', '', 'history-item'), remove = button('×', () => removeHistory(id), 'icon-button history-remove')
+      remove.setAttribute('aria-label', '删除历史记录：' + (s?.query || id)); remove.title = '从这台浏览器的历史记录移除'
+      row.append(a, remove); $(target).append(row)
     }
   }
+}
+function taskStatus(s) {
+  return ['snapshot_invalid', 'permission_blocked'].includes(s.node?.status) ? '来源或访问资格已失效' : s.failure ? '执行未完成'
+    : s.orchestration?.outcome === 'cancelled' ? '已停止' : s.question ? '需要补充' : s.node?.result ? ['top_k_accepted', 'no_result'].includes(s.node.result.stoppingReason) ? '已完成' : '未完成' : '检索中'
+}
+function removeHistory(id) {
+  const before = saved(taskKey), index = before.indexOf(id)
+  writeSaved(taskKey, before.filter(x => x !== id)); void historyLinks()
+  const notice = $('history-notice'); clearTimeout(historyNoticeTimer); notice.hidden = false
+  notice.replaceChildren(text('span', '已删除这条历史记录'), button('撤销', () => {
+    const ids = saved(taskKey).filter(x => x !== id); ids.splice(Math.max(0, index), 0, id); writeSaved(taskKey, ids.slice(0, 20)); void historyLinks(); notice.hidden = true
+  }, 'link'))
+  historyNoticeTimer = setTimeout(() => { notice.hidden = true }, 8000)
 }
 function closeDetail(restore = true) {
   detailRequest++; $('evidence-panel').close(); $('evidence-panel').hidden = true; $('workspace').dataset.detail = 'false'; $('detail').replaceChildren()
@@ -84,17 +105,22 @@ function invalidateDelivery() {
   reportRequest++; artifactRequest++; report = undefined; artifactsKey = ''; clearTimeout(artifactTimer)
   $('report-content').replaceChildren(); $('artifacts').replaceChildren(); $('download-receipt').textContent = ''
 }
-function invalidateViews() {
-  orchestrationUI.reset()
+function invalidateViews(preserveHistory = true) {
+  orchestrationUI.reset(preserveHistory)
   generation++; pageRequest++; pageLoading = false; page = undefined; currentListVersion = undefined
   pageCursor = undefined; previousCursors = []; invalidateDelivery(); closeDetail(false)
   $('feedback-dialog').close(); $('cards').replaceChildren(); $('new-results').hidden = true
   $('early-progress').replaceChildren(); $('result-summary').hidden = true
   $('prev-page').disabled = $('next-page').disabled = true; $('page-status').textContent = ''
 }
-function acceptReceipt(r) {
-  minimumInput = Math.max(minimumInput, r.inputRevision ?? 0); invalidateViews(); snapshot = undefined
+function acceptReceipt(r, kind = 'revise') {
+  minimumInput = Math.max(minimumInput, r.inputRevision ?? 0)
   $('task').dataset.inputRevision = String(minimumInput)
+  if (kind === 'cancel') {
+    $('status').textContent = '正在停止检索'; $('receipt').textContent = '正在停止主 Agent 和专家，已有结果与轨迹将保留…'
+    return
+  }
+  invalidateViews(); snapshot = undefined
   $('confirmed-count').textContent = '0'; $('counts').textContent = '已保存新输入，正在重新核查'; $('result-summary').hidden = true; $('early-progress').hidden = false
   $('early-progress').replaceChildren(text('h3', '正在按新要求查找'), text('p', '结果会在确认后出现在这里。'))
   $('status').textContent = '正在更新结果'
@@ -103,7 +129,7 @@ function acceptReceipt(r) {
   $('receipt').textContent = '已收到，正在更新结果'
 }
 async function enterTask(id) {
-  stream?.close(); taskId = id; lastSeq = 0; minimumInput = 0; snapshot = undefined; invalidateViews(); timelineKey = expertsKey = ''
+  stream?.close(); taskId = id; lastSeq = 0; minimumInput = 0; snapshot = undefined; invalidateViews(false); timelineKey = expertsKey = ''; void modelUI.refresh()
   $('home').hidden = true; $('task').hidden = false; remember(id); setView('results'); await refresh(); subscribe(); $('query-title').focus({ preventScroll: true })
 }
 async function refresh() {
@@ -123,7 +149,7 @@ async function refresh() {
     }
   } catch (e) {
     if (!valid(gen, id)) return
-    if (e.code && !e.retryable && e.code !== 'PROVIDER_UNAVAILABLE') { invalidateViews(); snapshot = undefined; $('confirmed-count').textContent = '0'; $('download').disabled = $('download-jsonl').disabled = $('save-report').disabled = true; $('delivery-note').textContent = '访问资格或来源已失效，请重新检索。' }
+    if (e.code && !e.retryable && e.code !== 'PROVIDER_UNAVAILABLE') { invalidateViews(false); snapshot = undefined; $('confirmed-count').textContent = '0'; $('download').disabled = $('download-jsonl').disabled = $('save-report').disabled = true; $('delivery-note').textContent = '访问资格或来源已失效，请重新检索。' }
     else scheduleRefresh(2000)
     error(e, 'refresh')
   } finally { refreshing = false; if (again) { again = false; scheduleRefresh() } }
@@ -156,22 +182,23 @@ function render() {
   $('task').dataset.inputRevision = String(snapshot.inputRevision)
   $('home').hidden = true; $('task').hidden = false; $('query-title').textContent = snapshot.query
   document.title = snapshot.query.slice(0, 28) + ' · 工单检索'; $('breadcrumb').textContent = '我的检索'
-  $('cancel').disabled = snapshot.commands.at(-1)?.kind === 'cancel' || Boolean(result)
+  $('cancel').disabled = stopping || !canStop()
   const status = snapshot.failure || n?.message || (!n ? '需求已保存，后台正在准备检索。' : result ? '本轮核查结束，结果已保存。' : snapshot.question ? '有一处业务范围需要补充，独立工作继续。' : '正在自动检索与核查原文。')
   const failed = snapshot.failure || ['error', 'snapshot_invalid', 'permission_blocked'].includes(n?.status)
   $('status').textContent = failed ? status : result ? (['top_k_accepted', 'no_result'].includes(result.stoppingReason) ? '本次检索已结束' : '本次检索尚未完成') : snapshot.question ? '需要补充一处范围' : count ? '继续查找与核实' : '正在查找与核实'
   $('status').className = failed ? 'error' : ''; $('status').parentElement.dataset.state = failed ? 'error' : result ? 'done' : 'running'
+  if (snapshot.orchestration?.outcome === 'cancelled') { $('status').textContent = '已停止，结果与轨迹已保留'; $('status').parentElement.dataset.state = 'done' }
   $('counts').textContent = result ? '' : (totals()?.current ?? 0) + ' 条线索'; $('confirmed-count').textContent = String(count)
   if (snapshot.receipt) $('receipt').textContent = snapshot.commands.at(-1)?.kind === 'query' || result ? '' : '补充已收到'
-  for (const item of document.querySelectorAll('a[aria-current="page"] small')) item.textContent = snapshot.failure ? '执行未完成' : snapshot.question ? '需要补充' : result ? '已结束' : '检索中'
+  for (const item of document.querySelectorAll('a[aria-current="page"] small')) item.textContent = taskStatus(snapshot)
   $('channels').textContent = (n?.searchProgress?.channels || []).map(c => (c.channel === 'keyword' ? '关键词' : '向量') + '：' + ({ running: '检索中', completed: '已返回', failed: '失败', skipped: '未使用' }[c.status] || c.status) + ' ' + c.count + ' 条').join(' · ')
   $('scope-content').replaceChildren(text('p', snapshot.query), ...(snapshot.commands ?? []).filter(c => ['supplement', 'answer'].includes(c.kind)).map(c => text('p', '补充：' + c.text)))
   const question = snapshot.question?.question_json, changed = $('question').dataset.id !== snapshot.question?.id
   $('question').hidden = !question; $('question').textContent = question?.question || ''; $('question').dataset.id = snapshot.question?.id || ''
-  if (changed) $('question-options').replaceChildren(...(question?.options || []).map(o => button(o, () => { $('supplement').value = o; $('supplement').focus() })))
-  $('supplement-label').textContent = question ? '回答范围问题' : '补充检索要求'; $('send-supplement').setAttribute('aria-label', question ? '发送回复' : '发送补充')
+  if (changed) $('question-options').replaceChildren(...(question?.options || []).map(o => button(o, () => { $('supplement').value = o; resizeInput($('supplement')); updateComposerAction(); $('supplement').focus() })))
+  $('supplement-label').textContent = question ? '回答范围问题' : '补充检索要求'; updateComposerAction()
   $('supplement').placeholder = question ? '补充你的想法…' : '继续补充，或调整查找范围…'
-  $('input-hint').textContent = question ? '其他检索仍在继续' : ''
+  $('input-hint').textContent = question ? (snapshot.orchestration?.experts?.some(e => ['pending', 'running'].includes(e.status)) ? '独立专家仍在继续' : '等待回复 · 可随时停止') : ''
   const key = JSON.stringify(snapshot.conversation)
   if (key !== timelineKey) {
     const box = $('timeline'), top = box.scrollTop, atBottom = box.scrollHeight - top - box.clientHeight < 24
@@ -302,7 +329,7 @@ async function supplement() {
   try {
     const r = await command(endpoint + '/' + id, { kind: questionId ? 'answer' : 'supplement', text: value, ...(questionId ? { questionId } : {}) })
     if (!valid(gen, id)) return; acceptReceipt(r); $('supplement').value = ''; resizeInput($('supplement')); await refresh()
-  } catch (e) { if (valid(gen, id)) error(e) } finally { sendingInput = false; $('send-supplement').disabled = false }
+  } catch (e) { if (valid(gen, id)) error(e) } finally { sendingInput = false; updateComposerAction() }
 }
 async function loadReport() {
   if (!deliveryReady()) { $('report-content').replaceChildren(text('p', hasAccess() ? '检索结束后，这里会显示报告。' : '来源尚未就绪或访问资格已失效，请恢复连接或重新检索。', 'notice')); return }
@@ -402,7 +429,27 @@ $('query-form').onsubmit = async event => {
 }
 $('examples').onclick = event => { const b = event.target.closest('button'); if (b) { $('query').value = b.dataset.query; resizeInput($('query')); $('query').focus() } }
 $('supplement-form').onsubmit = e => { e.preventDefault(); void supplement() }
-$('cancel').onclick = async () => { const gen = generation; try { const r = await command(endpoint + '/' + taskId, { kind: 'cancel' }); if (valid(gen)) { acceptReceipt(r); await refresh() } } catch (e) { if (valid(gen)) error(e) } }
+function canStop() { return Boolean(snapshot && snapshot.commands.at(-1)?.kind !== 'cancel' && !snapshot.orchestration?.terminal && !snapshot.node?.result) }
+function updateComposerAction() {
+  const stop = canStop() && !$('supplement').value.trim(), button = $('send-supplement')
+  button.dataset.mode = stop ? 'stop' : 'send'; button.type = stop ? 'button' : 'submit'
+  button.disabled = stopping || sendingInput || (!stop && !$('supplement').value.trim())
+  button.setAttribute('aria-label', stopping ? '正在停止' : stop ? '强制停止' : snapshot?.question ? '发送回复' : '发送补充')
+  button.title = button.getAttribute('aria-label')
+  $('cancel').disabled = stopping || !canStop()
+}
+async function forceStop() {
+  if (stopping || !canStop()) return
+  const gen = generation, id = taskId
+  stopping = true; updateComposerAction(); $('receipt').textContent = '正在停止主 Agent 和专家…'
+  // A queued answer/feedback must not be replayed on reconnect after the user stops.
+  writeSaved(pendingKey, saved(pendingKey).filter(item => item.path !== endpoint + '/' + id || item.spec.kind === 'cancel'))
+  try { const r = await command(endpoint + '/' + id, { kind: 'cancel' }); if (valid(gen, id)) { acceptReceipt(r, 'cancel'); await refresh(); $('receipt').textContent = '已停止，结果与轨迹已保留' } }
+  catch (e) { if (valid(gen, id)) error(e) }
+  finally { stopping = false; updateComposerAction() }
+}
+$('cancel').onclick = forceStop
+$('send-supplement').onclick = event => { if ($('send-supplement').dataset.mode === 'stop') { event.preventDefault(); void forceStop() } }
 $('feedback-form').onsubmit = async event => {
   event.preventDefault(); if ($('send-feedback').disabled) return; $('send-feedback').disabled = true; const f = feedbackTarget
   try {
@@ -428,7 +475,7 @@ $('evidence-panel').oncancel = e => { e.preventDefault(); closeDetail() }
 // Textareas grow with the content instead of creating a second tiny scroll region.
 function resizeInput(input) { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, input.id === 'query' ? 260 : 160) + 'px' }
 for (const id of ['query', 'supplement']) {
-  $(id).addEventListener('input', () => resizeInput($(id)))
+  $(id).addEventListener('input', () => { resizeInput($(id)); if (id === 'supplement') updateComposerAction() })
   $(id).addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $(id).form.requestSubmit() } })
 }
 function setNavigation(open) {

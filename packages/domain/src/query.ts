@@ -36,9 +36,11 @@ export function resolvePlanRequirements(plan: QueryPlan, resolutions: readonly {
 }
 
 /** Explicit user field revisions supersede that field in both scoped branches and the common hard AST. */
-export function reviseQueryPlan(plan: QueryPlan, incoming: readonly TicketFilter[]): QueryPlan {
-  const fields = new Set(incoming.map(f => f.field))
+export function reviseQueryPlan(plan: QueryPlan, incoming: readonly TicketFilter[], removedFields: readonly string[] = [], removedTexts: readonly string[] = []): QueryPlan {
+  const fields = new Set([...incoming.map(f => f.field), ...removedFields])
+  const removed = new Set(plan.requirements.filter(r => removedTexts.includes(r.span.text)).map(r => r.id))
   const remove = (e: QueryExpression): QueryExpression => {
+    if (e.kind === 'unknown' && removed.has(e.requirementId)) return { kind: 'constant', value: true }
     if (e.kind === 'field' && fields.has(e.field)) return { kind: 'constant', value: true }
     if (e.kind === 'not' && e.child.kind === 'field' && fields.has(e.child.field)) return { kind: 'constant', value: true }
     if (e.kind === 'and' || e.kind === 'or') return { ...e, children: e.children.map(remove) }
@@ -47,7 +49,9 @@ export function reviseQueryPlan(plan: QueryPlan, incoming: readonly TicketFilter
   }
   // Incoming filters are already controller-admitted, sourced direct-user conditions.
   const additions = incoming.map(filterPredicate)
-  return { ...plan, hard: { kind: 'and', children: [remove(plan.hard), ...additions] }, keyword: remove(plan.keyword) }
+  return { ...plan, hard: { kind: 'and', children: [remove(plan.hard), ...additions] }, keyword: remove(plan.keyword),
+    requirements: plan.requirements.filter(r => !removed.has(r.id)).map(r => ({ ...r, ...(r.expression ? { expression: remove(r.expression) } : {}) })),
+    unresolved: plan.unresolved.filter(id => !removed.has(id)) }
 }
 
 function unique(values: readonly string[]): string[] {
@@ -133,11 +137,12 @@ function applyQueryChange(spec: TicketRetrievalSpec, delta: TicketQueryChange): 
         delta.filter,
       ]
       assertOrderedRange(filters, delta.filter.field)
-      return { ...spec, filters }
+      return { ...spec, filters, ...(spec.queryPlan ? { queryPlan: reviseQueryPlan(spec.queryPlan, filters.filter(f => f.field === delta.filter.field)) } : {}) }
     }
     case 'remove_filter':
       assertTicketFilterField(delta.field)
-      return { ...spec, filters: spec.filters.filter(filter => filter.field !== delta.field) }
+      return { ...spec, filters: spec.filters.filter(filter => filter.field !== delta.field),
+        ...(spec.queryPlan ? { queryPlan: reviseQueryPlan(spec.queryPlan, [], [delta.field]) } : {}) }
     case 'semantic_hint': {
       const hint = delta.text.normalize('NFKC').trim()
       if (hint.length === 0) throw new RetrievalError('INVALID_REQUEST', '语义提示不能为空。')

@@ -50,6 +50,15 @@ svg { width: 19px; height: 19px; flex: none; stroke: currentColor; fill: none; s
 .new-task:hover { background: #fff; border-color: #b9c6ba; }
 .new-task kbd { font: 10px/1.5 inherit; margin-left: auto; color: #8b918a; white-space: nowrap; }
 .side-history { min-height: 0; overflow: auto; scrollbar-width: thin; }
+.sidebar-bottom { margin-top: auto; display: grid; gap: 12px; flex-shrink: 0; }
+.history-item { display: flex; align-items: center; min-width: 0; border-radius: 9px; }
+.history-item a { min-width: 0; flex: 1; }
+.history-remove { width: 30px; height: 30px; min-height: 30px; margin-right: 4px; opacity: 0; color: #879087; }
+.history-item:hover .history-remove,.history-item:focus-within .history-remove { opacity: 1; }
+.history-item:has(a[aria-current]) { background: #e3e9e1; }
+.history-remove:hover { background: #f3e5df; color: #9b5948; }
+.history-notice { position: fixed; left: 20px; bottom: 22px; z-index: 90; display: flex; align-items: center; gap: 16px; padding: 12px 16px; max-width: calc(100vw - 40px); background: #fff; border: 1px solid #dde2d9; border-radius: 12px; box-shadow: 0 8px 28px #1c35251c; font-size: 12px; }
+@media (hover:none) { .history-remove { opacity: 1; } }
 .side-label { color: #838980; font-size: 11px; margin: 0 10px 12px; }
 .history-list { display: grid; gap: 4px; }
 .history-list a { padding: 10px 12px; border-radius: 9px; font-size: 12px; display: block; overflow-wrap: anywhere; color: #545c54; }
@@ -159,6 +168,9 @@ summary { cursor: pointer; width: fit-content; }
 .composer form { display: flex; align-items: flex-end; gap: 12px; background: var(--paper); border: 1px solid #d9dcd4; border-radius: 17px; padding: 12px 14px 12px 18px; box-shadow: 0 3px 14px #273e3008; transition: box-shadow 180ms,border-color 180ms; }
 .composer textarea { border: 0; border-radius: 0; background: transparent; padding: 5px 0; min-height: 36px; height: 36px; max-height: 160px; resize: none; outline: none; font-size: 13px; }
 .composer .send-button { flex: none; }
+.composer .send-button[data-mode=stop] { position: relative; background: #101211; border-color: #101211; border-radius: 50%; }
+.composer .send-button[data-mode=stop] svg { visibility: hidden; }
+.composer .send-button[data-mode=stop]::after { content: ''; position: absolute; width: 11px; height: 11px; border-radius: 2px; background: white; inset: 0; margin: auto; }
 .composer-meta { display: flex; align-items: center; gap: 12px; min-height: 25px; padding: 3px 6px 0; }
 .composer-meta p { margin: 0; font-size: 10px; }
 .composer-meta small { font-size: 10px; }

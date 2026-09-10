@@ -7,7 +7,13 @@ services:
       MYSQL_DATABASE: retrieval_agent
     ports: ['127.0.0.1:${RETRIEVAL_AGENT_MYSQL_PORT:-13306}:3306']
     volumes: ['mysql-data:/var/lib/mysql']
-    command: ['--character-set-server=utf8mb4', '--collation-server=utf8mb4_bin', '--innodb-buffer-pool-size=1G']
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_bin
+      - --innodb-buffer-pool-size=${RETRIEVAL_AGENT_MYSQL_BUFFER_POOL:-256M}
+      - --performance-schema-digests-size=1000
+      - --performance-schema-events-statements-history-long-size=1000
+    stop_grace_period: 60s
     healthcheck:
       test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost']
       interval: 5s
@@ -26,6 +32,7 @@ services:
       retries: 30
   milvus:
     image: milvusdb/milvus:v2.6.14@sha256:2f1759559ca11d320ef510f3e0cdd3a3167dccb834d9d0cf64ee79b13d936d93
+    stop_grace_period: 60s
     command: ['milvus', 'run', 'standalone']
     security_opt: ['seccomp:unconfined']
     depends_on:
@@ -47,4 +54,8 @@ services:
       retries: 30
 volumes:
   mysql-data:
+    name: ${RETRIEVAL_AGENT_VOLUME_PREFIX:-${COMPOSE_PROJECT_NAME:-retrieval-agent-database}}_mysql-data
+    external: ${RETRIEVAL_AGENT_EXISTING_VOLUMES:-false}
   milvus-data:
+    name: ${RETRIEVAL_AGENT_VOLUME_PREFIX:-${COMPOSE_PROJECT_NAME:-retrieval-agent-database}}_milvus-data
+    external: ${RETRIEVAL_AGENT_EXISTING_VOLUMES:-false}

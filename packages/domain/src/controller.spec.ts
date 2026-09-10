@@ -328,6 +328,20 @@ function accept(ref: TicketCandidateRef) {
 }
 
 describe('RetrievalController', () => {
+  it('keeps correcting different tool errors beyond six failures and stops only an unchanged loop', async () => {
+    const { controller, journal } = setup(provider())
+    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡' })
+    for (let i = 0; i < 9; i++) state = controller.recordToolCall(state, { success: false, serializationBytes: 30, failureSignature: `different-${i}` })
+    expect(state.phase).not.toBe('stopped')
+    expect(state.budget.consecutiveToolErrors).toBe(9)
+    state = controller.recordToolCall(state, { success: true, serializationBytes: 20 })
+    expect(state.budget.consecutiveToolErrors).toBe(0)
+    expect(state.budget.repeatedToolFailure).toBeUndefined()
+    for (let i = 0; i < 4; i++) state = controller.recordToolCall(state, { success: false, serializationBytes: 30, failureSignature: 'same-error-and-arguments' })
+    expect(state).toMatchObject({ phase: 'stopped', termination: 'budget_exhausted', selectedCandidateRefs: [] })
+    expect(state.stopExplanation).toContain('工具调用死循环')
+    expect(foldRetrievalEvents(journal.read(state.retrievalId), state.retrievalId)).toEqual(state)
+  })
   it('withdraws adopted judgments on emergency knowledge invalidation and rejects late branch writes', async () => {
     const { controller, journal } = setup()
     let state = visible(controller, await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录 验证码' }))
@@ -486,6 +500,11 @@ describe('RetrievalController', () => {
     expect(state.query.spec.filters).toEqual([])
     expect(state.executionClock).toEqual({ totalWaitingMs: 3 * 86_400_000 })
     expect(state.allowedActions.some(action => action.kind === 'assess')).toBe(true)
+    state = controller.stop(state, 'cancelled')
+    expect(state.executionClock?.waitingSince).toBe(clock.toISOString())
+    clock = new Date(clock.getTime() + 86_400_000)
+    state = await controller.applyUserFeedback(PRINCIPAL, state, { accepted: true, answer: '继续按原要求查找' })
+    expect(state.executionClock).toEqual({ totalWaitingMs: 4 * 86_400_000 })
     expect(foldRetrievalEvents(journal.read(state.retrievalId), state.retrievalId)).toEqual(state)
   })
 
@@ -522,6 +541,51 @@ describe('RetrievalController', () => {
       action: { kind: 'search', mode: 'dense', delta: { kind: 'semantic_hint', text: '缓存失效' } } })
     expect(state.candidateHistory.map(candidate => candidate.ref)).toEqual([CANDIDATE_REF, SECOND_CANDIDATE_REF, THIRD_CANDIDATE_REF])
     expect(state.candidates.map(candidate => candidate.ref)).toEqual([SECOND_CANDIDATE_REF, THIRD_CANDIDATE_REF, CANDIDATE_REF])
+  })
+
+  it('requires complete sourced exclusion checks before accepting and preserves them in replay', async () => {
+    const { controller, journal } = setup()
+    const initial = visible(controller, await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' }))
+    const text = '排除操作A或操作B已完成后仅剩独立后续问题'
+    const requirement = { id: 'r1', span: { start: 0, end: text.length, text }, kind: 'semantic' as const,
+      status: 'evidence_required' as const, polarity: 'exclude' as const, interpretation: '按原条件核对来源' }
+    const state: RetrievalState = { ...initial, query: { ...initial.query, spec: { ...initial.query.spec,
+      queryPlan: { schemaVersion: 1, original: text, anchor: { at: NOW.toISOString(), timeZone: 'Asia/Shanghai' },
+        normalizationVersion: 'nfkc-lower-v1', keyword: { kind: 'constant', value: true }, hard: { kind: 'constant', value: true },
+        vector: { text }, requirements: [requirement], unresolved: [], fields: [], parserVersion: 'test', elapsedMs: 0 } } } }
+    const decision: RetrievalDecision = { stateId: state.stateId, judgments: [accept(CANDIDATE_REF)], gaps: [],
+      action: { kind: 'finish', reason: 'satisfied', explanation: 'Scope reviewed.' } }
+    await expect(controller.decide(PRINCIPAL, state, decision)).rejects.toThrow(/exclusion_checks/u)
+    const check = { requirementId: 'r1', sourceText: text, applies: 'no' as const, reason: '来源说明请求的操作尚未完成', evidenceRefs: [CANDIDATE_REF] }
+    const withCheck = (change: Partial<typeof check> = {}): RetrievalDecision => ({ ...decision,
+      judgments: [{ ...decision.judgments[0]!, exclusionChecks: [{ ...check, ...change }] }] })
+    await expect(controller.decide(PRINCIPAL, state, withCheck({ sourceText: '只排除操作B完成' }))).rejects.toThrow(/原条件/u)
+    for (const applies of ['yes', 'uncertain'] as const) {
+      await expect(controller.decide(PRINCIPAL, state, { ...decision,
+        judgments: [{ ...decision.judgments[0]!, exclusionChecks: [{ ...check, applies }] }] })).rejects.toThrow(/不能 accept/u)
+    }
+    const finished = await controller.decide(PRINCIPAL, state, withCheck())
+    expect(finished.judgments?.[0]?.exclusionChecks).toEqual([check])
+    const replayed = foldRetrievalEvents(journal.read(finished.retrievalId), finished.retrievalId)
+    expect(replayed?.judgments?.[0]?.exclusionChecks).toEqual([check])
+  })
+
+  it('guides an all-excluded completed scope to no_result without accepting anything or weakening coverage', async () => {
+    const { controller } = setup()
+    const state = visible(controller, await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' }))
+    const proposed: RetrievalDecision = { stateId: state.stateId,
+      judgments: [{ candidateRef: CANDIDATE_REF, verdict: 'exclude', evidenceRefs: [CANDIDATE_REF], reason: 'The summary is outside the requested scope.' }],
+      gaps: [], action: { kind: 'finish', reason: 'satisfied', explanation: 'The specified scope was checked and none qualifies.' } }
+    await expect(controller.decide(PRINCIPAL, state, proposed)).rejects.toThrow(/no_result/u)
+    expect(state.excludedCandidateRefs).toEqual([])
+    const finished = await controller.decide(PRINCIPAL, state, { ...proposed,
+      action: { ...proposed.action, kind: 'finish', reason: 'no_result', explanation: 'The only candidate is outside scope.' } })
+    expect(finished.termination).toBe('no_result')
+    expect(finished.selectedCandidateRefs).toEqual([])
+    expect(finished.excludedCandidateRefs).toEqual([CANDIDATE_REF])
+    await expect(controller.decide(PRINCIPAL, state, { ...proposed,
+      gaps: [{ kind: 'depth', status: 'open', evaluator: 'model', evidenceRefs: [CANDIDATE_REF], description: 'A decisive fact is still missing.' }],
+      action: { kind: 'finish', reason: 'no_result', explanation: 'Still missing evidence.' } })).rejects.toThrow(/无结果需要/u)
   })
 
   it('cannot claim an explicit quantity is satisfied by a short exhausted prefix', async () => {
@@ -600,14 +664,13 @@ describe('RetrievalController', () => {
     expect(foldRetrievalEvents(journal.read(state.retrievalId), state.retrievalId)).toEqual(state)
   })
 
-  it('records controlled reads in authoritative evidence and requires actual model delivery before citing them', async () => {
+  it('allows authorized source reads before summary delivery and requires actual model delivery before citing them', async () => {
     const ids = deterministicIds()
     const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
     const controller = new RetrievalController(provider(), journal, undefined, { now: () => NOW, id: ids })
     let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '验证码' })
-    state = controller.recordContextSelection(state, controller.projectContext(state))
     state = await controller.decide(PRINCIPAL, state, { stateId: state.stateId, judgments: [],
-      gaps: [{ kind: 'depth', status: 'open', evaluator: 'model', evidenceRefs: [CANDIDATE_REF], description: 'Need the actual failure cause' }],
+      gaps: [],
       action: { kind: 'inspect', candidateRefs: [CANDIDATE_REF], fields: ['problemDescription'] },
     })
     expect(state.promotedEvidence[0]).toMatchObject({ evidenceId: EVIDENCE_ID, evidenceLevel: 'L2', readers: ['provider'] })

@@ -313,7 +313,7 @@ export async function readTicketDetailsForAgent(
 }
 
 export const name = 'retrieval-product-host'
-export const inject = ['webServer', 'agents', 'agentPresets', 'workspaceRegistry', 'llm']
+export const inject = ['webServer', 'agents', 'agentPresets', 'workspaceRegistry', 'llm', 'settings', 'credentials', 'agentDefaultModel']
 
 export interface Config {
   readonly taskPersistence?: 'session' | 'mysql'

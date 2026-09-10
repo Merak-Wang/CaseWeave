@@ -61,8 +61,11 @@ describe('persistent local DSH settings', () => {
     const document = JSON.parse(await readFile(join(dshHome, 'settings.yaml'), 'utf8'))
     expect(document.custom).toEqual({ keep: true })
     expect(document['llm-pi-ai'].providers['other-provider'].models).toEqual([{ id: 'other-model' }])
-    await expect(settings.seedModelSettings({ dshHome }, environment)).resolves.toBe(true)
+    document['agent-default-model'] = { provider: 'other-provider', model: 'other-model' }
+    await writeFile(join(dshHome, 'settings.yaml'), JSON.stringify(document), 'utf8')
+    await expect(settings.seedModelSettings({ dshHome }, environment)).resolves.toBe(false)
     const repeated = JSON.parse(await readFile(join(dshHome, 'settings.yaml'), 'utf8'))
+    expect(repeated['agent-default-model']).toEqual({ provider: 'other-provider', model: 'other-model' })
     expect(repeated['llm-pi-ai'].providers['local-provider'].models).toEqual([{ id: 'local-model' }])
   })
 

@@ -67,6 +67,7 @@ class Adapter extends LlmAdapter {
   readonly loopRequests: GenerateOptions[] = []
   reportCalls = 0
   rejectReport = false
+  beforeAnswer?: () => Promise<void>
   constructor(readonly ask = false, readonly broken = false) { super() }
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     if (options.tools?.[0]?.name.startsWith('retrieval_report')) {
@@ -79,6 +80,7 @@ class Adapter extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
     }
     this.calls++; this.loopRequests.push(options)
+    await this.beforeAnswer?.()
     const strings = (v: unknown): string[] => typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(strings) : v && typeof v === 'object' ? Object.values(v).flatMap(strings) : []
     const text = [...strings(options.messages), options.system ?? ''].join('\n')
     const headers = [...text.matchAll(/<ticket_knowledge_context>(.*?)<\/ticket_knowledge_context>/gu)].map(m => JSON.parse(m[1]!))
@@ -314,6 +316,13 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       expect(JSON.stringify(resumedMessages)).toContain('这个可能不相关，请复核。')
       const agent = await f.agentFor(id)
       expect(agent.session.events.some(e => e.type === 'assistant/message')).toBe(true)
+      const activity = await (await fetch(f.url + '/' + id + '/activity?after=0')).json() as { items: { seq: number; text: string; kind: string }[]; after: number; more: boolean }
+      expect(activity.items, JSON.stringify({ activity, errors: f.errors })).toBeDefined()
+      expect(activity.items.filter(i => i.kind === 'user').map(i => i.text)).toEqual(['找副卡解绑工单', '只看上海的工单', '这个可能不相关，请复核。'])
+      expect(activity.items.some(i => i.kind === 'search')).toBe(true)
+      const subsequent = await (await fetch(f.url + '/' + id + '/activity?after=' + activity.after)).json() as { items: unknown[] }
+      expect(subsequent.items).toEqual([])
+      expect(foldRetrievalEvents(await store.domainEvents(id))?.budget.context).toEqual(reviewed?.state_json?.budget.context)
     } finally { await f.close() }
   })
 
@@ -426,7 +435,100 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     } finally { await restarted.post(`/${id}`, { kind: 'cancel', operationId: 'stop-recovery-fixture' }); await restarted.close() }
   }, 25000)
 
-  it('ends repeated invalid model decisions as a durable resource interruption without confirming candidates', async () => {
+  it('A4: a public detail click during model generation preserves the decision version without granting model visibility', async () => {
+    const f = await fixture(false, false)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    ;(f.adapter as Adapter).beforeAnswer = () => gate
+    try {
+      const id = randomUUID()
+      await f.post('', { operationId: id, kind: 'query', text: '找副卡解绑工单' })
+      f.host.start()
+      await until(async () => f.adapter.calls, n => n === 1)
+      const before = (await store.read(id))!.state_json!
+      const detail = await fetch(f.url.replace('/tasks', '/detail'), {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: id, retrievalId: id,
+          candidateRefs: [before.candidates[1]!.ref], fields: ['problemDescription'] }),
+      })
+      expect(detail.status).toBe(200)
+      const after = (await store.read(id))!.state_json!
+      expect(after.promotedEvidence.some(e => e.readers?.includes('user'))).toBe(true)
+      expect(after.modelVisibleEvidenceIds).toEqual(before.modelVisibleEvidenceIds)
+      expect(after.contextCandidateRefs).toEqual(before.contextCandidateRefs)
+      expect(after.progress).toEqual(before.progress)
+      release()
+      const done = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped')
+      expect(done!.state_json!.termination, JSON.stringify(f.errors)).toBe('top_k_accepted')
+      expect(f.adapter.calls).toBe(1)
+      expect(done!.state_json!.budget.failedToolCalls).toBe(0)
+      expect(foldRetrievalEvents(await store.domainEvents(id))).toEqual(done!.state_json)
+    } finally { release(); await f.close() }
+  })
+
+  it('continues from a clarification example without introducing a region filter or repeating the first search', async () => {
+    const f = await fixture(true, false)
+    try {
+      const id = randomUUID(); await f.post('', { kind: 'query', operationId: id, text: '找副卡解绑工单' })
+      const waiting = await until(async () => { await f.host.pump(); return f.host.snapshot(id) }, s => Boolean(s.question))
+      const before = (await store.read(id))!, state = before.state_json!
+      const searchCount = (await store.domainEvents(id)).filter(e => e.type === 'retrieval/search-completed').length
+      const text = '也包括用户身处异地产生的跨区域服务/营业厅办理场景(如c1跨域受理、c9用户不在北京)'
+      expect((await f.post('/' + id, { kind: 'answer', operationId: randomUUID(), text, questionId: waiting.question!.id })).status).toBe(202)
+      const resumed = (await store.read(id))!
+      expect(resumed.query_revision).toBe(before.query_revision)
+      expect(resumed.state_json!.candidates.map(c => c.ref)).toEqual(state.candidates.map(c => c.ref))
+      expect(resumed.state_json!.query.spec.filters).toEqual([])
+      expect(resumed.state_json!.query.spec.queryPlan).toEqual(state.query.spec.queryPlan)
+      const done = await until(async () => { await f.host.pump(); return store.read(id) }, t => t?.state_json?.phase === 'stopped')
+      expect(done?.state_json?.termination, JSON.stringify(f.errors)).toBe('top_k_accepted')
+      expect((await store.domainEvents(id)).filter(e => e.type === 'retrieval/search-completed')).toHaveLength(searchCount)
+      expect((await store.domainEvents(id)).filter(e => e.type === 'retrieval/clarification-requested')).toHaveLength(1)
+      expect(done!.state_json!.userFeedback?.at(-1)).toMatchObject({ text, question: '只看上海还是也包括北京？' })
+    } finally { await f.close() }
+  })
+
+  it('removes a user region condition through HTTP and searches the updated executable plan', async () => {
+    const f = await fixture(false, false)
+    try {
+      const id = randomUUID(); await f.post('', { kind: 'query', operationId: id, text: '查找副卡解绑工单，排除北京' })
+      const before = await until(async () => { await f.host.pump(); return store.read(id) }, t => t?.state_json?.phase === 'stopped')
+      expect(before?.state_json?.candidates.map(c => c.displayId)).toEqual(['T-2'])
+      expect((await f.post('/' + id, { kind: 'supplement', operationId: randomUUID(), text: '确认移除/放宽 region!=北京 约束，继续检索副卡解绑工单' })).status).toBe(202)
+      const done = await until(async () => { await f.host.pump(); return store.read(id) }, t => t?.state_json?.phase === 'stopped')
+      expect(done?.state_json?.candidates.map(c => c.displayId).sort()).toEqual(['T-1', 'T-2'])
+      expect(done?.state_json?.query.spec.filters).toEqual([])
+      expect(done?.state_json?.query.unresolvedConstraints).toEqual([])
+      expect(done?.query_revision).toBe(before!.query_revision + 1)
+      expect(done?.state_json?.termination, JSON.stringify(f.errors)).toBe('top_k_accepted')
+      expect(foldRetrievalEvents(await store.domainEvents(id))?.query).toEqual(done?.state_json?.query)
+    } finally { await f.close() }
+  })
+
+  it('force stops a waiting question and all independent experts; late output cannot reopen the task', async () => {
+    const f = await fixture(false, false, false, true)
+    try {
+      const id = randomUUID(); await f.post('', { kind: 'query', operationId: id, text: '查找副卡解绑工单' }); f.host.start()
+      const waiting = await until(() => f.host.snapshot(id), s => Boolean(s.question) && Boolean(s.orchestration?.experts.some(e => e.status === 'running')))
+      // Wait for the independent source read to commit and its next model call
+      // to enter the explicit gate. A running badge alone races with valid I/O
+      // before cancellation; the assertion below concerns genuinely late output.
+      await until(async () => [...(f.adapter as RecoveringExpertAdapter).turns.entries()].some(([session, step]) => session !== id && step >= 2), Boolean)
+      const before = (await store.read(id))!.state_json!, calls = f.adapter.calls
+      const cancel = { kind: 'cancel', operationId: randomUUID() }
+      expect((await f.post('/' + id, cancel)).status).toBe(202)
+      expect((await f.post('/' + id, cancel)).status).toBe(202)
+      const stopped = await f.host.snapshot(id)
+      expect(stopped.question).toBeUndefined(); expect(stopped.orchestration).toMatchObject({ terminal: true, outcome: 'cancelled' })
+      expect((await f.post('/' + id, { kind: 'answer', operationId: randomUUID(), text: '上海', questionId: waiting.question!.id })).status).toBe(409)
+      f.release()
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
+      expect((await store.read(id))?.state_json?.termination).toBe('cancelled')
+      expect((await store.read(id))?.state_json?.promotedEvidence).toEqual(before.promotedEvidence)
+      expect(f.adapter.calls).toBe(calls)
+    } finally { f.release(); await f.close() }
+  })
+
+  it('detects an unchanged invalid-call loop durably without confirming candidates, and permits a new user turn', async () => {
     const f = await fixture(false, false, false, false, true)
     try {
       const id = randomUUID()
@@ -434,7 +536,8 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       const stopped = await until(async () => { await f.host.pump(); return store.read(id) }, t => t?.state_json?.phase === 'stopped')
       const state = stopped!.state_json!
       expect(state.termination).toBe('budget_exhausted')
-      expect(state.stopExplanation).toContain('连续 3 次')
+      expect(state.stopExplanation).toContain('工具调用死循环')
+      expect(state.budget.repeatedToolFailure?.count).toBe(3)
       expect(state.selectedCandidateRefs).toEqual([])
       expect(f.adapter.calls).toBe(3)
       expect(state.budget.consecutiveToolErrors).toBe(3)
@@ -580,7 +683,11 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       // Advance only the scheduler's deadline, leaving source/state identities untouched.
       await store.pool.query("UPDATE ra_task_job SET available_at=CURRENT_TIMESTAMP(3) WHERE task_id=? AND kind='source_check'", [id])
       await store.scheduleSourceChecks()
-      await until(async () => { await f.host.pump(); return store.learningRecords(id) }, r => r[0]?.status === 'invalidated')
+      await until(async () => { await f.host.pump(); return {
+        records: (await store.learningRecords(id)).map(r => ({ status: r.status, revision: r.input_revision })),
+        jobs: await store.rows("SELECT kind,status,attempts,error,available_at FROM ra_task_job WHERE task_id=?", [id]),
+        errors: f.errors,
+      } }, r => r.records[0]?.status === 'invalidated')
       expect(() => (before.read(learned))).not.toThrow()
       expect((await openWiki(root)).catalog().flatMap(d => d.knowledgeRefs)).not.toContain(learned)
       expect(adapter.requests.length).toBe(calls)
@@ -974,7 +1081,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       ranker, defaultMode: 'hybrid', ...(deliveryScale ? { snapshotTtlMs: 3600000 } : {}) }); const providerPort = new Provider(ctx, provider)
     const replaceSource = () => { provider = new LocalTicketProvider(records.map(r => normalizeFixtureTicket({ ...r,
       sourceVersion: 'fixture-v2', problemDescription: '来源已修订：该问题不能沿用此前工单判断。' })), { ranker, defaultMode: 'hybrid' }); providerPort.p = provider }
-    const application = new DurableRetrievalAgentService(ctx, { ...(extraPage ? { searchTopK: 2 } : {}), ...(broken ? { maxConsecutiveToolErrors: 3 } : {}) }, store)
+    const application = new DurableRetrievalAgentService(ctx, { ...(extraPage ? { searchTopK: 2 } : {}), ...(broken ? { maxRepeatedToolErrors: 3 } : {}) }, store)
     if (experts || learning) {
       await ctx.plugin({ name: 'durable-expert-scope', inject, apply(scope: Context) { new ExpertCoordinator(scope, application, learning?.root ?? expertWikiRoot) } })
       installWorkingContext(ctx, application)

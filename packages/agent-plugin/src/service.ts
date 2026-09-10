@@ -70,7 +70,7 @@ function latestRetrieval(agent: Agent): { readonly events: ReturnType<typeof rea
 
 /** Per-session product application; model calls only intents on this service. */
 export class RetrievalAgentService extends Service {
-  coordinator?: { prepare(agent: Agent, signal?: AbortSignal): Promise<void>; validateKnowledge?(agent: Agent): Promise<void>; runPending(agent: Agent, signal?: AbortSignal): Promise<void>; settlePending?(agent: Agent, signal?: AbortSignal): Promise<void>; cancelPending?(agent: Agent): void; isExpert(agent: Agent): boolean; knowledgeView?(state: RetrievalState, entryId?: string): Promise<import('./knowledge-view.js').KnowledgeView> }
+  coordinator?: { prepare(agent: Agent, signal?: AbortSignal): Promise<void>; validateKnowledge?(agent: Agent): Promise<void>; runPending(agent: Agent, signal?: AbortSignal): Promise<void>; waitForExperts?(agent: Agent, taskIds: readonly string[], signal?: AbortSignal): Promise<void>; settlePending?(agent: Agent, signal?: AbortSignal): Promise<void>; cancelPending?(agent: Agent): void; isExpert(agent: Agent): boolean; knowledgeView?(state: RetrievalState, entryId?: string): Promise<import('./knowledge-view.js').KnowledgeView> }
   static inject = ['ticketRetrievalProvider', 'ticketPrincipalProvider']
   private readonly active = new WeakMap<Agent, ActiveRetrieval>()
   private readonly controllerConfig: RetrievalControllerConfig
@@ -102,6 +102,10 @@ export class RetrievalAgentService extends Service {
   async prepareExperts(agent: Agent, signal?: AbortSignal): Promise<void> {
     await this.coordinator?.prepare(agent, signal)
     await this.coordinator?.runPending(agent, signal)
+  }
+  async setCoordinatorWaiting(agent: Agent, waiting: boolean): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => entry.controller.setCoordinatorWaiting(state, waiting))
   }
   async stateForTask(agent: Agent, retrievalId: RetrievalId): Promise<RetrievalState | undefined> {
     const state = this.currentOrUndefined(agent)
@@ -274,6 +278,8 @@ export class RetrievalAgentService extends Service {
    * context-window overflow rejects, since that request cannot be served at all.
    */
   async admitModelRequest(agent: Agent, input: {
+    readonly compression?: import('@retrieval-agent/contracts').ContextCompressionStats
+    readonly compactionCount?: number
     readonly outputReservedTokens?: number
     readonly protocolMarginTokens?: number
     readonly estimatedInputTokens: number
@@ -317,7 +323,7 @@ export class RetrievalAgentService extends Service {
     return await this.mutate(entry, async state => entry.controller.recordModelResponse(state, input))
   }
 
-  async recordToolCall(agent: Agent, input: { readonly success: boolean; readonly serializationBytes: number }): Promise<RetrievalState> {
+  async recordToolCall(agent: Agent, input: { readonly success: boolean; readonly serializationBytes: number; readonly failureSignature?: string }): Promise<RetrievalState> {
     const entry = this.entry(agent)
     return await this.mutate(entry, async state => entry.controller.recordToolCall(state, input))
   }

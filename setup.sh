@@ -7,7 +7,8 @@ umask 077
 usage() {
   cat <<'HELP'
 Usage: bash setup.sh [install|start|stop|status|logs] [options]
-  install（默认）     首次安装或代码更新：配置、构建、下载校验、预处理并启动
+  不带参数           已有配置时快速启动；首次使用进入安装
+  install            首次安装或代码更新：配置、构建、下载校验、预处理并启动
   start              日常启动已有镜像，等待健康检查；不构建、不下载、不重建索引
   stop               停止当前项目服务，保留容器和数据卷
   status             查看当前项目的容器状态
@@ -41,7 +42,10 @@ while (($#)); do
   esac
   shift
 done
-action=${action:-install}
+if [[ -z $action ]]; then
+  if [[ -f $env_file && -z $device ]] && ! $check_only && $build; then action=start
+  else action=install; fi
+fi
 if [[ $action != install ]] && { [[ -n $device ]] || $check_only || ! $build; }; then
   printf '%s\n' '日常操作只接受 --env-file 和 --non-interactive；安装选项请配合 install 使用。' >&2; exit 2
 fi
@@ -59,12 +63,16 @@ failed() {
 trap failed ERR
 die() { printf '%s\n' "$1" >&2; return 1; }
 command -v docker >/dev/null || die '未找到 Docker。请先安装并启动 Docker Desktop 或 Docker Engine。'
-version=$(docker compose version --short) || die '需要 Docker Compose v2.20 或更新版本。'
-if [[ ! $version =~ ^v?([0-9]+)\.([0-9]+) ]] || ((BASH_REMATCH[1] < 2 || (BASH_REMATCH[1] == 2 && BASH_REMATCH[2] < 20))); then
-  die '需要 Docker Compose v2.20 或更新版本。'
+# Installation verifies engine capabilities. Routine commands let Compose report
+# an unavailable/incompatible engine directly instead of repeating slow probes.
+if [[ $action == install ]]; then
+  version=$(docker compose version --short) || die '需要 Docker Compose v2.20 或更新版本。'
+  if [[ ! $version =~ ^v?([0-9]+)\.([0-9]+) ]] || ((BASH_REMATCH[1] < 2 || (BASH_REMATCH[1] == 2 && BASH_REMATCH[2] < 20))); then
+    die '需要 Docker Compose v2.20 或更新版本。'
+  fi
+  engine=$(docker info --format '{{.OSType}}') || die '无法连接 Docker。请启动 Docker Desktop 或检查 Docker Engine 的访问权限。'
+  [[ $engine == linux ]] || die '请将 Docker Desktop 切换为 Linux 容器。'
 fi
-engine=$(docker info --format '{{.OSType}}') || die '无法连接 Docker。请启动 Docker Desktop 或检查 Docker Engine 的访问权限。'
-[[ $engine == linux ]] || die '请将 Docker Desktop 切换为 Linux 容器。'
 
 created=false
 if [[ ! -f $env_file ]]; then

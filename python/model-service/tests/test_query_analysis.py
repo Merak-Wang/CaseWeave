@@ -42,6 +42,12 @@ def test_task_instruction_terms_stay_out_of_keywords(analyzer: SpacyQueryAnalyze
     assert result["keywords"] == ["副卡无法"]
 
 
+def test_coordination_hint_does_not_discard_other_business_topics(analyzer: SpacyQueryAnalyzer) -> None:
+    result = analyzer.analyze("查找3条副卡解绑后仍合账缴费或发生扣费争议的工单")
+    assert {"副卡解绑", "合账", "缴费", "扣费", "争议"}.issubset(result["keywords"])
+    assert all(term in result["keywords"] for term in result["boolean"]["terms"])
+
+
 def test_domain_lexicon_merges_multi_token_phrases(analyzer: SpacyQueryAnalyzer) -> None:
     result = analyzer.analyze("帮我找异地补卡和实名认证有关工单")
     assert result["keywords"] == ["异地补卡", "实名认证"]
@@ -63,3 +69,14 @@ def test_no_usable_keyword_keeps_query_available_for_dense_retrieval(analyzer: S
     result = analyzer.analyze("!!!")
     assert result["keywords"] == []
     assert result["candidates"] == []
+
+
+def test_wire_offsets_use_utf16_after_supplementary_characters(analyzer: SpacyQueryAnalyzer) -> None:
+    query = "🔎帮我找北京的副卡和跨域有关工单"
+    result = analyzer.analyze(query)
+    encoded = query.encode("utf-16-le")
+    assert result["candidates"] and result["tokens"] and result["entities"]
+    assert result["boolean"]["terms"] == ["副卡", "跨域"]
+    for field in ("candidates", "tokens", "entities"):
+        for item in result[field]:
+            assert encoded[item["start"] * 2:item["end"] * 2].decode("utf-16-le") == item["text"]

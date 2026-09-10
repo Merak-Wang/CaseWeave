@@ -19,6 +19,16 @@ function baseSpec(): TicketRetrievalSpec {
 }
 
 describe('applyQueryDelta', () => {
+  it('removes a filter from the executable AST as well as its flat projection', () => {
+    const field = { kind: 'field', field: 'region', op: 'eq', values: ['北京'] } as const
+    const plan: QueryPlan = { schemaVersion: 1, original: '副卡', anchor: { at: '2026-09-09T00:00:00Z', timeZone: 'Asia/Shanghai' },
+      normalizationVersion: 'nfkc-lower-v1', keyword: { kind: 'literal', op: 'contains', text: '副卡' }, hard: { kind: 'not', child: field },
+      vector: { text: '副卡' }, requirements: [], unresolved: [], fields: [], parserVersion: 'test', elapsedMs: 0 }
+    const result = applyQueryDelta({ ...baseSpec(), queryPlan: plan, filters: [{ field: 'region', op: 'neq', value: '北京' }] }, { kind: 'remove_filter', field: 'region' })
+    expect(result.filters).toEqual([])
+    expect(evaluateQuery(result.queryPlan!.hard, { texts: { body: ['副卡'] }, fields: {} })).toBe(true)
+    expect(evaluateQuery(result.queryPlan!.keyword, { texts: { body: ['宽带'] }, fields: {} })).toBe(false)
+  })
   it('replaces admitted unresolved predicates without discarding other keyword requirements', () => {
     const unknown = { kind: 'unknown', requirementId: 'r1' } as const
     const plan: QueryPlan = { schemaVersion: 1, original: '华东的副卡', anchor: { at: '2026-09-07T00:00:00Z', timeZone: 'Asia/Shanghai' }, normalizationVersion: 'nfkc-lower-v1',

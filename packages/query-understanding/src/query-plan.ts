@@ -2,6 +2,10 @@ import type { QueryExpression, QueryFieldCapability, QueryPlan, TicketFilter } f
 import { compileUserConditions } from './conditions.js'
 
 const TRUE: QueryExpression = { kind: 'constant', value: true }
+export function hasDisjunction(expression: QueryExpression): boolean {
+  return expression.kind === 'or' || expression.kind === 'and' && expression.children.some(hasDisjunction)
+    || expression.kind === 'not' && hasDisjunction(expression.child)
+}
 export interface QueryPlanParser {
   parse(input: { readonly query: string; readonly now: Date; readonly timeZone: string; readonly fields: readonly QueryFieldCapability[] }, signal?: AbortSignal): Promise<QueryPlan>
 }
@@ -38,17 +42,18 @@ export function compileQueryPlan(original: string, terms: readonly string[], opt
   const fields = options.fields ?? DEFAULT_QUERY_FIELDS
   const requirements: QueryPlan['requirements'][number][] = []
   const unresolved: string[] = []
-  const requirement = (start: number, end: number, kind: 'hard' | 'keyword' | 'semantic', status: 'compiled' | 'unresolved' | 'evidence_required', interpretation: string, expression?: QueryExpression): string => {
+  const requirement = (start: number, end: number, kind: 'hard' | 'keyword' | 'semantic', status: 'compiled' | 'unresolved' | 'evidence_required', interpretation: string, expression?: QueryExpression, polarity?: 'exclude'): string => {
     const id = `r${requirements.length + 1}`
     requirements.push({ id, span: { start, end, text: original.slice(start, end) }, kind, status, interpretation,
-      ...(expression === undefined ? {} : { expression }) })
+      ...(expression === undefined ? {} : { expression }), ...(polarity ? { polarity } : {}) })
     if (status === 'unresolved') unresolved.push(id)
     return id
   }
   // Mask semantic exclusions without shifting offsets; their terms must not enter lexical search.
   let source = original
-  for (const match of original.matchAll(/(?:排除|不要|不包括)[^，,。；;()（）]*(?:导致|引起|造成|原因)[^，,。；;()（）]*/gu)) {
-    requirement(match.index, match.index + match[0].length, 'semantic', 'evidence_required', '根据来源证据核对原因排除，不能编译为字面 NOT')
+  const explicitIntersection = /同时(?:出现|包含|含有|命中)|(?:两者|二者|关键词)都(?:出现|包含)|\bAND\b|并且|而且|且|既.+又/iu.test(original)
+  for (const match of original.matchAll(/(?:排除|不要|不包括|不纳入|不计入)[^，,。；;()（）]*(?:导致|引起|造成|原因|(?:已|完成|解除|取消|结束|恢复)[^，,。；;()（）]{0,12}后|仅剩|只剩)[^，,。；;()（）]*/gu)) {
+    requirement(match.index, match.index + match[0].length, 'semantic', 'evidence_required', '根据来源证据核对业务对象、时序或原因排除；整项条件不能变为字面 NOT 或正向召回分支', undefined, 'exclude')
     source = source.slice(0, match.index) + ' '.repeat(match[0].length) + source.slice(match.index + match[0].length)
   }
   type Pair = { keyword: QueryExpression; hard: QueryExpression }
@@ -59,7 +64,7 @@ export function compileQueryPlan(original: string, terms: readonly string[], opt
     if (depth > 24) throw new TypeError('Query Boolean nesting exceeds 24')
     // Find outer operators while respecting literal quotes and nested parentheses.
     let nesting = 0; let quote = ''; let outerClose = -1
-    const splits: { start: number; end: number; kind: 'and' | 'or' }[] = []
+    const splits: { start: number; end: number; kind: 'and' | 'or'; topical: boolean }[] = []
     for (let i = start; i < end; i++) {
       const c = source[i]!
       if (quote) { if (c === quote) quote = ''; continue }
@@ -71,7 +76,10 @@ export function compileQueryPlan(original: string, terms: readonly string[], opt
       if (!/[A-Za-z]/u.test(c) && terms.some(term => term.length > 1 && source.lastIndexOf(term, i) >= start
         && source.lastIndexOf(term, i) + term.length > i)) continue
       const match = source.slice(i, end).match(/^(\bOR\b|或者|或是|或|\bAND\b|并且|而且|且|和|与)/iu)
-      if (match) { splits.push({ start: i, end: i + match[0].length, kind: /OR|或/iu.test(match[0]) ? 'or' : 'and' }); i += match[0].length - 1 }
+      if (match) {
+        const topical = /^[和与]$/u.test(match[0]) && !explicitIntersection
+        splits.push({ start: i, end: i + match[0].length, kind: topical || /OR|或/iu.test(match[0]) ? 'or' : 'and', topical }); i += match[0].length - 1
+      }
     }
     if (nesting !== 0 || quote) {
       const id = requirement(start, end, 'hard', 'unresolved', '括号或引号不匹配')
@@ -83,7 +91,7 @@ export function compileQueryPlan(original: string, terms: readonly string[], opt
       for (const split of chosen) { parts.push(parse(cursor, split.start, depth + 1)); cursor = split.end }
       parts.push(parse(cursor, end, depth + 1))
       const kind = chosen[0]!.kind
-      return { keyword: booleanGroup(kind, parts.map(p => p.keyword)), hard: booleanGroup(kind, parts.map(p => p.hard)) }
+      return { keyword: booleanGroup(kind, parts.map(p => p.keyword)), hard: booleanGroup(chosen.every(s => s.topical) ? 'and' : kind, parts.map(p => p.hard)) }
     }
     if ('(（'.includes(source[start]!) && outerClose === end - 1) return parse(start + 1, end - 1, depth + 1)
     const text = source.slice(start, end)
@@ -100,6 +108,11 @@ export function compileQueryPlan(original: string, terms: readonly string[], opt
     const hard: QueryExpression[] = []; const lexical: QueryExpression[] = []
     const masked: { start: number; end: number }[] = []
     for (const match of text.matchAll(/(?:(正文|标题|摘要|处理结论)\s*)?(包含|含有|不包含|不出现|不得出现|出现)?\s*[“"‘']([^”"’']+)[”"’']/gu)) {
+      if (!match[1] && !match[2] && /(?:属于|是否符合|是否满足)\s*$/u.test(text.slice(0, match.index))) {
+        requirement(start + match.index, start + match.index + match[0].length, 'semantic', 'evidence_required', '引号命名待核查的业务范围，不要求来源逐字出现范围名称')
+        masked.push({ start: match.index, end: match.index + match[0].length })
+        continue
+      }
       const field = ({ 正文: 'body', 标题: 'title', 摘要: 'summary', 处理结论: 'resolution' } as Record<string, string>)[match[1] ?? '']
       let expr: QueryExpression = { kind: 'literal', op: 'phrase', text: match[3]!, ...(field === undefined ? {} : { field }) }
       if (/不/u.test(match[2] ?? '')) expr = { kind: 'not', child: expr }
@@ -150,9 +163,9 @@ export function compileQueryPlan(original: string, terms: readonly string[], opt
       const id = requirement(start, end, 'hard', 'unresolved', '当前静态字段不能证明状态历史')
       hard.push({ kind: 'unknown', requirementId: id })
     }
-    return { keyword: booleanGroup('and', [...hard, ...lexical]), hard: booleanGroup('and', hard) }
+    return { keyword: booleanGroup('and', [...hard, ...(lexical.length ? [booleanGroup(explicitIntersection ? 'and' : 'or', lexical)] : [])]), hard: booleanGroup('and', hard) }
   }
   const pair = parse(0, source.length)
   return { schemaVersion: 1, original, anchor: { at: now.toISOString(), timeZone }, normalizationVersion: 'nfkc-lower-v1',
-    keyword: pair.keyword.kind === 'constant' && pair.keyword.value ? FALSE : pair.keyword, hard: pair.hard, vector: { text: original }, requirements, unresolved, fields, parserVersion: 'sourced-rules-v1', elapsedMs: performance.now() - started }
+    keyword: pair.keyword.kind === 'constant' && pair.keyword.value ? FALSE : pair.keyword, hard: pair.hard, vector: { text: original }, requirements, unresolved, fields, parserVersion: 'sourced-rules-v3-semantic-exclusions', elapsedMs: performance.now() - started }
 }

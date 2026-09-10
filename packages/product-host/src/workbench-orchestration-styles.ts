@@ -44,6 +44,19 @@ export const ORCHESTRATION_STYLES = String.raw`
 .activity-item { display: flex; gap: 15px; position: relative; padding-bottom: 22px; }
 .activity-item:not(:last-child)::before { content: ''; position: absolute; left: 13px; top: 28px; bottom: 0; width: 1px; background: #e0e7df; }
 .activity-dot { display: grid; place-items: center; flex: 0 0 27px; height: 27px; border-radius: 9px; background: #edf1ea; color: #598773; font-size: 16px; }
+.activity-dot svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.activity-item[data-kind=user] .activity-dot { background: #eeece7; color: #77796e; }
+.activity-item[data-kind=delegate] .activity-dot { background: #eeedf5; color: #81739b; }
+.activity-item[data-kind=finding] .activity-dot, .activity-item[data-kind=finish] .activity-dot { background: #dfefe5; color: #2d795c; }
+.activity-log[data-busy=true] .activity-item:last-child .activity-dot { position: relative; }
+.activity-log[data-busy=true] .activity-item:last-child .activity-dot::after { content: ''; position: absolute; inset: -4px; border: 1.5px solid #79ad9233; border-top-color: #4a9174; border-radius: 12px; animation: orbit-turn 2.6s linear infinite; }
+.stage-rail [data-state=active] .stage-number { position: relative; }
+.stage-rail [data-state=active] .stage-number::after { content: ''; position: absolute; inset: -4px; border: 1px solid transparent; border-top-color: #418d76; border-radius: 50%; animation: orbit-turn 2s linear infinite; }
+.task-status[data-state=running] .status-dot { width: 12px; height: 12px; border: 2px solid #76a49344; border-top-color: var(--accent); background: transparent; box-shadow: none; animation: orbit-turn 1.5s linear infinite; }
+.expert-node, .knowledge-card, .model-option, .card { transition: border-color .2s ease, box-shadow .2s ease, background-color .2s ease; }
+.expert-node[data-state=running] .expert-avatar { animation: soft-breathe 2s ease-in-out infinite; }
+.composer-meta { flex-wrap: wrap; }
+@media (max-width: 600px) { .composer-meta .model-trigger { max-width: 180px; } .composer-meta #input-hint { display: none; } }
 .activity-item>div { min-width: 0; padding-top: 1px; }
 .activity-item small { color: #798479; font-size: 10px; }
 .activity-item p { margin: 5px 0 0; font-size: 13px; line-height: 1.85; overflow-wrap: anywhere; white-space: pre-wrap; }

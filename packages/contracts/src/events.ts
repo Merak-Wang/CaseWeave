@@ -61,6 +61,8 @@ export interface RetrievalEventDataMap {
   'retrieval/user-feedback-received': { readonly text: string }
   'retrieval/context-projected': { readonly selection: EvidenceContextSelection }
   'retrieval/model-request-measured': {
+    readonly compression?: import('./retrieval-state.js').ContextCompressionStats
+    readonly compactionCount?: number
     readonly outputReservedTokens?: number
     readonly protocolMarginTokens?: number
     readonly estimatedInputTokens: number
@@ -75,7 +77,7 @@ export interface RetrievalEventDataMap {
     readonly accepted: boolean
   }
   'retrieval/model-response-measured': { readonly modelLatencyMs: number; readonly outputTokens: number; readonly inputTokens?: number }
-  'retrieval/tool-call-measured': { readonly success: boolean; readonly serializationBytes: number }
+  'retrieval/tool-call-measured': { readonly success: boolean; readonly serializationBytes: number; readonly failureSignature?: string }
   'retrieval/evidence-frozen': { readonly pack: FrozenEvidencePack }
   'retrieval/stopped': { readonly reason: RetrievalTermination; readonly remainingGapKinds: readonly string[]; readonly errorCode?: RetrievalErrorCode }
   'retrieval/detail-read': { readonly receipt: CandidateDetailReadReceipt }

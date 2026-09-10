@@ -183,9 +183,13 @@ class SpacyQueryAnalyzer:
             doc = self._nlp(query)
         candidates = self._candidate_spans(doc)
         boolean = self._boolean(doc, candidates)
-        # 显式 AND/OR 存在时只把其左右项交给关键词通道；否则使用全部合格 POS/领域候选。
-        keywords = boolean["terms"] if boolean is not None else [item["text"] for item in candidates]
-        keywords = list(dict.fromkeys(keywords))[:8]
+        # A nearest-neighbour coordination pair is only a parsing hint. Replacing
+        # the topic list with that pair loses subjects elsewhere in the sentence
+        # (e.g. 副卡解绑/合账/扣费 become only 缴费/发生 around 或).
+        # Preserve source terms; the downstream QueryPlan owns the full Boolean AST.
+        keywords = list(dict.fromkeys(item["text"] for item in candidates))[:8]
+        if boolean is not None and not all(term in keywords for term in boolean["terms"]):
+            boolean = None
         # 没有可用表面词不是查询失败：完整原始 query 仍交给多语言向量通道。
         triples = self._dependency_triples(doc)
         if boolean is not None:
@@ -209,6 +213,14 @@ class SpacyQueryAnalyzer:
             }
             for token in visible_tokens
         ]
+        # spaCy indexes Unicode code points; the TypeScript consumer slices UTF-16
+        # code units. Convert only at the wire boundary, after Boolean parsing.
+        utf16_offsets = [0]
+        for character in query:
+            utf16_offsets.append(utf16_offsets[-1] + (2 if ord(character) > 0xFFFF else 1))
+        for item in [*candidates, *tokens, *entities]:
+            item["start"] = utf16_offsets[item["start"]]
+            item["end"] = utf16_offsets[item["end"]]
         # 响应同时携带检索输入和完整 provenance；协议封装由 FastAPI endpoint 追加版本与 requestId。
         return {
             # spaCy 的 doc.lang 是内部 StringStore 哈希；线协议需要可读、可重放的语言代码。

@@ -6,6 +6,7 @@ import {
   type TicketEvidenceSegment,
 } from '@retrieval-agent/contracts'
 import { createHash } from 'node:crypto'
+import { expertNeedsMainReview } from './experts.js'
 
 export interface EvidenceContextPolicyConfig {
   readonly role?: 'main' | 'expert'
@@ -95,13 +96,31 @@ export class EvidenceContextPolicy {
       keyword: state.query.spec.keywordQuery, semanticQuery: state.query.spec.semanticQuery,
       confirmedConstraints: state.query.confirmedConstraints, unresolvedConstraints: state.query.unresolvedConstraints,
       userRequirements: state.query.contract?.userRequirements,
+      retrievalLogic: state.query.contract?.logic,
       queryPlan: state.query.spec.queryPlan,
+      semanticExclusions: state.query.spec.queryPlan?.requirements.filter(r => r.polarity === 'exclude').map(r => ({
+        requirement_id: r.id, source_text: r.span.text, instruction: 'Accept requires exclusion_checks: evaluate this entire condition against received evidence before deciding.' })),
       searchChannels: state.searchProgress?.channels,
     }
     const evidenceAliases = new Map(state.promotedEvidence.map((evidence, index) => [evidence.evidenceId as string, `e${index + 1}`]))
+    const exclusionChecks = (j: NonNullable<RetrievalState['judgments']>[number]) => j.exclusionChecks ? {
+      exclusion_checks: j.exclusionChecks.map(c => ({ requirement_id: c.requirementId, source_text: c.sourceText,
+        applies: c.applies, reason: c.reason, evidence_aliases: c.evidenceRefs.map(ref => aliases.get(ref as TicketCandidate['ref']) ?? evidenceAliases.get(ref)) })) } : {}
     const orderedEvidence = this.#orderedEvidence(state)
     const evidenceWindowOffset = state.evidenceWindowOffset ?? 0
-    const evidenceWindow = { offset: evidenceWindowOffset, maximumSegments: this.#maxEvidenceSegments,
+    let evidenceWindowEnd = evidenceWindowOffset + this.#maxEvidenceSegments
+    // A dialogue turn is a provenance segment, not an independent reading task.
+    // Finish the boundary field when there is an explicit token budget; its
+    // actual bytes still pass the budget check below, with unchanged aliases.
+    const boundaryField = orderedEvidence[evidenceWindowEnd - 1]
+    if (tokenBudget !== undefined && boundaryField) {
+      while (evidenceWindowEnd < orderedEvidence.length) {
+        const continuation = orderedEvidence[evidenceWindowEnd]!
+        if (continuation.candidateRef !== boundaryField.candidateRef || continuation.field !== boundaryField.field) break
+        evidenceWindowEnd++
+      }
+    }
+    const evidenceWindow = { offset: evidenceWindowOffset, maximumSegments: evidenceWindowEnd - evidenceWindowOffset,
       availableSegments: orderedEvidence.length, moreUnseenEvidence: this.nextEvidenceWindowOffset(state) >= 0,
       nextWindowAction: 'inspect next_window', priority: 'latest_inspection_then_current_candidates' }
     const alias = (ref: string): string => aliases.get(ref as TicketCandidate['ref']) ?? evidenceAliases.get(ref) ?? ref
@@ -120,14 +139,18 @@ export class EvidenceContextPolicy {
         label: field.label,
         valueKind: field.valueKind,
         operators: field.filterOperators,
+        availability: state.snapshot?.queryFields?.find(item => item.key === field.key)?.availability,
       })) ?? []
     const callableToolsNow = state.phase === 'stopped' ? [] : this.#expert ? ['ticket_expert']
-      : state.phase === 'awaiting_clarification' ? [] : ['ticket_decide']
+      : state.phase === 'awaiting_clarification' ? [] : ['ticket_read', 'ticket_search', 'ticket_decide', 'ticket_wait']
     const actionState = { callableToolsNow, filterCapabilities,
-      clarificationChannel: this.#expert ? 'ticket_expert report.question; main asks the user' : 'ticket_decide_then_user_message',
-      ...(!this.#expert ? { toolRepairBudget: { maxConsecutiveErrors: state.budget.maxConsecutiveToolErrors ?? 6,
+      clarificationChannel: this.#expert ? 'ticket_expert report.question is advisory; main resolves ordinary ambiguity and asks only for indispensable user-exclusive information' : 'ticket_decide_then_user_message; ask only for indispensable user-exclusive information. Resolve ordinary business terms from evidence/Wiki and existing answers. For broad topic searches, present a useful relevant set with its interpreted scope instead of asking the user to define common subcategories.',
+      ...(!this.#expert ? { finishRequirements: {
+        requiredExpertReviews: state.expertTasks?.filter(t => t.inputGeneration === (state.inputGeneration ?? 0) && expertNeedsMainReview(t)).map(t => t.id) ?? [],
+        instruction: 'When finishing, action.coverage.expertReviews must explicitly address each listed taskId with reason and main-visible evidenceRefs. Completed experts can still have unresolved scopes. Keep the review with the final submission; previous attempted finish calls are atomic and do not save it.',
+      }, toolRepair: {
         consecutiveErrors: state.budget.consecutiveToolErrors ?? 0,
-        onExhaustion: 'resource stop with unfinished status; a successful action resets consecutive errors' } } : {}) }
+        nextStep: 'Read the specific validation error and repair the indicated arguments. Use a small independent read when evidence is missing. Do not claim resource exhaustion from validation errors; a successful action resets this diagnostic counter.' } } : {}) }
     const evidenceNavigation = {
       nextPosition: state.evidenceReadPosition ? { candidate_alias: alias(state.evidenceReadPosition.candidateRef),
         field: state.evidenceReadPosition.field, part: state.evidenceReadPosition.part, start: state.evidenceReadPosition.start } : undefined,
@@ -140,13 +163,24 @@ export class EvidenceContextPolicy {
         displayId: state.candidateHistory.find(c => c.ref === j.candidateRef)?.displayId,
         title: state.candidateHistory.find(c => c.ref === j.candidateRef)?.title,
         sourceVersion: state.candidateHistory.find(c => c.ref === j.candidateRef)?.sourceVersion }, verdict: j.verdict,
-        evidenceAliases: j.evidenceRefs.map(alias), reason: j.reason })) }
-    const experts = { catalog: state.knowledgeCatalog, tasks: state.expertTasks?.slice(-6).map(t => ({
+        evidenceAliases: j.evidenceRefs.map(alias), reason: j.reason, ...exclusionChecks(j) })) }
+    const experts = { catalog: state.knowledgeCatalog,
+      coordination: { dispatch: 'nonblocking', concurrency: 3,
+        wait: 'ticket_wait(task_ids) suspends until the first listed result. Do independent work first; do not poll or redelegate.',
+        unassignedCandidateAliases: state.candidates.filter(c => !state.expertTasks?.some(t => t.inputGeneration === (state.inputGeneration ?? 0)
+          && ['pending', 'running'].includes(t.status) && t.candidateRefs.includes(c.ref))
+          && !state.judgments?.some(j => j.candidateRef === c.ref && j.verdict !== 'undetermined')).slice(0, 8).map(c => alias(c.ref)) },
+      priorWork: state.expertTasks?.filter(t => t.status === 'superseded' && t.finding).slice(-3).map(t => ({
+        scope: t.scope, goal: t.goal, reuse: 'Historical scope; reuse sources to reassess affected judgments against the latest answer. Do not adopt the old finding ID or repeat its full search.',
+        judgments: t.finding!.judgments.slice(0, 20).map(j => ({ candidateAlias: alias(j.candidateRef), verdict: j.verdict,
+          reason: j.reason, evidenceAliases: j.evidenceRefs.map(alias), ...exclusionChecks(j) })) })),
+      archivedTaskCount: state.expertTasks?.filter(t => t.inputGeneration !== (state.inputGeneration ?? 0) || t.status === 'superseded').length ?? 0,
+      tasks: state.expertTasks?.filter(t => t.inputGeneration === (state.inputGeneration ?? 0) && t.status !== 'superseded').slice(-6).map(t => ({
       id: t.id, domainId: t.domainId, goal: t.goal, scope: t.scope, status: t.status, failure: t.failure,
       inputGeneration: t.inputGeneration, releaseId: t.releaseId, knowledgeRefs: t.knowledgeRefs,
       candidateAliases: t.candidateRefs.map(alias),
       finding: t.finding ? { id: t.finding.id, judgments: t.finding.judgments.map(j => ({
-        candidateAlias: alias(j.candidateRef), verdict: j.verdict, evidenceAliases: j.evidenceRefs.map(alias), reason: j.reason })),
+        candidateAlias: alias(j.candidateRef), verdict: j.verdict, evidenceAliases: j.evidenceRefs.map(alias), reason: j.reason, ...exclusionChecks(j) })),
         gaps: t.finding.gaps.map(g => ({ ...g, evidenceRefs: undefined, evidenceAliases: g.evidenceRefs.map(alias) })),
         counterEvidenceAliases: t.finding.counterEvidenceRefs.map(alias), nextAction: t.finding.nextAction,
         question: t.finding.question, disagreementKind: t.finding.disagreementKind } : undefined,
@@ -161,6 +195,7 @@ export class EvidenceContextPolicy {
         stateId: state.stateId,
         queryContract,
         userFeedback: state.userFeedback?.map(item => item.text),
+        answeredQuestions: state.userFeedback?.filter(item => item.question).map(item => ({ question: item.question, answer: item.text })),
         clarification: state.clarification === undefined ? undefined : {
           question: state.clarification.question, answer: state.clarification.answer,
           candidateAliases: state.clarification.candidateRefs.map(alias), options: state.clarification.options,
@@ -189,6 +224,7 @@ export class EvidenceContextPolicy {
           })),
         },
         evidenceState: {
+          readingPolicy: 'Judge received titles/summaries with cN first. Raw text is optional and reserved for a named missing fact, conflict, or a user request for source/processing verification. Never inspect every keyword hit. Review bounded windows; persist each batch of judgments.',
           ...evidenceNavigation,
           activeCandidateCount: state.candidates.length,
           evidenceWindow,
@@ -261,7 +297,7 @@ export class EvidenceContextPolicy {
       if (!activeRefs.has(evidence.candidateRef)) excluded.push({ ref: evidence.evidenceId, reason: 'superseded' })
     }
     for (const [index, evidence] of orderedEvidence.entries()) {
-      if (index < evidenceWindowOffset || index >= evidenceWindowOffset + this.#maxEvidenceSegments) {
+      if (index < evidenceWindowOffset || index >= evidenceWindowEnd) {
         excluded.push({ ref: evidence.evidenceId, reason: 'not_selected' })
         continue
       }

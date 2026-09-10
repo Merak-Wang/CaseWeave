@@ -5,11 +5,14 @@ WORKDIR /app
 RUN npm install --global pnpm@10.28.2
 RUN mkdir -p /app/.cache /app/data /app/output /opt/retrieval-runtime/dsh-runner && chown node:node /app /app/.cache /app/data /app/output /opt/retrieval-runtime/dsh-runner
 USER node
-COPY --chown=node:node . .
-RUN pnpm install --frozen-lockfile --ignore-scripts && pnpm build
-# Install the pinned DSH in the image; user profiles and credentials stay in a volume.
+# Runtime dependencies change independently from application source.
 COPY --chown=node:node config/app/runtime/ /opt/retrieval-runtime/dsh-runner/
 RUN cd /opt/retrieval-runtime/dsh-runner && pnpm install --frozen-lockfile --ignore-workspace --ignore-scripts
+COPY --chown=node:node pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm fetch --frozen-lockfile --ignore-scripts
+COPY --chown=node:node . .
+RUN pnpm install --offline --frozen-lockfile --ignore-scripts && pnpm build
+# Install the pinned DSH in the image; user profiles and credentials stay in a volume.
 RUN mkdir -p /app/.cache /app/data/raw /app/data/tickets/esft /app/data/evals/esft-summary-v1 /app/output \
     && node scripts/wiki-store.mjs verify
 ENV RETRIEVAL_AGENT_STORAGE=mysql_milvus \

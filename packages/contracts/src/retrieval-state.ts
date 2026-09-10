@@ -58,6 +58,13 @@ export interface RetrievalKnowledgeAssessment {
 
 /** A judgment is supported only by evidence actually delivered to this model. */
 export interface RetrievalCandidateJudgment {
+  readonly exclusionChecks?: readonly {
+    readonly requirementId: string
+    readonly sourceText: string
+    readonly applies: 'yes' | 'no' | 'uncertain'
+    readonly reason: string
+    readonly evidenceRefs: readonly string[]
+  }[]
   readonly adoptedFindingId?: string
   readonly conflictResolution?: { readonly kind: import('./agent-context.js').DisagreementKind; readonly reason: string; readonly evidenceRefs: readonly string[] }
   readonly candidateRef: TicketCandidateRef
@@ -108,10 +115,21 @@ export interface RetrievalAllowedAction {
   readonly maxTokens: number
 }
 
+export interface ContextCompressionStats {
+  readonly workingSetCount: number
+  readonly capacityCount: number
+  readonly last?: { readonly reason: 'working_set' | 'window_pressure' | 'provider_overflow'; readonly beforeTokens: number;
+    readonly thresholdTokens: number; readonly limit: number; readonly at: string }
+}
 export interface RetrievalBudgetState {
+  /** Latest full request usage, independent of the lifetime token totals. */
+  readonly context?: { readonly estimatedInputTokens: number; readonly measuredInputTokens?: number;
+    readonly limit?: number; readonly reservedTokens: number; readonly compactionCount: number; readonly compression?: ContextCompressionStats }
   /** Cross-action Provider page ceiling. */
   readonly maxSearches: number
   readonly maxConsecutiveToolErrors?: number
+  readonly maxRepeatedToolErrors?: number
+  readonly repeatedToolFailure?: { readonly signature: string; readonly count: number }
   readonly consecutiveToolErrors?: number
   readonly searchesUsed: number
   /** Actual conversation-model requests admitted by the Harness. */
@@ -260,14 +278,15 @@ export interface RetrievalState {
   /** Accumulated actual model visibility, invalidated when hard conditions change. */
   readonly modelVisibleCandidateRefs?: readonly TicketCandidateRef[]
   readonly modelVisibleEvidenceIds?: readonly TicketEvidenceId[]
-  /** State IDs in this same semantic generation before measurement-only revisions. */
+  /** Compatible IDs before additive background updates; decisions still validate current evidence/conflicts. */
   readonly measurementStateIds?: readonly RetrievalStateId[]
+  readonly coordinatorActivity?: 'working' | 'waiting_experts'
   readonly candidateWindowOffset?: number
   readonly evidenceWindowOffset?: number
   /** Preserved provider failure identity behind a stopped termination. */
   readonly stopErrorCode?: RetrievalErrorCode | undefined
   readonly stopExplanation?: string | undefined
-  readonly userFeedback?: readonly { readonly text: string; readonly receivedAt: string }[]
+  readonly userFeedback?: readonly { readonly text: string; readonly receivedAt: string; readonly question?: string }[]
   /** Waiting time is excluded from the online execution limit. */
   readonly executionClock?: { readonly waitingSince?: string; readonly totalWaitingMs: number }
   /** Historical replay is a fact source, not a current access grant. */

@@ -31,6 +31,8 @@ export interface QueryPlan {
     readonly interpretation: string
     readonly kind: 'hard' | 'keyword' | 'semantic'
     readonly status: 'compiled' | 'unresolved' | 'evidence_required'
+    /** The model evaluates this sourced exclusion; it is never a literal SQL NOT. */
+    readonly polarity?: 'exclude'
     readonly expression?: QueryExpression
   }[]
   readonly unresolved: readonly string[]

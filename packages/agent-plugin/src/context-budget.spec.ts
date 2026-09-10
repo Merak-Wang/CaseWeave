@@ -30,7 +30,7 @@ class CountingAdapter extends LlmAdapter {
   override async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
     if (this.delayMs > 0) await new Promise(resolve => setTimeout(resolve, this.delayMs))
-    yield { type: 'usage', usage: { inputTokens: 12, outputTokens: 7 } }
+    yield { type: 'usage', usage: { inputTokens: 12, cacheReadTokens: 36, cacheWriteTokens: 9, outputTokens: 7 } }
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 }
@@ -46,7 +46,8 @@ function fixtureAgent(ctx: Context): { readonly agent: Agent; readonly state: Re
   const state = {
     createdAt: new Date().toISOString(),
     phase: 'assessed',
-  } as RetrievalState
+    promotedEvidence: [], candidates: [],
+  } as unknown as RetrievalState
   const cancel = vi.fn()
   const agent = {
     id: session.id,
@@ -126,9 +127,10 @@ describe('retrieval runtime budget boundary', () => {
       }))
       expect(result.admitModelRequest.mock.calls[0]?.[1].estimatedInputTokens).toBeGreaterThan(0)
       expect(result.admitModelRequest.mock.calls[0]?.[1].serializationBytes).toBeGreaterThan(0)
-      expect(result.recordModelResponse).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      expect(result.recordModelResponse.mock.calls[0]?.[1]).toMatchObject({
+        inputTokens: 57,
         outputTokens: 7,
-      }))
+      })
       expect(result.chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
     } finally {
       await result.ctx.fiber.dispose()

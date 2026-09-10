@@ -136,7 +136,8 @@ export class MySqlTaskStore {
     if (command.kind !== 'query' && command.kind !== 'answer') {
       await c.query('UPDATE ra_task_question SET answered=TRUE WHERE task_id=? AND answered=FALSE', [task.id])
     }
-    const hard = (command.kind === 'supplement' || command.kind === 'answer') && Boolean(command.information.filters?.length)
+    const hard = (command.kind === 'supplement' || command.kind === 'answer')
+      && Boolean(command.information.filters?.length || command.information.removedFilterFields?.length)
     task.input_revision++; task.semantic_revision++; if (hard || command.kind === 'query') task.query_revision++
     task.failure = null
     await this.append(c, task, 'command/accepted', { operationId, command })

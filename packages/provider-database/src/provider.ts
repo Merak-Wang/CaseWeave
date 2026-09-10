@@ -136,11 +136,15 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
       })
       return notificationTail
     }
-    const add = async (record: NormalizedTicketRecord, channel: 'keyword' | 'vector', rank: number, score: number, detail?: unknown): Promise<void> => {
+    const add = (record: NormalizedTicketRecord, channel: 'keyword' | 'vector', rank: number, score: number, detail?: unknown): unknown[] => {
       const previous = hits.get(record.ticketId)
       const contributions = [...(previous?.channels ?? []).filter(c => c.channel !== channel), { channel, rank, score }]
       hits.set(record.ticketId, { documentId: record.ticketId, rank, score: contributions.reduce((sum, c) => sum + 1 / (60 + c.rank), 0), channels: contributions })
-      await this.db.pool.query('INSERT INTO ra_search_hit(run_id,ticket_id,channel,rank_no,score,source_hash,detail_json) VALUES (?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE rank_no=VALUES(rank_no),score=VALUES(score),detail_json=VALUES(detail_json)', [runId, record.ticketId, channel, rank, score, record.contentHash, detail === undefined ? null : JSON.stringify(detail)])
+      return [runId, record.ticketId, channel, rank, score, record.contentHash, detail === undefined ? null : JSON.stringify(detail)]
+    }
+    const persist = async (rows: unknown[][]): Promise<void> => {
+      options.signal?.throwIfAborted()
+      if (rows.length) await this.db.pool.query('INSERT INTO ra_search_hit(run_id,ticket_id,channel,rank_no,score,source_hash,detail_json) VALUES ? ON DUPLICATE KEY UPDATE rank_no=VALUES(rank_no),score=VALUES(score),detail_json=VALUES(detail_json)', [rows])
     }
     const run = async (i: number, work: () => Promise<void>): Promise<void> => {
       const channel = channels[i]!; if (channel.status === 'skipped') return
@@ -158,9 +162,10 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     await notify()
     const outcomes = await Promise.allSettled([
       run(0, async () => {
-        for await (const page of this.db.enumerate(entry.source.id, expression, entry.source.fields_json, { pageSize: 100, accelerate: Boolean(entry.source.grams_ready), ...(options.signal ? { signal: options.signal } : {}) })) {
+        for await (const page of this.db.enumerate(entry.source.id, expression, entry.source.fields_json, { pageSize: 500, accelerate: Boolean(entry.source.grams_ready), ...(options.signal ? { signal: options.signal } : {}) })) {
           timings.sqlMs = (timings.sqlMs ?? 0) + page.elapsedMs; timings.sqlFirstBatchMs ??= performance.now() - started
-          for (const record of page.records) if (byId.has(record.ticketId)) await add(record, 'keyword', ++channels[0]!.count, 1)
+          const rows = page.records.filter(record => byId.has(record.ticketId)).map(record => add(record, 'keyword', ++channels[0]!.count, 1))
+          await persist(rows)
           channels[0]!.cursor = page.cursor
           await notify()
         }
@@ -190,7 +195,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
           if (!record || record.contentHash !== hit.content_hash || record.sourceVersion !== hit.source_version || evaluateQuery(hard, queryDocument(record)) !== true) throw new Error('Milvus returned stale or unauthorized source identity')
           const chunk = ticketChunks(record, entry.index.identity_json.chunkChars).find(c => c.id === hit.id)
           if (!chunk || chunk.textHash !== hit.text_hash || chunk.field !== hit.field || chunk.part !== Number(hit.part) || chunk.start !== Number(hit.start) || chunk.end !== Number(hit.end)) throw new Error('Milvus fragment identity mismatch')
-          await add(record, 'vector', ++channels[1]!.count, hit.distance, hit)
+          await persist([add(record, 'vector', ++channels[1]!.count, hit.distance, hit)])
         }
       }),
     ])

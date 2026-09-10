@@ -13,6 +13,24 @@ const state = () => ({ inputGeneration: 2, phase: 'assessed', termination: 'acti
 } as unknown as RetrievalState)
 
 describe('public orchestration facts', () => {
+  it('counts only output usage and retains prior expert rounds in the task total', () => {
+    const original = state()
+    const measured = { ...original, budget: { totalOutputTokens: 100, totalMeasuredInputTokens: 9000, modelStepsUsed: 3, maxSearches: 2500, searchesUsed: 1, wallClockElapsedMs: 10 },
+      expertTasks: original.expertTasks!.map((t, i) => ({ ...t, outputTokens: i ? 30 : 20, inputTokens: 7000, modelSteps: 1 })) } as RetrievalState
+    const usage = projectOrchestration(measured).usage
+    expect(usage).toMatchObject({ outputTokens: 150, mainOutputTokens: 100, expertOutputTokens: 50, modelRequests: 5 })
+    expect(usage.experts).toHaveLength(2)
+    expect(projectOrchestration(measured).experts).toHaveLength(1)
+  })
+  it('does not count a long clarification pause as active execution', () => {
+    const view = projectOrchestration({ ...state(), createdAt: '2026-09-09T00:00:00Z', updatedAt: '2026-09-09T01:00:00Z',
+      executionClock: { totalWaitingMs: 0, waitingSince: '2026-09-09T00:01:00Z' } })
+    expect(view.clock).toEqual({ elapsedMs: 60_000, running: false })
+    const resumed = projectOrchestration({ ...state(), createdAt: '2026-09-09T00:00:00Z', updatedAt: '2026-09-09T01:01:00Z',
+      userFeedback: [{ text: '继续', receivedAt: '2026-09-09T00:59:00Z' }],
+      executionClock: { totalWaitingMs: 59 * 60_000 } })
+    expect(resumed.clock).toEqual({ elapsedMs: 120_000, running: true })
+  })
   it('distinguishes loaded priors from actual current-generation model requests and excludes historical branches', () => {
     const view = projectOrchestration(state())
     expect(view.experts).toHaveLength(1)

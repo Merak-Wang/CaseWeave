@@ -23,6 +23,7 @@ import { installAutomaticRetrievalStart } from './pre-step.js'
 import { installRetrievalTools } from './tools.js'
 import { installWorkingContext } from './working-context.js'
 import { installRetrievalRuntimeBudget } from './context-budget.js'
+import { requestTokens } from './context-recovery.js'
 import { inject } from './index.js'
 import { openWiki } from './wiki-store.js'
 
@@ -41,7 +42,9 @@ class Provider extends TicketRetrievalProviderService {
 const strings = (v: unknown): string[] => typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(strings)
   : v && typeof v === 'object' ? Object.values(v).flatMap(strings) : []
 class ScriptedExperts extends LlmAdapter {
-  constructor(readonly useWiki = false, readonly questionGate?: Promise<void>, readonly continuation = false, readonly quota = false, readonly broken = false, readonly expectedWikiReference?: string) { super() }
+  constructor(readonly useWiki = false, readonly questionGate?: Promise<void>, readonly continuation = false, readonly quota = false, readonly broken = false, readonly expectedWikiReference?: string,
+    readonly pipeline?: { gate: Promise<void>; mainWorked(): void; partial(): void }) { super() }
+  mainRead = false
   readonly requests: GenerateOptions[] = []
   readonly turns = new Map<string, number>()
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -51,15 +54,17 @@ class ScriptedExperts extends LlmAdapter {
     const text = options.messages.flatMap(m => strings(m.content)).join('\n')
     const header = [...text.matchAll(/<ticket_knowledge_context>(.*?)<\/ticket_knowledge_context>/gu)].map(m => JSON.parse(m[1]!)).at(-1).knowledgeState
     const isExpert = options.tools?.some(t => t.name === 'ticket_expert')
+    let toolName = isExpert ? 'ticket_expert' : 'ticket_decide'
     let args: unknown
     if (isExpert) {
       expect(options.tools?.map(t => t.name)).toEqual(['ticket_expert'])
       expect(header.actionState.callableToolsNow).toEqual(['ticket_expert'])
       expect(header.actionState.clarificationChannel).toContain('ticket_expert report.question')
       const knowledge = [...text.matchAll(/<untrusted_retrieval_knowledge>(.*?)<\/untrusted_retrieval_knowledge>/gu)].map(m => JSON.parse(m[1]!)).at(-1)
+      if (this.pipeline && step === 1 && knowledge.scope === '反例核查') await this.pipeline.gate
       if (this.useWiki) expect(knowledge.entries[0]?.reference).toBe(this.expectedWikiReference)
       if (this.broken) args = {}
-      else if (this.quota && step <= 12) args = { action: 'inspect', candidate_aliases: ['c1'], fields: [], judgments: [], semantic_gaps: [] }
+      else if (this.quota && step <= 12) args = { action: 'inspect', candidate_aliases: ['c1'], fields: [] }
       else if (step === 1 && this.questionGate && knowledge.scope === '支持核查') args = {
         action: 'report', judgments: [{ candidate_alias: 'c1', verdict: 'undetermined', evidence_aliases: ['c1'], reason: '办理范围需用户确认。' }],
         semantic_gaps: [{ kind: 'ambiguity', status: 'open', evidence_aliases: ['c1'], description: '是否包括解绑后的共享流量？' }],
@@ -76,20 +81,29 @@ class ScriptedExperts extends LlmAdapter {
       { domain_id: this.useWiki ? 'primary-secondary-card' : 'general', goal: '核对副卡解绑', scope: '支持核查', candidate_aliases: ['c1'], ...(this.useWiki ? { knowledge_ids: ['primary-secondary-card-cross-domain'] } : {}) },
       { domain_id: this.useWiki ? 'primary-secondary-card' : 'general', goal: '检查副卡解绑反例', scope: '反例核查', candidate_aliases: ['c1'], ...(this.useWiki ? { knowledge_ids: ['primary-secondary-card-cross-domain'] } : {}) },
     ] } }
+    else if (this.pipeline && !this.mainRead) {
+      this.mainRead = true; this.pipeline.mainWorked()
+      args = { state_id: header.stateId, judgments: [], semantic_gaps: [], action: { kind: 'inspect', candidate_aliases: ['c1'], fields: ['answer'] } }
+    }
+    else if (header.experts?.tasks.some((t: { status: string }) => ['pending', 'running'].includes(t.status))
+      && !(this.questionGate && header.experts.tasks.some((t: { finding?: { question?: string } }) => t.finding?.question))) {
+      if (this.pipeline && header.experts.tasks.some((t: { status: string }) => t.status === 'completed')) this.pipeline.partial()
+      toolName = 'ticket_wait'; args = { task_ids: header.experts.tasks.filter((t: { status: string }) => ['pending', 'running'].includes(t.status)).map((t: { id: string }) => t.id) }
+    }
     else if (this.broken) args = { state_id: header.stateId, judgments: [], semantic_gaps: [], action: { kind: 'finish', reason: 'incomplete',
       explanation: '两位专家因持续无效调用达到请求额度，没有有效产物，当前任务未完成。', coverage: {
         checked: ['原文快查已产生候选'], remaining: ['专家取证与逐条判断尚未完成'], nextAction: '修正模型工具使用后继续复核', nextActionValue: 'useful' } } }
     else if (this.questionGate) args = { state_id: header.stateId, judgments: [], semantic_gaps: [{ kind: 'ambiguity', status: 'open', evidence_aliases: ['c1'], description: '专家请求确认范围' }],
       action: { kind: 'clarify', question: '是否包括解绑后的共享流量？', candidate_aliases: ['c1'], evidence_aliases: ['c1'] } }
-    else if (step === 2) args = { state_id: header.stateId, judgments: [], semantic_gaps: [],
-      action: { kind: 'inspect', candidate_aliases: ['c1'], fields: ['answer'] } }
+    else if (!this.mainRead) { this.mainRead = true; args = { state_id: header.stateId, judgments: [], semantic_gaps: [],
+      action: { kind: 'inspect', candidate_aliases: ['c1'], fields: ['answer'] } } }
     else args = { state_id: header.stateId, judgments: [{ candidate_alias: 'c1', verdict: 'accept', evidence_aliases: ['e1'], reason: '来源确认解绑未生效，属于查询范围。',
       conflict_resolution: { kind: 'business_scope', reason: '处理字段明确解绑未生效；排除解释不符合来源。', evidence_aliases: ['e1'] } }], semantic_gaps: [],
       action: { kind: 'finish', reason: 'satisfied', explanation: '处理原文解决范围分歧，当前任务所需个案已有证据，无待查方向。',
         coverage: { checked: ['解绑状态与反例'], remaining: [], nextAction: '个案要求已解决，无需继续扩展。', nextActionValue: 'none' } } }
     await new Promise(resolve => setTimeout(resolve, 8))
     yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`${session}-${step}`), name: isExpert ? 'ticket_expert' : 'ticket_decide', arguments: JSON.stringify(args) } }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`${session}-${step}`), name: toolName, arguments: JSON.stringify(args) } }
     yield { type: 'usage', usage: { inputTokens: 500, outputTokens: 100 } }
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
@@ -98,11 +112,11 @@ class ScriptedExperts extends LlmAdapter {
 describe('A3/A4/A6/A9 installed DSH expert execution', () => {
   it.each([false, 'always', 'reset'] as const)('bounds the public DSH context and repeated tool errors (invalid=%s)', async invalid => {
     const ctx = new Context(); let dispose: (() => Promise<void>) | undefined
-    let calls = 0; const requestSizes: number[] = []; let recovered = false
+    let calls = 0; let recovered = false
     class ScaleAdapter extends LlmAdapter {
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
         calls++; if (calls > 64) throw new Error('scale fixture loop')
-        const text = options.messages.flatMap(m => strings(m.content)).join('\n'); requestSizes.push(text.length)
+        const text = options.messages.flatMap(m => strings(m.content)).join('\n')
         const header = [...text.matchAll(/<ticket_knowledge_context>(.*?)<\/ticket_knowledge_context>/gu)].map(m => JSON.parse(m[1]!)).at(-1).knowledgeState
         if (calls === 61) recovered = text.includes('第一个反例：仅欠费停机，未解绑')
         const action = invalid === 'reset' && calls === 2 ? { kind: 'inspect', history: true, candidate_aliases: ['c1'], fields: [] }
@@ -125,7 +139,7 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
       const provider = new LocalTicketProvider(records, { defaultMode: 'hybrid', ranker: { profileVersion: 'scale', capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
         rank: async (documents, query) => ({ hits: documents.map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1, channels: [] })),
           execution: { requestedMode: query.mode, executedMode: query.mode, strategyVersion: 'scale', channels: [] }, scanned: documents.length, keywordEligible: documents.length, rankedHits: documents.length, warnings: [] }) } })
-      new Provider(ctx, provider); const application = new RetrievalAgentService(ctx, { maxContextTokens: 24000, maxConsecutiveToolErrors: 3 })
+      new Provider(ctx, provider); const application = new RetrievalAgentService(ctx, { maxContextTokens: 24000, maxRepeatedToolErrors: 3 })
       installAutomaticRetrievalStart(ctx, application, { analyzer: { analyze: async () => ({ protocolVersion: 'retrieval-agent.models.v1', requestId: 'scale',
         analyzer: { engine: 'spacy', engineVersion: '1', pipeline: 'fixture', pipelineVersion: '1', lexiconVersion: '1', loaded: true, components: [] }, language: 'zh',
         keywords: ['副卡'], candidates: [], tokens: [], entities: [], triples: [], elapsedMs: 0 }) } })
@@ -139,7 +153,7 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
       if (invalid) {
         expect(calls).toBe(invalid === 'reset' ? 5 : 3)
         expect(state.termination).toBe('budget_exhausted')
-        expect(state.stopExplanation).toContain('连续 3 次')
+        expect(state.stopExplanation).toContain('工具调用死循环')
         expect(state.budget.consecutiveToolErrors).toBe(3)
         expect(state.budget.successfulToolCalls ?? 0).toBe(invalid === 'reset' ? 1 : 0)
         expect(state.selectedCandidateRefs).toEqual([])
@@ -150,18 +164,25 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
       expect(state.candidates).toHaveLength(1200)
       expect(recovered).toBe(true)
       expect(state.termination).toBe('partial')
-      expect(Math.max(...requestSizes)).toBeLessThan(22000)
+      // Bound the full request in tokens, including schemas, not an arbitrary
+      // character count that would force discarding useful low-pressure history.
+      expect(state.contextManifests?.filter(m => m.measurement === 'dsh_request').every(m => m.estimatedTokens <= 24000 - 2560)).toBe(true)
       expect(state.contextManifests?.filter(m => m.measurement === 'dsh_request')).toHaveLength(61)
       expect(state.budget.totalMeasuredInputTokens).toBe(61 * 1800)
       expect(foldRetrievalEvents(readRetrievalSessionEvents(handle.agent.session))?.candidates).toHaveLength(1200)
     } finally { await dispose?.(); await ctx.fiber.dispose() }
   }, 60000)
-  it.each([false, true, 'question', 'continuation', 'quota', 'broken'] as const)('runs parallel specialists with Wiki=%s, shares I/O, resolves disagreement and replays evidence', async variant => {
+  it.each([false, true, 'question', 'continuation', 'quota', 'broken', 'pipeline'] as const)('runs parallel specialists with Wiki=%s, shares I/O, resolves disagreement and replays evidence', async variant => {
     const useWiki = variant === true
     let releaseQuestion!: () => void
     const questionGate = variant === 'question' ? new Promise<void>(resolve => { releaseQuestion = resolve }) : undefined
     const ctx = new Context(); let dispose: (() => Promise<void>) | undefined
     const failures: unknown[] = []; let rankingCalls = 0; let reads = 0
+    let releasePipeline!: () => void, pipelineReleased = false, mainOverlapped = false, partialReceived = false
+    const gate = new Promise<void>(resolve => { releasePipeline = () => { pipelineReleased = true; resolve() } })
+    const timeout = variant === 'pipeline' ? setTimeout(releasePipeline, 4000) : undefined
+    const pipeline = variant === 'pipeline' ? { gate, mainWorked: () => { mainOverlapped = !pipelineReleased },
+      partial: () => { partialReceived = !pipelineReleased; releasePipeline() } } : undefined
     try {
       await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime)
       await ctx.plugin(ToolRuntime); await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)
@@ -180,7 +201,7 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
           execution: { requestedMode: query.mode, executedMode: query.mode, strategyVersion: 'fixture', channels: [] }, scanned: documents.length, keywordEligible: documents.length, rankedHits: documents.length, warnings: [] } } } })
       const read = provider.readEvidence.bind(provider); provider.readEvidence = async (...args) => { reads++; return read(...args) }
       new Provider(ctx, provider)
-      const application = new RetrievalAgentService(ctx)
+      const application = new RetrievalAgentService(ctx, { maxContextTokens: 32000 })
       // Use the same injected plugin scope as a mounted production preset.
       await ctx.plugin({ name: 'expert-scope', inject, apply(scope: Context) {
         new ExpertCoordinator(scope, application, useWiki ? 'wiki' : undefined)
@@ -201,7 +222,7 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
       ctx.on('tools/result', (_exec, result) => { if (result.isError) failures.push(result.content) }, { global: true })
       await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
       const expectedWikiReference = useWiki ? (await openWiki('wiki')).read('primary-secondary-card-cross-domain').reference : undefined
-      const adapter = new ScriptedExperts(useWiki, questionGate, variant === 'continuation', variant === 'quota', variant === 'broken', expectedWikiReference); ctx.llm.registerAdapter(['expert-fixture'], adapter)
+      const adapter = new ScriptedExperts(useWiki, questionGate, variant === 'continuation', variant === 'quota', variant === 'broken', expectedWikiReference, pipeline); ctx.llm.registerAdapter(['expert-fixture'], adapter)
       const handle = await ctx.agents.create({ sessionId: SessionId('expert-public-flow'), agentOptions: { provider: 'expert-fixture', model: 'scripted' } }); dispose = handle.dispose
       handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '找副卡解绑工单' }] }))
       const idle = handle.agent.whenIdle()
@@ -215,21 +236,29 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
       await idle
       await application.coordinator?.settlePending?.(handle.agent)
       const state = application.current(handle.agent)
+      if (pipeline) { expect(mainOverlapped, 'main must read while the second expert is still working').toBe(true)
+        expect(partialReceived, 'main must consume the first finding before the whole batch finishes').toBe(true) }
       if (variant === 'broken') {
-        expect(state.expertTasks?.every(t => t.status === 'failed' && t.modelSteps === 24 && t.actionsUsed === 0 && t.failure?.includes('24 次模型请求额度'))).toBe(true)
-        expect(adapter.requests).toHaveLength(50) // 24 requests per child, main dispatch + incomplete report.
+        expect(state.expertTasks?.every(t => t.status === 'failed' && t.modelSteps === 4 && t.actionsUsed === 0 && t.failure?.includes('工具调用死循环'))).toBe(true)
+        expect(adapter.requests.filter(r => r.tools?.some(t => t.name === 'ticket_expert'))).toHaveLength(8)
         expect(state.termination).toBe('partial')
         expect(state.selectedCandidateRefs).toEqual([])
         expect(foldRetrievalEvents(readRetrievalSessionEvents(handle.agent.session))?.expertTasks).toEqual(state.expertTasks)
         return
       }
       if (variant === 'quota') {
-        expect(failures, JSON.stringify({ tasks: state.expertTasks, failures, turns: [...adapter.turns] })).toHaveLength(2)
-        expect(failures.every(f => JSON.stringify(f).includes('保留给 report'))).toBe(true)
-        expect(state.expertTasks?.every(t => t.actionsUsed === t.maxActions)).toBe(true)
+        expect(failures, JSON.stringify({ tasks: state.expertTasks, failures, turns: [...adapter.turns] })).toEqual([])
+        expect(state.expertTasks?.every(t => t.actionsUsed === 13 && t.actionsUsed > t.maxActions)).toBe(true)
       } else expect(failures, JSON.stringify({ tasks: state.expertTasks, turns: [...adapter.turns] })).toEqual([])
       expect(state.expertTasks?.map(t => t.status), JSON.stringify(handle.agent.session.events.filter(e => e.type === 'turn/end'))).toEqual(['completed', 'completed'])
       expect(adapter.turns.size).toBe(3)
+      for (const request of adapter.requests) {
+        const tool = request.tools?.find(t => t.name === 'ticket_decide')
+        if (tool) {
+          const properties = tool.parameters.properties as { action: { oneOf: { properties: { kind: { const: string } }; required: string[] }[] } }
+          expect(properties.action.oneOf.find(f => f.properties.kind.const === 'finish')!.required).toContain('coverage')
+        }
+      }
       expect(delegatedQuestionChecks).toBeGreaterThanOrEqual(2)
       expect(rankingCalls).toBe(variant === 'quota' ? 1 : 2) // initial + one shared expert search
       if (variant === 'continuation') {
@@ -254,13 +283,13 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
       if (questionGate) { expect(state.phase).toBe('awaiting_clarification'); expect(state.selectedCandidateRefs).toEqual([]) }
       else expect(createTicketResultCollection(state)?.tickets.map(c => c.displayId)).toEqual(['ONE'])
       expect(foldRetrievalEvents(readRetrievalSessionEvents(handle.agent.session))?.expertTasks).toEqual(state.expertTasks)
-      expect(handle.agent.session.surface.nodes.length).toBeLessThan(8)
+      expect(adapter.requests.map(request => requestTokens(ctx, request) + 2560).filter(tokens => tokens > 32000)).toEqual([])
       expect(state.knowledgeCatalog?.status).toBe(useWiki ? 'available' : 'empty')
       expect(state.contextManifests?.some(m => m.measurement === 'dsh_request' && m.knowledgeRefs.length > 0)).toBe(useWiki)
       const prior = state.expertTasks![0]!.finding!
       await application.applyUserFeedback(handle.agent, { accepted: true, answer: '请依据原始工单重新核对。' })
       await expect(application.updateExpert(handle.agent, prior.inputGeneration, { kind: 'finding', finding: prior })).rejects.toMatchObject({ code: 'INVALID_TRANSITION' })
       expect(application.current(handle.agent).selectedCandidateRefs).toEqual([])
-    } finally { releaseQuestion?.(); await dispose?.(); await ctx.fiber.dispose() }
+    } finally { clearTimeout(timeout); releasePipeline(); releaseQuestion?.(); await dispose?.(); await ctx.fiber.dispose() }
   }, 20000)
 })

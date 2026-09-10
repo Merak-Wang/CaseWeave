@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { isMap, parseDocument } from 'yaml'
+import { createHash } from 'node:crypto'
 
 function record(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {}
@@ -18,6 +19,9 @@ export async function seedModelSettings(paths, environment) {
   }
 
   const settingsPath = join(paths.dshHome, 'settings.yaml')
+  const seedPath = join(paths.dshHome, 'retrieval-model-seed.sha256')
+  const seed = createHash('sha256').update(JSON.stringify({ provider, model, baseURL, apiKeyEnv,
+    reasoning: environment.RETRIEVAL_AGENT_BROWSER_LLM_REASONING ?? 'off', name: environment.RETRIEVAL_AGENT_BROWSER_LLM_DISPLAY_NAME })).digest('hex')
   let existing = {}
   if (existsSync(settingsPath)) {
     try {
@@ -32,6 +36,7 @@ export async function seedModelSettings(paths, environment) {
     }
   }
   const existingAdapter = record(existing['llm-pi-ai'])
+  if (existsSync(seedPath) && (await readFile(seedPath, 'utf8')).trim() === seed && existing['agent-default-model']) return false
   const existingProviders = record(existingAdapter.providers)
   const existingProvider = record(existingProviders[provider])
   const models = Array.isArray(existingProvider.models) ? existingProvider.models : []
@@ -60,5 +65,6 @@ export async function seedModelSettings(paths, environment) {
     'ui-onboarding': existing['ui-onboarding'] ?? { welcomeNoticeVersion: '2026-08-13.1' },
   }
   await writeFile(settingsPath, `${JSON.stringify(settings, undefined, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  await writeFile(seedPath, seed + '\n', { encoding: 'utf8', mode: 0o600 })
   return true
 }

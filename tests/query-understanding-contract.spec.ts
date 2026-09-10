@@ -46,6 +46,40 @@ function analysis(requestId: string, query: string, keyword: string, requestedCo
 }
 
 describe('query-analysis HTTP contract', () => {
+  it('does not dispatch an already-cancelled query to the analysis service', async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      return response(analysis(request.requestId, request.query, '网络'))
+    })
+    await expect(new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch })
+      .analyze('查找网络故障工单', AbortSignal.abort())).rejects.toMatchObject({ code: 'CANCELLED', retryable: false })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('discards a response completed after cancellation even when the transport ignores abort', async () => {
+    const controller = new AbortController()
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      const result = response(analysis(request.requestId, request.query, '网络'))
+      result.json = async () => { controller.abort(); return analysis(request.requestId, request.query, '网络') }
+      return result
+    })
+    await expect(new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch })
+      .analyze('查找网络故障工单', controller.signal)).rejects.toMatchObject({ code: 'CANCELLED', retryable: false })
+  })
+
+  it.each(['candidates', 'tokens', 'entities'])('rejects in-bounds %s offsets that identify different source text', async field => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      const value = analysis(request.requestId, request.query, '网络')
+      if (field === 'entities') value.entities = [{ text: '网络', label: 'LOC', start: 0, end: 2 }]
+      else (value[field] as Record<string, unknown>[])[0] = { ...(value[field] as Record<string, unknown>[])[0], start: 0, end: 2 }
+      return response(value)
+    })
+    await expect(new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch })
+      .analyze('查找网络故障工单')).rejects.toMatchObject({ code: 'PROTOCOL_MISMATCH' })
+  })
+
   it('accepts an exact surface term returned by the FastAPI protocol', async () => {
     const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
