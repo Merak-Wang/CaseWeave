@@ -2,9 +2,13 @@ import { mkdtemp, cp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { openWiki, revokedKnowledge } from './wiki-store.js'
 import { checkoutEntry, publishWiki, rollbackWiki, type WikiDelta } from './wiki-publisher.js'
+
+// Allow complete release fsyncs and cleanup on slower disks before the test
+// runner starts teardown; correctness assertions remain independent of latency.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 let temp: string, root: string
 beforeEach(async () => {

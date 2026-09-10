@@ -4,6 +4,10 @@ import path from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { checkoutEntry, publishWiki } from './wiki-publisher.js'
 
+// Exercise actual release I/O and Windows rename recovery without a five-second
+// wall-clock requirement on the test machine's disk.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
+
 const injected = vi.hoisted(() => ({ failRename: false, transientFailures: 0 }))
 vi.mock('node:fs/promises', async importOriginal => {
   const fs = await importOriginal<typeof import('node:fs/promises')>()

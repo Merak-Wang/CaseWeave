@@ -1,11 +1,15 @@
 import { cp, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import type { RetrievalState } from '@retrieval-agent/contracts'
 import { readTaskKnowledge } from './knowledge-view.js'
 import { openWiki } from './wiki-store.js'
 import { checkoutEntry, publishWiki } from './wiki-publisher.js'
+
+// Full-release copies and durable writes vary with disk latency; these are
+// consistency checks, not a five-second performance benchmark.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 it('task knowledge keeps its pinned body after publication advances and rejects a revoked body', async () => {
   const temp = await mkdtemp(path.join(tmpdir(), 'ra-knowledge-view-')), root = path.join(temp, 'wiki')
