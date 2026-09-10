@@ -62,6 +62,24 @@ wiki/.staging/
 *.tar.gz
 *.tar.zst
 
+# Local reference material and internal working records.
+/asset/
+/AGENTS.md
+/PLAN.md
+/docs/PUBLISHING.md
+/docs/VERIFICATION.md
+/docs/design/EVOLUTION.md
+/docs/research/
+/docs/archive/
+/docs/adr/
+/docs/reviews/
+/docs/replan-*/
+/docs/assets/
+/docs/BASELINE.md
+/docs/CODEX_INSTRUCTIONS.md
+/docs/DSH_CHANGE_CLASSIFICATION.md
+/docs/PROJECT_REVIEW.md
+
 # Editor and operating-system files.
 .vscode/
 .idea/
