@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7f2">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23163c2e'/%3E%3Cpath d='M9 9h6v6H9zm9 0h6v6h-6zM9 18h6v6H9z' fill='%23d9eda6'/%3E%3Ccircle cx='21' cy='21' r='3' fill='white'/%3E%3C/svg%3E">
+  <meta name="description" content="Retrieval Agent：面向工单查询工作人员与领导的自然语言检索项目。了解双路召回、专家协作、证据复核、上下文规划与可追溯交付。">
+  <title>Retrieval Agent · 让每一次检索，有据可查</title>
+  <style>
+    :root {
+      --paper: #f5f7f2; --white: #fff; --ink: #182b24; --muted: #65736a;
+      --green: #246747; --green-deep: #163c2e; --lime: #d9eda6; --line: #dce3d8;
+      --soft: #edf2e8; --amber: #82551b; --blue: #3b648a; --radius: 20px;
+      --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 96px; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--font); font-size: 15px; line-height: 1.75; -webkit-font-smoothing: antialiased; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button { font: inherit; cursor: pointer; }
+    a { color: inherit; text-decoration: none; }
+    button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid #37755b; outline-offset: 5px; }
+    h1, h2, h3, p { margin: 0; }
+    h1, h2, h3 { line-height: 1.35; }
+    svg { display: block; }
+    ::selection { color: var(--green-deep); background: var(--lime); }
+    [hidden] { display: none !important; }
+    .wrap { width: min(1184px, calc(100% - 80px)); margin-inline: auto; }
+    .mono { font-family: var(--mono); }
+    .skip { position: fixed; left: 16px; top: -80px; z-index: 100; padding: 12px 20px; background: var(--ink); color: white; border-radius: 8px; }
+    .skip:focus { top: 10px; }
+    .site-header { position: sticky; top: 0; z-index: 30; background: rgba(245,247,242,.95); backdrop-filter: blur(16px); border-bottom: 1px solid var(--line); }
+    .header-inner { height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    .brand { display: inline-flex; align-items: center; gap: 12px; font-size: 17px; font-weight: 650; letter-spacing: -.5px; white-space: nowrap; }
+    .brand-mark { width: 32px; height: 32px; display: grid; grid-template-columns: repeat(2, 7px); grid-template-rows: repeat(2, 7px); gap: 3px; justify-content: center; align-content: center; background: var(--green-deep); border-radius: 9px; transform: rotate(-5deg); }
+    .brand-mark i { background: var(--lime); border-radius: 1px; }
+    .brand-mark i:last-child { border-radius: 50%; background: white; }
+    .nav { display: flex; align-items: center; gap: 26px; font-size: 13px; color: var(--muted); }
+    .nav a { padding-block: 8px; transition: color .2s; }
+    .nav a:hover { color: var(--green); }
+    .header-tag { font-size: 11px; font-weight: 600; border: 1px solid #cbd8be; color: var(--green); border-radius: 30px; padding: 4px 12px; white-space: nowrap; }
+    .eyebrow { display: flex; align-items: center; gap: 10px; color: var(--green); font-size: 11px; letter-spacing: 1.8px; font-weight: 650; text-transform: uppercase; }
+    .eyebrow::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    .hero { padding: 85px 0 0; overflow: hidden; }
+    .hero-grid { display: grid; grid-template-columns: 1.08fr 1fr; align-items: center; gap: 56px; }
+    h1 { margin-top: 26px; font-size: clamp(38px, 4.1vw, 57px); font-weight: 650; letter-spacing: -2.6px; line-height: 1.28; }
+    h1 span { color: var(--green); }
+    .hero-copy { max-width: 485px; margin-top: 28px; color: var(--muted); font-size: 16px; line-height: 1.95; }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 31px; }
+    .button { min-height: 46px; display: inline-flex; align-items: center; justify-content: center; gap: 18px; padding: 10px 21px; border: 1px solid var(--line); border-radius: 8px; background: transparent; font-size: 13px; font-weight: 600; transition: background .2s, transform .2s; }
+    .button:hover { background: #e9eee2; transform: translateY(-1px); }
+    .button.primary { background: var(--green-deep); color: white; border-color: var(--green-deep); }
+    .button.primary:hover { background: #25503d; }
+    .button .arrow { font-size: 19px; line-height: 1; }
+    .hero-note { font-size: 11px; color: var(--muted); margin-top: 18px; }
+    .hero-art { position: relative; min-height: 450px; padding: 22px 8px; }
+    .hero-art::before { content: ""; position: absolute; inset: 5px -60px -8px -28px; background-image: radial-gradient(#bccbb7 1px, transparent 1px); background-size: 19px 19px; mask-image: radial-gradient(ellipse, black 38%, transparent 72%); }
+    .hero-art svg { width: 100%; height: auto; position: relative; overflow: visible; }
+    .art-foot { position: relative; display: flex; justify-content: center; gap: 18px; font-size: 10px; letter-spacing: 1px; color: var(--muted); margin-top: -12px; }
+    .art-foot span::before { content: "+"; margin-right: 6px; color: var(--green); }
+    .value-strip { margin-top: 60px; border-block: 1px solid var(--line); display: grid; grid-template-columns: repeat(3, 1fr); }
+    .value-item { padding: 25px 30px; position: relative; }
+    .value-item:first-child { padding-left: 0; }
+    .value-item + .value-item { border-left: 1px solid var(--line); }
+    .value-item strong { display: block; font-size: 17px; font-weight: 600; letter-spacing: -.4px; }
+    .value-item p { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .section { padding-top: 100px; }
+    .section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 44px; margin-bottom: 36px; }
+    .section-index { font-family: var(--mono); font-size: 10px; letter-spacing: 1.4px; color: var(--green); margin-bottom: 13px; }
+    h2 { font-size: clamp(27px, 3vw, 36px); font-weight: 620; letter-spacing: -1.3px; }
+    .section-desc { max-width: 380px; color: var(--muted); font-size: 13px; line-height: 1.9; }
+    .scenario-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+    .scenario { background: var(--white); border: 1px solid var(--line); border-radius: 12px; padding: 27px 28px 26px; }
+    .scenario-icon { width: 42px; height: 42px; display: grid; place-items: center; background: var(--soft); border-radius: 10px; color: var(--green); margin-bottom: 27px; }
+    .scenario-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .scenario h3 { font-size: 17px; font-weight: 600; }
+    .scenario p { font-size: 13px; color: var(--muted); line-height: 1.9; margin-top: 11px; }
+    .scenario-bottom { display: flex; align-items: center; gap: 8px; margin-top: 25px; font-size: 11px; color: var(--green); }
+    .scenario-bottom::before { content: "↳"; font-family: var(--mono); font-size: 16px; }
+    .demo { overflow: hidden; border: 1px solid #cfd9cb; border-radius: var(--radius); box-shadow: 0 24px 70px -45px #53664c; background: white; }
+    .demo-top { display: flex; justify-content: space-between; align-items: center; gap: 15px; padding: 17px 24px; background: #edf2e8; border-bottom: 1px solid var(--line); }
+    .window-label { display: flex; align-items: center; gap: 13px; font-size: 12px; font-weight: 600; }
+    .window-dots { display: inline-flex; gap: 4px; }
+    .window-dots i { width: 6px; height: 6px; background: #a8bba3; border-radius: 50%; }
+    .demo-label { color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .demo-query { display: flex; align-items: center; gap: 12px; padding: 25px 28px 21px; }
+    .query-icon { flex: 0 0 auto; width: 34px; height: 34px; background: var(--green-deep); color: var(--lime); border-radius: 50%; display: grid; place-items: center; }
+    .query-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+    .demo-query p { font-weight: 550; font-size: 17px; }
+    .demo-query .query-hint { margin-left: auto; color: var(--muted); font-size: 10px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 5px; white-space: nowrap; }
+    .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; list-style: none; padding: 0 28px 22px; margin: 0; }
+    .step { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; padding: 11px 8px; border: 0; border-radius: 6px; background: #f5f7f3; color: var(--muted); font-size: 12px; transition: background .2s; }
+    .step span { font-family: var(--mono); font-size: 11px; color: #84917d; }
+    .step[aria-current="step"] { background: var(--green-deep); color: white; }
+    .step[aria-current="step"] span { color: var(--lime); }
+    .step.done { background: #e8efdf; color: var(--green); }
+    .step:hover { box-shadow: inset 0 0 0 1px #90ac87; }
+    .demo-body { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); border-top: 1px solid var(--line); min-height: 408px; }
+    .demo-main { padding: 28px; background: #fbfcf9; }
+    .agent-heading { display: flex; align-items: center; gap: 9px; color: var(--green); font-size: 11px; font-weight: 600; }
+    .agent-dot { width: 7px; height: 7px; background: var(--green); border-radius: 2px; }
+    .demo-main h3 { font-size: 22px; letter-spacing: -.5px; margin-top: 17px; }
+    .demo-explanation { font-size: 13px; color: var(--muted); margin-top: 12px; max-width: 535px; min-height: 74px; }
+    .demo-modules { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 23px; }
+    .demo-module { padding: 15px 16px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+    .module-top { font-size: 10px; color: var(--green); }
+    .demo-module strong { display: block; font-size: 13px; font-weight: 600; margin-top: 7px; }
+    .demo-module p { font-size: 11px; color: var(--muted); margin-top: 5px; }
+    .demo-principle { margin-top: 20px; display: flex; gap: 8px; color: var(--muted); font-size: 11px; }
+    .demo-principle::before { content: "↳"; color: var(--green); }
+    .evidence { border-left: 1px solid var(--line); padding: 23px; }
+    .evidence-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 15px; }
+    .evidence-head strong { font-size: 12px; font-weight: 600; }
+    .evidence-head span { color: var(--muted); font-size: 10px; }
+    .ticket { padding: 14px 15px; border: 1px solid var(--line); border-radius: 8px; margin-top: 10px; transition: border-color .2s, background .2s; }
+    .ticket-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .ticket-id { color: var(--muted); font-family: var(--mono); font-size: 10px; }
+    .ticket-status { border-radius: 4px; padding: 2px 7px; font-size: 10px; color: var(--blue); background: #eef3f7; }
+    .ticket.confirmed { border-color: #b5cda3; background: #f7faf2; }
+    .ticket.confirmed .ticket-status { color: #365d28; background: #e4efd8; }
+    .ticket.excluded { background: #f6f7f4; border-style: dashed; }
+    .ticket.excluded .ticket-status { color: #626d65; background: #e9ede7; }
+    .ticket h4 { margin: 7px 0 3px; font-size: 12px; font-weight: 600; }
+    .ticket p { font-size: 11px; line-height: 1.7; color: var(--muted); }
+    .ticket mark, .layer-content mark { color: var(--green-deep); background: #e0eccb; padding: 0 2px; border-radius: 2px; }
+    .demo-footer { padding: 16px 23px 16px 28px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+    .demo-footer p { font-size: 11px; color: var(--muted); }
+    .demo-controls { display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
+    .reset { border: 0; background: none; padding: 9px; color: var(--muted); font-size: 12px; border-radius: 5px; }
+    .reset:hover { background: var(--soft); }
+    .next { min-height: 37px; font-size: 11px; padding: 7px 15px; gap: 12px; }
+    .flow-note { display: flex; align-items: flex-start; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 20px; }
+    .flow-note strong { color: var(--green); font-weight: 600; white-space: nowrap; }
+    .context-panel { display: grid; grid-template-columns: 1fr 1fr; background: var(--green-deep); border-radius: var(--radius); overflow: hidden; color: white; }
+    .context-copy { padding: 42px 44px; }
+    .context-copy .section-index { color: var(--lime); }
+    .context-copy h2 { font-size: 31px; line-height: 1.55; }
+    .context-copy > p { color: #bfd0c4; margin-top: 18px; font-size: 13px; line-height: 1.95; }
+    .context-points { list-style: none; padding: 0; margin: 24px 0 0; }
+    .context-points li { display: flex; align-items: flex-start; gap: 12px; font-size: 12px; color: #d7e3d7; padding-block: 10px; border-top: 1px solid #3b5b47; }
+    .context-points li span { color: var(--lime); font-family: var(--mono); font-size: 10px; padding-top: 2px; }
+    .context-view { margin: 24px 24px 24px 0; padding: 25px; border-radius: 12px; background: #f5f7f0; color: var(--ink); }
+    .context-view-top { display: flex; justify-content: space-between; gap: 12px; align-items: center; font-size: 10px; color: var(--muted); margin-bottom: 17px; }
+    .context-view-top strong { font-weight: 600; color: var(--green); }
+    .layer-buttons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+    .layer-button { padding: 8px 4px; border: 1px solid var(--line); border-radius: 6px; background: white; color: var(--muted); font-size: 10px; }
+    .layer-button b { display: block; font-family: var(--mono); font-size: 15px; font-weight: 500; color: var(--ink); }
+    .layer-button[aria-pressed="true"] { color: var(--green-deep); border-color: #92ac79; background: var(--lime); }
+    .layer-content { background: white; margin-top: 14px; padding: 20px; border: 1px solid var(--line); border-radius: 9px; min-height: 216px; }
+    .layer-meta { color: var(--muted); font-size: 10px; font-family: var(--mono); }
+    .layer-content h3 { font-size: 15px; margin-top: 8px; }
+    .layer-content p { font-size: 12px; color: var(--muted); margin-top: 12px; }
+    .layer-content .source-ref { padding-top: 10px; border-top: 1px dashed var(--line); margin-top: 14px; font-family: var(--mono); font-size: 9px; overflow-wrap: anywhere; }
+    .layer-caption { color: var(--green); font-size: 11px; margin-top: 14px; min-height: 39px; }
+    .arch-grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 26px; }
+    .arch-map { padding: 26px; border: 1px solid var(--line); border-radius: 14px; background: white; }
+    .arch-map-label { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 10px; margin-bottom: 20px; }
+    .arch-node { padding: 15px 18px; text-align: center; border: 1px solid var(--line); border-radius: 8px; background: #f8faf5; }
+    .arch-node strong { display: block; font-size: 13px; font-weight: 600; }
+    .arch-node p { color: var(--muted); font-size: 10px; margin-top: 3px; }
+    .arch-node.emphasis { background: var(--green-deep); border-color: var(--green-deep); color: white; }
+    .arch-node.emphasis p { color: #c2d6be; }
+    .arch-arrow { height: 28px; display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 10px; color: #71816e; }
+    .arch-arrow::before, .arch-arrow::after { content: ""; width: 1px; height: 14px; background: #b7c5b0; }
+    .arch-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+    .arch-row .arch-node { padding: 13px 5px; }
+    .arch-row .arch-node strong { font-size: 12px; }
+    .arch-base { margin-top: 18px; border-top: 1px dashed var(--line); padding-top: 15px; font-size: 10px; text-align: center; color: var(--muted); }
+    .principles { padding: 3px 0; }
+    .principle { padding: 22px 4px; border-bottom: 1px solid var(--line); }
+    .principle:first-child { padding-top: 5px; }
+    .principle-top { display: flex; align-items: center; gap: 12px; }
+    .principle-top span { font-family: var(--mono); font-size: 11px; color: var(--green); }
+    .principle h3 { font-size: 15px; font-weight: 600; }
+    .principle p { margin: 10px 0 0 31px; color: var(--muted); font-size: 12px; line-height: 1.9; }
+    .stack-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 18px 0 0 31px; }
+    .stack-tags span { padding: 3px 8px; border: 1px solid var(--line); border-radius: 4px; font-family: var(--mono); font-size: 9px; color: var(--muted); }
+    .learning { padding: 39px 43px; border: 1px solid #c9d7ba; background: #ebf1df; border-radius: var(--radius); }
+    .learning .section-head { margin-bottom: 34px; }
+    .learning-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 28px; }
+    .learning-step { position: relative; border-top: 1px solid #c3d1b4; padding-top: 19px; }
+    .learning-step:not(:last-child)::after { content: "→"; position: absolute; right: -20px; top: -14px; font-size: 17px; color: #637d4f; background: #ebf1df; }
+    .learning-step .number { display: block; color: var(--green); font-family: var(--mono); font-size: 11px; margin-bottom: 13px; }
+    .learning-step h3 { font-size: 15px; font-weight: 600; }
+    .learning-step p { font-size: 12px; color: var(--muted); line-height: 1.9; margin-top: 9px; }
+    .learning-note { display: flex; justify-content: space-between; gap: 20px; margin-top: 30px; padding-top: 20px; border-top: 1px solid #c9d7ba; color: #4f6542; font-size: 11px; }
+    .delivery { display: grid; grid-template-columns: 1fr 1fr; gap: 70px; align-items: center; }
+    .report-stage { padding: 32px; border-radius: var(--radius); background: #e8ede4; position: relative; }
+    .report { position: relative; background: white; padding: 30px; border: 1px solid #d4ddd0; box-shadow: 8px 8px 0 -1px #f4f7f0, 8px 8px 0 #cdd7c6; }
+    .report-masthead { display: flex; justify-content: space-between; color: var(--muted); font-size: 9px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+    .report h3 { margin-top: 22px; font-size: 20px; letter-spacing: -.5px; }
+    .report-subtitle { margin-top: 8px; font-size: 11px; color: var(--muted); }
+    .report-line { margin-top: 23px; }
+    .report-line > strong { display: block; color: var(--green); font-size: 10px; font-weight: 600; margin-bottom: 7px; }
+    .report-line p { font-size: 11px; color: var(--muted); }
+    .report-ticket { border: 1px solid var(--line); padding: 11px 12px; border-radius: 5px; margin-top: 7px; font-size: 11px; }
+    .report-ticket span { font-family: var(--mono); font-size: 9px; color: var(--green); margin-right: 9px; }
+    .report-footer { border-top: 1px solid var(--line); margin-top: 23px; padding-top: 16px; display: flex; justify-content: space-between; gap: 12px; font-size: 9px; color: var(--muted); }
+    .delivery-copy > p { color: var(--muted); font-size: 13px; margin-top: 17px; line-height: 1.95; }
+    .delivery-list { padding: 0; list-style: none; margin: 24px 0 0; }
+    .delivery-list li { display: flex; gap: 15px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+    .check { width: 20px; height: 20px; border-radius: 50%; background: #e0ebd2; color: var(--green); flex: 0 0 auto; display: grid; place-items: center; font-size: 11px; margin-top: 2px; }
+    .delivery-list strong { display: block; font-size: 13px; font-weight: 600; }
+    .delivery-list p { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .downstream { font-size: 11px; color: var(--green); margin-top: 22px; }
+    .status-panel { padding: 38px 0 32px; border-block: 1px solid var(--line); }
+    .status-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; margin-bottom: 29px; }
+    .status-heading h2 { font-size: 26px; }
+    .status-heading span { font-family: var(--mono); font-size: 10px; color: var(--muted); white-space: nowrap; }
+    .status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 35px; }
+    .status-kicker { display: inline-flex; align-items: center; gap: 7px; font-size: 10px; color: var(--green); }
+    .status-kicker::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .status-kicker.building { color: var(--amber); }
+    .status-kicker.validating { color: var(--blue); }
+    .status-grid h3 { font-size: 15px; font-weight: 600; margin-top: 9px; }
+    .status-grid p { font-size: 12px; color: var(--muted); margin-top: 9px; line-height: 1.9; }
+    .status-note { margin-top: 27px; font-size: 11px; color: var(--muted); padding-top: 21px; border-top: 1px dashed var(--line); }
+    .source-links { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 14px; font-size: 11px; color: var(--green); }
+    .source-links a { border-bottom: 1px solid #adc39a; padding-block: 2px; }
+    .source-links a:hover { border-bottom-color: var(--green); }
+    .site-footer { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 32px 0 37px; }
+    .footer-brand { font-size: 13px; font-weight: 600; }
+    .footer-note { color: var(--muted); font-size: 10px; }
+    .footer-action { display: flex; align-items: center; gap: 18px; }
+    .print-button { background: none; border: 0; border-bottom: 1px solid #bdcdb2; color: var(--muted); font-size: 11px; padding: 5px 0; }
+    .noscript { margin-top: 12px; color: var(--amber); font-size: 12px; }
+    @media (min-width: 1400px) { .hero { padding-top: 96px; } }
+    @media (max-width: 1050px) {
+      .wrap { width: calc(100% - 56px); }
+      .hero-grid { gap: 24px; }
+      h1 { font-size: 43px; letter-spacing: -2px; }
+      .hero-art { min-height: auto; }
+      .hero { padding-top: 64px; }
+      .hero-copy { font-size: 14px; }
+      .nav { gap: 17px; }
+      .section-head { gap: 25px; }
+      .section-desc { max-width: 320px; }
+      .scenario { padding: 24px; }
+      .demo-main { padding: 24px; }
+      .evidence { padding: 22px 18px; }
+      .context-copy { padding: 34px; }
+      .context-copy h2 { font-size: 28px; }
+      .context-view { padding: 19px; }
+      .delivery { gap: 38px; }
+      .report-stage { padding: 26px; }
+      .report { padding: 25px; }
+      .arch-grid { grid-template-columns: 1.3fr 1fr; }
+      .learning { padding: 34px; }
+    }
+    .command { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--white); }
+    .command span { display: block; font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+    .command code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+    .guide-link { display: inline-block; margin-top: 18px; color: var(--green); text-decoration: underline; text-underline-offset: 4px; font-size: 13px; }
+    @media (max-width: 780px) {
+      html { scroll-padding-top: 85px; }
+      .wrap { width: calc(100% - 40px); }
+      .header-inner { height: 66px; gap: 14px; }
+      .nav { gap: 15px; font-size: 11px; }
+      .nav a:nth-child(3), .header-tag { display: none; }
+      .brand { font-size: 14px; gap: 9px; }
+      .brand-mark { width: 29px; height: 29px; }
+      .hero { padding-top: 47px; }
+      .hero-grid { grid-template-columns: 1fr; gap: 20px; }
+      h1 { font-size: clamp(37px, 6.2vw, 49px); }
+      .hero-copy { max-width: 600px; }
+      .hero-art { max-width: 480px; width: 100%; margin: 0 auto; padding: 10px 20px; }
+      .value-strip { margin-top: 27px; }
+      .value-item { padding: 19px 15px; }
+      .value-item strong { font-size: 14px; }
+      .value-item p { font-size: 10px; }
+      .section { padding-top: 68px; }
+      .section-head { align-items: flex-start; flex-direction: column; gap: 15px; margin-bottom: 26px; }
+      .section-desc { max-width: 600px; font-size: 12px; }
+      h2 { font-size: 29px; }
+      .scenario-grid { gap: 12px; }
+      .scenario { padding: 21px 17px; }
+      .scenario h3 { font-size: 15px; }
+      .scenario p { font-size: 11px; }
+      .scenario-bottom { font-size: 10px; margin-top: 17px; }
+      .scenario-icon { margin-bottom: 22px; }
+      .demo-body { grid-template-columns: 1fr; }
+      .demo-main { padding: 25px; }
+      .demo-explanation { min-height: 0; }
+      .evidence { border-left: 0; border-top: 1px solid var(--line); padding: 23px 25px; }
+      .evidence-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+      .ticket { margin: 0; padding: 11px; }
+      .ticket-top { flex-wrap: wrap; gap: 3px; }
+      .demo-query .query-hint { display: none; }
+      .demo-query { padding: 22px; }
+      .steps { padding-inline: 22px; }
+      .step { font-size: 11px; gap: 6px; padding: 10px 7px; }
+      .demo-footer { padding-inline: 23px; }
+      .demo-footer p { max-width: 300px; }
+      .context-panel { grid-template-columns: 1fr; }
+      .context-copy { padding: 34px; }
+      .context-copy h2 br { display: none; }
+      .context-view { margin: 0 25px 25px; padding: 25px; }
+      .layer-content { min-height: 190px; }
+      .layer-caption { min-height: 0; }
+      .arch-grid { grid-template-columns: 1fr; }
+      .principles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 23px; }
+      .principle, .principle:first-child { padding: 5px 0 14px; }
+      .principle p, .stack-tags { margin-left: 0; }
+      .principle-top { gap: 8px; }
+      .principle h3 { font-size: 14px; }
+      .learning { padding: 30px; }
+      .learning-steps { gap: 20px; }
+      .learning-step:not(:last-child)::after { right: -15px; }
+      .learning-step p { font-size: 11px; }
+      .learning-note { flex-direction: column; gap: 7px; }
+      .delivery { gap: 30px; }
+      .report-stage { padding: 20px; }
+      .report { padding: 20px; }
+      .delivery h2 { font-size: 28px; }
+      .report h3 { font-size: 17px; }
+      .report-masthead { flex-wrap: wrap; gap: 4px; }
+      .status-grid { gap: 23px; }
+      .status-grid p { font-size: 11px; }
+      .site-footer { flex-wrap: wrap; }
+    }
+    @media (max-width: 520px) {
+      .wrap { width: calc(100% - 36px); }
+      .nav a:nth-child(2) { display: none; }
+      .nav { gap: 12px; }
+      .eyebrow { font-size: 9px; letter-spacing: 1.25px; }
+      h1 { font-size: clamp(32px, 8.45vw, 42px); letter-spacing: -1.6px; margin-top: 21px; }
+      .hero-copy { font-size: 13px; margin-top: 21px; }
+      .hero-actions { margin-top: 24px; gap: 9px; }
+      .button { font-size: 12px; gap: 13px; padding: 9px 17px; }
+      .hero-note { font-size: 10px; }
+      .hero-art { padding: 12px 4px; }
+      .art-foot { gap: 12px; font-size: 8px; }
+      .value-item { padding: 17px 9px; }
+      .value-item strong { font-size: 12px; }
+      .value-item p { font-size: 10px; margin-top: 6px; line-height: 1.8; }
+      .section { padding-top: 58px; }
+      h2 { font-size: 27px; letter-spacing: -.9px; }
+      .scenario-grid { grid-template-columns: 1fr; }
+      .scenario { display: grid; grid-template-columns: 40px 1fr; gap: 0 17px; padding: 22px; }
+      .scenario-icon { grid-row: 1 / 4; margin: 0; }
+      .scenario p { font-size: 12px; margin-top: 7px; }
+      .scenario-bottom { margin-top: 12px; }
+      .demo-top { padding: 14px 15px; gap: 8px; align-items: flex-start; }
+      .window-label { font-size: 11px; gap: 8px; }
+      .demo-label { font-size: 9px; }
+      .window-dots { display: none; }
+      .demo-query { gap: 10px; padding: 21px 17px; }
+      .demo-query p { font-size: 14px; }
+      .query-icon { width: 29px; height: 29px; }
+      .steps { padding: 0 15px 17px; gap: 4px; }
+      .step { flex-direction: column; align-items: center; justify-content: center; gap: 3px; text-align: center; padding: 8px 2px; font-size: 10px; }
+      .step span { font-size: 10px; }
+      .demo-main { padding: 23px 20px; }
+      .demo-main h3 { font-size: 21px; }
+      .demo-explanation { font-size: 12px; }
+      .demo-modules { gap: 8px; margin-top: 18px; }
+      .demo-module { padding: 13px 12px; }
+      .demo-module strong { font-size: 12px; }
+      .demo-module p { font-size: 10px; }
+      .demo-principle { font-size: 10px; }
+      .evidence { padding: 19px 20px; }
+      .evidence-list { grid-template-columns: 1fr; gap: 9px; }
+      .ticket { padding: 12px 14px; }
+      .ticket h4 { font-size: 12px; }
+      .ticket-top { flex-wrap: nowrap; }
+      .demo-footer { align-items: flex-start; flex-direction: column; padding: 17px 20px; gap: 13px; }
+      .demo-footer p { max-width: none; font-size: 10px; }
+      .demo-controls { justify-content: space-between; width: 100%; }
+      .next { min-height: 37px; font-size: 11px; }
+      .flow-note { font-size: 11px; gap: 10px; }
+      .context-copy { padding: 28px 25px 22px; }
+      .context-copy h2 { font-size: 26px; }
+      .context-copy > p { font-size: 12px; }
+      .context-view { padding: 18px; margin: 0 15px 15px; }
+      .context-view-top { font-size: 9px; }
+      .layer-content { padding: 16px; min-height: 239px; }
+      .layer-content p { font-size: 11px; }
+      .layer-caption { font-size: 10px; min-height: 36px; }
+      .arch-map { padding: 20px 16px; }
+      .arch-map-label { font-size: 9px; }
+      .arch-row { gap: 5px; }
+      .arch-row .arch-node strong { font-size: 11px; }
+      .arch-node p { font-size: 9px; }
+      .arch-base { font-size: 9px; }
+      .principles { grid-template-columns: 1fr; gap: 18px; }
+      .principle p { margin-left: 26px; font-size: 12px; }
+      .stack-tags { margin-left: 26px; }
+      .learning { padding: 27px 24px; }
+      .learning-steps { grid-template-columns: 1fr 1fr; gap: 26px 23px; }
+      .learning-step:nth-child(2)::after { display: none; }
+      .learning-note { font-size: 10px; }
+      .delivery { grid-template-columns: 1fr; gap: 32px; }
+      .delivery-copy { grid-row: 1; }
+      .delivery h2 { font-size: 28px; }
+      .report-stage { padding: 26px; }
+      .report { padding: 24px; }
+      .status-panel { padding-top: 29px; }
+      .status-heading { flex-direction: column; gap: 10px; margin-bottom: 23px; }
+      .status-heading h2 { font-size: 26px; }
+      .status-grid { grid-template-columns: 1fr; gap: 26px; }
+      .status-grid p { font-size: 12px; margin-top: 6px; }
+      .status-grid h3 { margin-top: 6px; }
+      .source-links { gap: 13px; }
+      .site-footer { gap: 15px; padding-block: 25px; }
+      .footer-action { flex-wrap: wrap; gap: 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition: none !important; animation: none !important; }
+    }
+    @media print {
+      @page { size: A4; margin: 16mm 13mm; }
+      body { font-size: 10pt; background: white; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .wrap { width: 100%; }
+      .site-header { position: static; backdrop-filter: none; background: white; }
+      .header-inner { height: 44px; }
+      .nav, .hero-actions, .hero-note, .demo-controls, .print-button, .source-links, .skip { display: none; }
+      .hero { padding-top: 28px; }
+      .hero-grid { grid-template-columns: 1.1fr 1fr; gap: 25px; }
+      h1 { font-size: 32px; }
+      .hero-copy { font-size: 11px; margin-top: 17px; }
+      .hero-art { min-height: 0; padding: 0; }
+      .value-strip { margin-top: 27px; }
+      .value-item { padding-block: 16px; }
+      .section { padding-top: 38px; }
+      h2 { font-size: 25px; }
+      .section-head { gap: 20px; margin-bottom: 22px; }
+      .section-desc { font-size: 11px; }
+      .scenario, .context-panel, .learning, .arch-map, .report-stage, .status-panel { break-inside: avoid; }
+      .scenario { padding: 19px; }
+      .demo { box-shadow: none; break-inside: avoid; }
+      .demo-body { min-height: 0; }
+      .demo-main, .evidence { padding: 19px; }
+      .demo-explanation { min-height: 0; }
+      .demo-query { padding: 15px 22px; }
+      .steps { padding-bottom: 15px; }
+      .demo-footer { padding-block: 10px; }
+      .context-copy { padding: 25px; }
+      .context-copy h2 { font-size: 24px; }
+      .context-view { padding: 17px; margin: 16px 16px 16px 0; }
+      .context-copy > p, .context-points li { font-size: 11px; }
+      .learning { padding: 25px; }
+      .delivery { gap: 30px; }
+      .report-stage { padding: 22px; }
+      .report { padding: 22px; }
+      .site-footer { padding-block: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="#top" aria-label="Retrieval Agent，返回顶部">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        Retrieval Agent
+      </a>
+      <nav class="nav" aria-label="页面导航">
+        <a href="#scenarios">应用场景</a><a href="#workflow">工作原理</a><a href="#architecture">技术架构</a><a href="#delivery">结果交付</a>
+      </nav>
+      <span class="header-tag">单机试用</span>
+    </div>
+  </header>
+  <main id="main">
+    <section class="hero" id="top" aria-labelledby="hero-title">
+      <div class="wrap">
+        <div class="hero-grid">
+          <div>
+            <p class="eyebrow">Natural language. Traceable evidence.</p>
+            <h1 id="hero-title">一句问题，<br>找到<span>有据可查</span><br>的工单。</h1>
+            <p class="hero-copy">为工单查询工作人员与领导打造的检索 Agent。理解自然语言，协同搜索与复核，将零散工单整理为有依据、可追溯、能交接的确认结果。</p>
+            <div class="hero-actions">
+              <a class="button primary" href="#workflow">看看它如何工作 <span class="arrow" aria-hidden="true">↗</span></a>
+              <a class="button" href="#get-started">开始使用 <span class="arrow" aria-hidden="true">↓</span></a>
+            </div>
+            <p class="hero-note">自然语言检索 · 持久任务 · 确认结果交付</p>
+          </div>
+          <div class="hero-art">
+            <svg viewBox="0 0 480 430" role="img" aria-labelledby="art-title art-desc">
+              <title id="art-title">从自然语言查询到确认工单的证据链</title>
+              <desc id="art-desc">用户问题经过关键词与向量并行检索，汇入候选集合。DSH Agent 结合领域知识复核证据、继续搜索，最终形成确认结果。</desc>
+              <defs>
+                <filter id="card-shadow" x="-25%" y="-25%" width="160%" height="170%"><feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#31432a" flood-opacity=".08"/></filter>
+                <marker id="arrowhead" viewBox="0 0 6 6" refX="5" refY="3" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 6 3 0 6" fill="none" stroke="#8aa47a" stroke-width="1"/></marker>
+              </defs>
+              <g fill="none" stroke="#9bb68b" stroke-width="1.25" marker-end="url(#arrowhead)">
+                <path d="M240 89 V112 H106 V137"/><path d="M240 112 H374 V137"/>
+                <path d="M106 201 V224 H206 V248"/><path d="M374 201 V224 H274 V248"/>
+                <path d="M240 323 V350"/>
+                <path d="M337 286 H424 Q443 286 443 267 V198" stroke-dasharray="4 5"/>
+              </g>
+              <g filter="url(#card-shadow)">
+                <rect x="68" y="24" width="344" height="65" rx="12" fill="white" stroke="#d1ddc9"/>
+                <circle cx="99" cy="56" r="13" fill="#edf3e6"/>
+                <path d="m96 60 7-8m-6 0h6v6" fill="none" stroke="#246747" stroke-width="1.5"/>
+                <text x="122" y="49" font-size="9" fill="#75856c" font-family="Consolas, monospace">YOUR QUESTION</text>
+                <text x="122" y="69" font-size="15" fill="#23372b" font-family="Microsoft YaHei, sans-serif">帮我找副卡和跨域有关工单</text>
+              </g>
+              <g>
+                <rect x="23" y="138" width="166" height="63" rx="10" fill="#fcfdf9" stroke="#cedcc4"/>
+                <text x="106" y="161" font-size="12" fill="#2c5736" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">关键词检索</text>
+                <text x="106" y="183" font-size="10" fill="#73816b" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">字面全匹配 · 跨字段</text>
+                <rect x="291" y="138" width="166" height="63" rx="10" fill="#fcfdf9" stroke="#cedcc4"/>
+                <text x="374" y="161" font-size="12" fill="#2c5736" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">向量检索</text>
+                <text x="374" y="183" font-size="10" fill="#73816b" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">原始问题 · Top-K</text>
+                <text x="240" y="174" font-size="9" fill="#6e8460" text-anchor="middle" font-family="Consolas, monospace">PARALLEL</text>
+              </g>
+              <g filter="url(#card-shadow)">
+                <rect x="143" y="249" width="194" height="74" rx="13" fill="#163c2e"/>
+                <rect x="161" y="267" width="32" height="32" rx="7" fill="#365641"/>
+                <path d="M170 278h14M170 284h10M170 290h7" stroke="#d9eda6" stroke-width="2" stroke-linecap="round"/>
+                <text x="207" y="278" font-size="14" fill="white" font-family="Segoe UI, sans-serif">DSH Agent</text>
+                <text x="207" y="300" font-size="10" fill="#c3d5be" font-family="Microsoft YaHei, sans-serif">规划 · 取证 · 复核</text>
+              </g>
+              <text x="370" y="277" font-size="9" fill="#647d58" font-family="Microsoft YaHei, sans-serif">按需再搜索</text>
+              <g filter="url(#card-shadow)">
+                <rect x="100" y="352" width="280" height="60" rx="11" fill="#e8efdd" stroke="#baceaa"/>
+                <circle cx="127" cy="382" r="11" fill="#246747"/>
+                <path d="m122 382 3.5 3.5 6.5-7" fill="none" stroke="#e6f2c8" stroke-width="1.7" stroke-linecap="round"/>
+                <text x="149" y="379" font-size="13" fill="#274c32" font-family="Microsoft YaHei, sans-serif">确认工单 + 证据 + 检索报告</text>
+                <text x="149" y="397" font-size="9" fill="#6b805b" font-family="Microsoft YaHei, sans-serif">用于后续分析与业务改进</text>
+              </g>
+            </svg>
+            <div class="art-foot"><span>证据可追溯</span><span>策略可调整</span><span>经验可复用</span></div>
+          </div>
+        </div>
+        <div class="value-strip">
+          <div class="value-item"><strong>先看到，再深入</strong><p>首批候选先展示，后续持续搜索与复核</p></div>
+          <div class="value-item"><strong>集合很大，思考有序</strong><p>L0–L3 分层与当前工作集管理上下文</p></div>
+          <div class="value-item"><strong>每次交付，都有依据</strong><p>报告与下载共享同一份确认结果</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap" id="scenarios" aria-labelledby="scenarios-title">
+      <div class="section-head">
+        <div><p class="section-index">01 / WHO IT HELPS</p><h2 id="scenarios-title">同一份工单，<br>服务不同的问题。</h2></div>
+        <p class="section-desc">从“怎样写查询条件”走向“把业务问题说清楚”。为后续分析准备可信的工单集合，让工作人员和领导更快进入真正关心的问题。</p>
+      </div>
+      <div class="scenario-grid">
+        <article class="scenario">
+          <div class="scenario-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h10v14H5zM8 8h4M8 11h4M8 14h2"/><circle cx="17" cy="16" r="3.5"/><path d="m19.5 18.5 2 2"/></svg></div>
+          <h3>工作人员 · 查找业务工单</h3><p>用自然语言表达组合条件，发现分散在标题、正文和处理记录中的线索，得到可复核的工单。</p><div class="scenario-bottom">为根因标签聚类准备数据</div>
+        </article>
+        <article class="scenario">
+          <div class="scenario-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M17.5 14v7M14 17.5h7"/></svg></div>
+          <h3>产品排查 · 汇集相似问题</h3><p>围绕某个产品、某类故障或相似反馈检索，整理相关问题与处理证据，支持有针对性的检查和改进。</p><div class="scenario-bottom">为问题定位提供工单依据</div>
+        </article>
+        <article class="scenario">
+          <div class="scenario-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 4h16v12H10l-5 4v-4H4zM8 8h8M8 12h5"/></svg></div>
+          <h3>领导 · 直接追问业务</h3><p>直接描述想了解的问题，查看检索范围、代表性证据和确认结果，把用户反馈转交给后续分析。</p><div class="scenario-bottom">为决策讨论保留原始来源</div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section wrap" id="workflow" aria-labelledby="workflow-title">
+      <div class="section-head">
+        <div><p class="section-index">02 / FROM QUERY TO EVIDENCE</p><h2 id="workflow-title">先快速找到，再认真确认。</h2></div>
+        <p class="section-desc">点击步骤，看看一句“副卡和跨域”如何进入检索循环。首轮保留原意，后续由 Agent 结合证据调整策略。</p>
+      </div>
+      <div class="demo">
+        <div class="demo-top"><span class="window-label"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>检索工作台 · 概念演示</span><span class="demo-label">虚构样例 / 不连接真实检索</span></div>
+        <div class="demo-query"><span class="query-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg></span><p>帮我找副卡和跨域有关工单</p><span class="query-hint">自然语言输入</span></div>
+        <ol class="steps" aria-label="切换检索流程步骤">
+          <li><button class="step" type="button" data-step="0" aria-current="step" aria-controls="demo-scene"><span>01</span>并行快查</button></li>
+          <li><button class="step" type="button" data-step="1" aria-controls="demo-scene"><span>02</span>专家路由</button></li>
+          <li><button class="step" type="button" data-step="2" aria-controls="demo-scene"><span>03</span>取证复核</button></li>
+          <li><button class="step" type="button" data-step="3" aria-controls="demo-scene"><span>04</span>综合判断</button></li>
+          <li><button class="step" type="button" data-step="4" aria-controls="demo-scene"><span>05</span>确认交付</button></li>
+        </ol>
+        <div class="demo-body" id="demo-scene">
+          <div class="demo-main">
+            <div class="agent-heading"><span class="agent-dot" aria-hidden="true"></span><span id="demo-role">QUERY UNDERSTANDING → RETRIEVAL</span></div>
+            <h3 id="demo-title" aria-live="polite" aria-atomic="true">让两条检索路径同时出发。</h3>
+            <p class="demo-explanation" id="demo-explanation">将普通主题“副卡和跨域”解析为“副卡 OR 跨域”，跨字段枚举任一主题的字面命中，同时对原始问题做向量召回。明确要求“两者同时出现”时才使用 AND；候选由 Agent 再按完整请求复核。</p>
+            <div class="demo-modules" id="demo-modules">
+              <div class="demo-module"><span class="module-top">路径 A / 关键词</span><strong>副卡 OR 跨域</strong><p>枚举全部字面命中，分页呈现。</p></div>
+              <div class="demo-module"><span class="module-top">路径 B / 向量</span><strong>原始 query → Top-K</strong><p>找到语义相近、表达不同的候选。</p></div>
+            </div>
+            <p class="demo-principle" id="demo-principle">保留原始条件，不做首轮语义扩写；字面命中进入候选，不自动成为确认结果。</p>
+          </div>
+          <aside class="evidence" aria-label="虚构样例的证据侧栏">
+            <div class="evidence-head"><strong id="evidence-heading">候选工单</strong><span id="evidence-caption">三条虚构样例</span></div>
+            <div class="evidence-list" id="evidence-list">
+              <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-01</span><span class="ticket-status">检索线索</span></div><h4>副卡业务办理失败</h4><p>标题出现“副卡”，处理记录出现“跨域”。</p></article>
+              <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-02</span><span class="ticket-status">检索线索</span></div><h4>异地副卡办理受阻</h4><p>向量路径召回；需要进一步核对业务含义。</p></article>
+              <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-03</span><span class="ticket-status">检索线索</span></div><h4>主卡本地套餐变更</h4><p>语义近邻候选；相似度不等于符合要求。</p></article>
+            </div>
+          </aside>
+        </div>
+        <div class="demo-footer"><p id="demo-footer-note">进展先可见，候选与确认结果始终分开。</p><div class="demo-controls"><button type="button" class="reset" id="reset-demo">重置演示</button><button type="button" class="button primary next" id="next-step">看下一步 <span aria-hidden="true">→</span></button></div></div>
+      </div>
+      <p class="flow-note"><strong>何时结束？</strong><span>由 Agent 评估覆盖、分歧与继续搜索的价值。复杂任务期望在约 1–3 分钟内持续给出有效进展；时间和资源耗尽不能被解释为“已经找全”。</span></p>
+      <noscript><p class="noscript">当前浏览器未启用 JavaScript，显示第一步静态示意；其余内容可正常阅读。</p></noscript>
+    </section>
+
+    <section class="section wrap" id="context" aria-labelledby="context-title">
+      <div class="context-panel">
+        <div class="context-copy">
+          <p class="section-index">03 / CONTEXT BY DESIGN</p><h2 id="context-title">工单可以很多。<br>每一轮，只带入此刻所需。</h2>
+          <p>完整候选与证据保存在数据层。上下文规划器为主 Agent 和各领域专家分别安排工作视窗，按需展开 L0–L3，避免历史工单逐轮堆满模型上下文。</p>
+          <ul class="context-points">
+            <li><span>01</span>当前轮展开标题、摘要及必要证据；旧轮保留决定、缺口与少量定位引用。</li>
+            <li><span>02</span>需要早期线索时，按稳定身份重新读取原文，压缩摘要不替代原始证据。</li>
+            <li><span>03</span>随模型容量调整预算与片段大小，用户条件和关键反证始终保留。</li>
+          </ul>
+        </div>
+        <div class="context-view">
+          <div class="context-view-top"><strong>点击查看不同层级</strong><span>同一虚构工单 · 按需展开</span></div>
+          <div class="layer-buttons" role="group" aria-label="工单上下文层级">
+            <button class="layer-button" type="button" data-layer="0" aria-pressed="false" aria-controls="layer-content"><b>L0</b>索引卡</button>
+            <button class="layer-button" type="button" data-layer="1" aria-pressed="true" aria-controls="layer-content"><b>L1</b>概览</button>
+            <button class="layer-button" type="button" data-layer="2" aria-pressed="false" aria-controls="layer-content"><b>L2</b>证据片段</button>
+            <button class="layer-button" type="button" data-layer="3" aria-pressed="false" aria-controls="layer-content"><b>L3</b>完整详情</button>
+          </div>
+          <div class="layer-content" id="layer-content" aria-live="polite" aria-atomic="true"><div class="layer-meta">DEMO-01 / SOURCE V1 / L1</div><h3>副卡业务办理失败</h3><p>摘要：用户办理副卡业务时失败，处理记录提及跨域环节，需要核对具体办理过程。</p><p class="source-ref">命中提示：标题 / 处理记录 · 摘要为派生概览</p></div>
+          <p class="layer-caption" id="layer-caption">L1 · 当前工作集先看概览；摘要不足以支持判断时继续取证。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap" id="architecture" aria-labelledby="architecture-title">
+      <div class="section-head">
+        <div><p class="section-index">04 / BUILT AROUND EVIDENCE</p><h2 id="architecture-title">DSH 承载智能，<br>证据贯穿全链路。</h2></div>
+        <p class="section-desc">前端围绕检索任务设计，后台维护可恢复的权威状态。模型负责语义判断，Controller 守住条件、引用、合法状态与资源边界。</p>
+      </div>
+      <div class="arch-grid">
+        <div class="arch-map" role="figure" aria-label="系统架构：浏览器工作台通过产品 API 与持久任务状态交互；DSH 驱动主 Agent 与专家，调用 MySQL、Milvus 和 Python 模型服务，引用文件 Wiki。">
+          <div class="arch-map-label"><span class="mono">SYSTEM BLUEPRINT</span><span>应用 / 数据 / 模型 / 知识</span></div>
+          <div class="arch-node"><strong>浏览器检索工作台</strong><p>自然语言对话 / 证据侧栏 / 进展 / 报告与下载</p></div>
+          <div class="arch-arrow">双向交互 · 快照与事件恢复</div>
+          <div class="arch-node"><strong>产品 API + 持久任务状态</strong><p>用户要求 / 候选 / 判断 / 证据身份 / 结果版本</p></div>
+          <div class="arch-arrow">共享事实 · 独立上下文</div>
+          <div class="arch-node emphasis"><strong>DSH 主 Agent + 领域专家</strong><p>路由策略 / 并行取证 / 上下文规划 / 综合与停止</p></div>
+          <div class="arch-arrow">通过 Provider 与工具访问</div>
+          <div class="arch-row"><div class="arch-node"><strong>MySQL</strong><p>工单与字面查询</p></div><div class="arch-node"><strong>Milvus</strong><p>语义向量召回</p></div><div class="arch-node"><strong>Python 模型服务</strong><p>Embedding / 可选重排</p></div></div>
+          <div class="arch-base">领域 Wiki 为专家提供版本化知识 · 工单原文与证据可追溯</div>
+        </div>
+        <div class="principles">
+          <article class="principle"><div class="principle-top"><span>01</span><h3>页面离开，任务继续</h3></div><p>后台执行与浏览器连接分离。用户回来时恢复已有结果、进展与待答问题；补充信息进入同一任务状态。</p></article>
+          <article class="principle"><div class="principle-top"><span>02</span><h3>专家可组合，知识可选用</h3></div><p>快查后自动路由领域专家，各自制定策略并取证。意见分歧靠证据复核；缺少 Wiki 时由通用 Agent 零样本继续。</p></article>
+          <article class="principle"><div class="principle-top"><span>03</span><h3>单机部署，数据持久保存</h3></div><p>MySQL 保存工单与任务，Milvus 提供向量检索，Python 服务负责检索计算。应用、模型和数据通过 Docker Compose 部署，日常启动复用已有资源。</p><div class="stack-tags"><span>TypeScript / Node.js</span><span>React / Vite</span><span>FastAPI / PyTorch</span><span>Markdown Wiki</span></div></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap" id="learning" aria-labelledby="learning-title">
+      <div class="learning">
+        <div class="section-head"><div><p class="section-index">05 / LEARN, VERIFY, IMPROVE</p><h2 id="learning-title">让下一次检索，带着经验出发。</h2></div><p class="section-desc">Wiki 是可维护的领域先验。自动学习建立在可追溯的反馈处置和检索证据之上，校验后的知识可用于后续判断，效果通过任务对照评估。</p></div>
+        <div class="learning-steps">
+          <article class="learning-step"><span class="number">01 / OBSERVE</span><h3>收集反馈与轨迹</h3><p>用户补充、相关性反馈及成功或失败的检索经验进入任务记录。</p></article>
+          <article class="learning-step"><span class="number">02 / VERIFY</span><h3>复核、提炼与校验</h3><p>Agent 复核反馈，核对证据、反例与适用范围，形成有来源的知识增量。</p></article>
+          <article class="learning-step"><span class="number">03 / RELEASE</span><h3>自动发布新版本</h3><p>增量写入目录化 Markdown / 结构化 Wiki，通过自动校验后发布，保留回退能力。</p></article>
+          <article class="learning-step"><span class="number">04 / REUSE</span><h3>后续任务直接复用</h3><p>专家引用新版先验调整策略；当前任务固定知识版本，当前证据仍可否定旧经验。</p></article>
+        </div>
+        <div class="learning-note"><span>用户的“相关 / 不相关”是复核输入，由 Agent 结合证据决定。</span><span>错误经验可以修订或停用，当前证据始终优先。</span></div>
+      </div>
+    </section>
+
+    <section class="section wrap" id="delivery" aria-labelledby="delivery-title">
+      <div class="delivery">
+        <div class="report-stage">
+          <div class="report">
+            <div class="report-masthead"><span class="mono">RETRIEVAL BRIEF</span><span>报告样式示意 · 虚构内容</span></div>
+            <h3>副卡与跨域问题检索</h3><p class="report-subtitle">查询范围、确认工单与证据说明</p>
+            <div class="report-line"><strong>01 / 确认工单</strong><div class="report-ticket"><span>DEMO-01</span>副卡业务办理失败</div><div class="report-ticket"><span>DEMO-02</span>异地副卡办理受阻</div></div>
+            <div class="report-line"><strong>02 / 代表性证据</strong><p>DEMO-01 的标题定位副卡业务，处理记录明确提及跨域环节。引用保留工单、字段与来源版本。</p></div>
+            <div class="report-line"><strong>03 / 范围与限制</strong><p>说明检索方向、确认依据与停止原因。“相关工单已确认”不代表根因已独立证实。</p></div>
+            <div class="report-footer"><span>同一结果版本 · 同一证据来源</span><span class="mono">01 / 01</span></div>
+          </div>
+        </div>
+        <div class="delivery-copy"><p class="section-index">06 / READY FOR THE NEXT STEP</p><h2 id="delivery-title">交给下游的，<br>是有边界的结果。</h2><p>一份能解释“为什么这些工单符合要求”的检索报告，加上一份可继续处理的确认工单集合。工作人员可以核对，领导可以阅读，下游可以接着分析。</p>
+          <ul class="delivery-list">
+            <li><span class="check" aria-hidden="true">✓</span><div><strong>只交付确认结果</strong><p>未判定与排除工单留在过程状态，报告和下载使用同一确认集合。</p></div></li>
+            <li><span class="check" aria-hidden="true">✓</span><div><strong>结论连接原始证据</strong><p>保留查询范围、依据与覆盖限制，不用相似度或专家票数包装置信度。</p></div></li>
+            <li><span class="check" aria-hidden="true">✓</span><div><strong>完整集合可下载</strong><p>CSV 便于查看，JSONL 保留结构，Markdown 用于报告；完整集合不受页面条数限制。</p></div></li>
+          </ul>
+          <p class="downstream">后续交接 → 聚类分析 / 业务打标 / 产品排查与改进<br>聚类、业务打标及统计分析由下游系统完成。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap" id="get-started" aria-labelledby="start-title">
+      <div class="status-panel">
+        <div class="status-heading"><h2 id="start-title">从一句查询开始。</h2><span>GET STARTED / 单机部署</span></div>
+        <div class="status-grid">
+          <article><span class="status-kicker">01 / 安装</span><h3>准备 Git 与 Docker</h3><p>Windows 使用 Docker Desktop 的 Linux 容器模式；Linux 使用 Docker Engine。Compose 版本需为 v2.20 或以上。完整容器部署无需宿主 Node.js 或 Python。</p><div class="command"><span>Windows</span><code>.\setup.cmd</code></div><div class="command"><span>Linux / Git Bash</span><code>bash setup.sh</code></div></article>
+          <article><span class="status-kicker building">02 / 打开工作台</span><h3>资源准备后，即可查询</h3><p>首次安装准备模型、示例数据和索引。完成后打开工作台；日常启动复用已有资源，停止会保留数据卷。</p><div class="command"><span>工作台地址</span><code>http://127.0.0.1:3080/retrieval</code></div><div class="command"><span>日常启动 · Windows</span><code>.\setup.cmd start</code></div></article>
+          <article><span class="status-kicker validating">03 / 配置模型</span><h3>选择适合的供应商</h3><p>在安装向导或工作台侧栏的“模型与供应商”中配置主模型。任务运行时可以补充条件；模型切换作用于后续步骤。供应商选择需符合工单数据的使用范围。</p><a class="guide-link" href="DEVELOPMENT.md">查看配置与运行说明 <span aria-hidden="true">↗</span></a></article>
+        </div>
+        <p class="status-note">默认提供 19,587 条示例工单，日期、地区和状态字段缺失，系统会保留未知。首次安装需要联网；检索质量与耗时取决于数据、模型、硬件和查询范围。页面演示使用虚构工单，不连接实际检索服务。</p>
+        <div class="source-links" aria-label="产品文档"><span>继续阅读</span><a href="../README.md">使用说明 ↗</a><a href="PRODUCT_REQUIREMENTS.md">产品规格 ↗</a><a href="ARCHITECTURE.md">架构说明 ↗</a><a href="README.md">文档目录 ↗</a></div>
+      </div>
+    </section>
+  </main>
+  <footer class="wrap site-footer"><div><div class="footer-brand">Retrieval Agent</div><p class="footer-note">让每一次检索，有据可查。</p></div><div class="footer-action"><span class="footer-note">独立介绍页 · 无外部资源依赖</span><button class="print-button" type="button" id="print-page">打印 / 保存为 PDF ↗</button></div></footer>
+  <script>
+    'use strict';
+    // Presentation only: all DEMO tickets and their evidence are fictional.
+    // This standalone page does not send queries or access application data.
+    const ticketTitles = ['副卡业务办理失败', '异地副卡办理受阻', '主卡本地套餐变更'];
+    const stages = [
+      {
+        role: 'QUERY UNDERSTANDING → RETRIEVAL', title: '让两条检索路径同时出发。',
+        explanation: '将普通主题“副卡和跨域”解析为“副卡 OR 跨域”，跨字段枚举任一主题的字面命中，同时对原始问题做向量召回。明确要求“两者同时出现”时才使用 AND；候选由 Agent 再按完整请求复核。',
+        modules: [['路径 A / 关键词', '副卡 OR 跨域', '枚举全部字面命中，分页呈现。'], ['路径 B / 向量', '原始 query → Top-K', '找到语义相近、表达不同的候选。']],
+        principle: '保留原始条件，不做首轮语义扩写；字面命中进入候选，不自动成为确认结果。',
+        evidenceTitle: '候选工单', evidenceCaption: '三条虚构样例',
+        tickets: [{i: 0, status: '检索线索', text: '标题出现“副卡”，处理记录出现“跨域”。'}, {i: 1, status: '检索线索', text: '向量路径召回；需要进一步核对业务含义。'}, {i: 2, status: '检索线索', text: '语义近邻候选；相似度不等于符合要求。'}],
+        footer: '进展先可见，候选与确认结果始终分开。'
+      },
+      {
+        role: 'DSH MAIN AGENT → DOMAIN EXPERTS', title: '按问题路由，带着知识检查。',
+        explanation: '主 Agent 结合问题与首批候选，选择副卡业务和跨域流程两个视角。专家引用适用 Wiki，分别检查业务范围、关键环节与可能遗漏的表达。',
+        modules: [['领域视角 A', '副卡业务', '核对主副卡关系与具体办理对象。'], ['领域视角 B', '跨域流程', '核对业务边界、环节和不同表达。']],
+        principle: '专家是带有领域知识的 Agent。没有 Wiki 或匹配专家时，通用 Agent 继续执行。',
+        evidenceTitle: '候选与关注点', evidenceCaption: '策略也需要证据验证',
+        tickets: [{i: 0, status: '检索线索', text: '关注点：失败是否发生在副卡的跨域业务环节？'}, {i: 1, status: '检索线索', text: '关注点：“异地”在这张工单里是否对应跨域业务？'}, {i: 2, status: '检索线索', text: '关注点：问题对象是否实际上仅为主卡？'}],
+        footer: '各专家独立规划、并行取证，产物进入同一任务状态。'
+      },
+      {
+        role: 'EVIDENCE READING → TARGETED SEARCH', title: '有疑问，就展开原文。',
+        explanation: '摘要不足时读取处理记录等来源片段，必要时提出检索改写并继续搜索。专家意见不同，先明确争议点，再用针对性证据解决；用户也可随时补充。',
+        modules: [['按需深读', '从 L1 升级到 L2 / L3', '保留工单、字段、位置与来源版本。'], ['搜索补缺', '策略改写与追加召回', '扩展检索假设，保留用户的约束。']],
+        principle: '“异地”等词如何理解要结合业务定义与当前证据，不能凭词形直接等同。',
+        evidenceTitle: '原文证据示意', evidenceCaption: '下列片段均为虚构',
+        tickets: [{i: 0, status: '已取证', text: '处理记录：“副卡在跨域环节校验失败。”'}, {i: 1, status: '已取证', text: '受理记录：“本次副卡办理进入跨域业务环节后返回错误。”'}, {i: 2, status: '已取证', text: '业务记录：“仅办理主卡本地套餐变更，未涉及副卡或跨域。”'}],
+        footer: '用户反馈先回执再复核，独立检索不必被等待中的问题阻塞。'
+      },
+      {
+        role: 'SYNTHESIS → EVIDENCE-BASED DECISION', title: '判断跟着证据走。',
+        explanation: '主 Agent 综合逐条证据与专家发现。前两张工单的原文支持副卡与跨域业务关联；第三张仅涉及主卡本地套餐，不符合本次要求，予以排除。',
+        modules: [['确认依据', '符合范围 + 可追溯原文', '保留每条工单的判断理由与引用。'], ['停止依据', '覆盖、分歧与下一步价值', '检查未决问题，不按固定轮数宣布完成。']],
+        principle: '确认依据不是相似度、专家多数票或模型自报概率；语义停止与资源中止分别表达。',
+        evidenceTitle: '复核状态', evidenceCaption: '过程集合示意',
+        tickets: [{i: 0, status: '已确认', kind: 'confirmed', text: '标题与处理记录共同支持本次问题关联。'}, {i: 1, status: '已确认', kind: 'confirmed', text: '原文明确副卡办理与跨域业务环节相关。'}, {i: 2, status: '已排除', kind: 'excluded', text: '原文限定为主卡本地套餐，无目标问题依据。'}],
+        footer: '真实任务仍需核验覆盖与未决问题；示例判断不代表全库已找全。'
+      },
+      {
+        role: 'CONFIRMED SNAPSHOT → REPORT & EXPORT', title: '交付结果，也交付选择依据。',
+        explanation: '把本次确认的工单、判断和来源引用形成同一结果版本。报告说明查询范围、代表性依据与覆盖限制，下载接口交付完整确认集合，供下游继续处理。',
+        modules: [['检索报告', '结论与原始证据相连', '引用来自对应版本的确认结果。'], ['下载接口', '按结果版本交接', '完整集合不受前端展示窗口限制。']],
+        principle: '只交付确认工单。无确认结果时如实说明，不把候选集合当作最终答案。',
+        evidenceTitle: '本次确认结果', evidenceCaption: '仅展示可交付项',
+        tickets: [{i: 0, status: '已确认', kind: 'confirmed', text: '来源：标题 + 处理记录 / 示例版本 V1。'}, {i: 1, status: '已确认', kind: 'confirmed', text: '来源：受理记录 / 示例版本 V1。'}],
+        footer: '演示结束 · 以上为虚构工单；安装后可在工作台提交自己的查询。'
+      }
+    ];
+    let currentStep = 0;
+    const byId = id => document.getElementById(id);
+    function element(tag, className, text) {
+      const el = document.createElement(tag);
+      if (className) el.className = className;
+      if (text !== undefined) el.textContent = text;
+      return el;
+    }
+    function renderStep(index) {
+      currentStep = Math.max(0, Math.min(stages.length - 1, index));
+      const stage = stages[currentStep];
+      document.querySelectorAll('[data-step]').forEach(button => {
+        const step = Number(button.dataset.step);
+        if (step === currentStep) button.setAttribute('aria-current', 'step');
+        else button.removeAttribute('aria-current');
+        button.classList.toggle('done', step < currentStep);
+      });
+      byId('demo-role').textContent = stage.role;
+      byId('demo-title').textContent = stage.title;
+      byId('demo-explanation').textContent = stage.explanation;
+      byId('demo-principle').textContent = stage.principle;
+      byId('evidence-heading').textContent = stage.evidenceTitle;
+      byId('evidence-caption').textContent = stage.evidenceCaption;
+      byId('demo-footer-note').textContent = stage.footer;
+      byId('demo-modules').replaceChildren(...stage.modules.map(([label, title, description]) => {
+        const module = element('div', 'demo-module');
+        module.append(element('span', 'module-top', label), element('strong', '', title), element('p', '', description));
+        return module;
+      }));
+      byId('evidence-list').replaceChildren(...stage.tickets.map(ticket => {
+        const card = element('article', 'ticket' + (ticket.kind ? ' ' + ticket.kind : ''));
+        const top = element('div', 'ticket-top');
+        top.append(element('span', 'ticket-id', 'DEMO-0' + (ticket.i + 1)), element('span', 'ticket-status', ticket.status));
+        card.append(top, element('h4', '', ticketTitles[ticket.i]), element('p', '', ticket.text));
+        return card;
+      }));
+      const next = byId('next-step');
+      const arrow = element('span', '', currentStep === 4 ? '↺' : '→');
+      arrow.setAttribute('aria-hidden', 'true');
+      next.replaceChildren(document.createTextNode(currentStep === 4 ? '再看一遍 ' : '看下一步 '), arrow);
+    }
+    document.querySelectorAll('[data-step]').forEach(button => button.addEventListener('click', () => renderStep(Number(button.dataset.step))));
+    byId('next-step').addEventListener('click', () => renderStep((currentStep + 1) % stages.length));
+    byId('reset-demo').addEventListener('click', () => renderStep(0));
+    const layers = [
+      {body: '', source: '稳定编号 / 标题 / 来源版本', caption: 'L0 · 轻量定位索引；标题用于找回工单，不保证完整表达业务事实。'},
+      {body: '摘要：用户办理副卡业务时失败，处理记录提及跨域环节，需要核对具体办理过程。', source: '命中提示：标题 / 处理记录 · 摘要为派生概览', caption: 'L1 · 当前工作集先看概览；摘要不足以支持判断时继续取证。'},
+      {body: '处理记录片段：“副卡在跨域环节校验失败。”', source: '来源：DEMO-01 / V1 / 处理记录 / 片段 1 · 引用示意', caption: 'L2 · 读取来源片段，保留字段与位置；层级深度不是置信度分数。'},
+      {body: '标题：副卡业务办理失败。\n用户描述：办理副卡业务无法继续。\n处理记录：副卡在跨域环节校验失败。\n处理进度：转交业务侧核查。', source: '示例的完整可访问详情 / DEMO-01 / V1', caption: 'L3 · 按权限获取完整详情，长工单可分段阅读；不会自动把所有正文塞进每轮上下文。'}
+    ];
+    document.querySelectorAll('[data-layer]').forEach(button => button.addEventListener('click', () => {
+      const index = Number(button.dataset.layer);
+      const layer = layers[index];
+      document.querySelectorAll('[data-layer]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+      const content = byId('layer-content');
+      const nodes = [element('div', 'layer-meta', 'DEMO-01 / SOURCE V1 / L' + index), element('h3', '', ticketTitles[0])];
+      if (layer.body) { const body = element('p', '', layer.body); body.style.whiteSpace = 'pre-line'; nodes.push(body); }
+      nodes.push(element('p', 'source-ref', layer.source));
+      content.replaceChildren(...nodes);
+      byId('layer-caption').textContent = layer.caption;
+    }));
+    byId('print-page').addEventListener('click', () => window.print());
+  </script>
+</body>
+</html>
