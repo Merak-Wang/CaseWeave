@@ -1,4 +1,4 @@
-# Retrieval Agent Model Service
+# CaseWeave Model Service
 
 Python/FastAPI 检索计算与模型服务，提供当前查询分析、排名、embedding 和可选 reranker 能力。产品领域状态与判断职责由 TypeScript domain/Agent 侧负责。
 

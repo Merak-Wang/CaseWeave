@@ -11,10 +11,10 @@ const brand = icon('<path d="M12 3v5m0 8v5M3 12h5m8 0h5M5.6 5.6l3.5 3.5m5.8 5.8 
 
 /** All task and source content is inserted as text by the bundled browser client. */
 export const TASK_WORKBENCH_HTML = String.raw`<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#faf9f6"><title>工单检索</title><link rel="icon" href="data:,"><style>${WORKBENCH_STYLES}${ORCHESTRATION_STYLES}${MODEL_STYLES}</style></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#faf9f6"><meta name="description" content="络寻 · CaseWeave，企业会话与工单证据检索智能体"><title>络寻 · CaseWeave｜证据检索</title><link rel="icon" href="data:,"><style>${WORKBENCH_STYLES}${ORCHESTRATION_STYLES}${MODEL_STYLES}</style></head>
 <body><a class="skip" href="#main-content">跳到主要内容</a><div class="shell">
 <aside class="sidebar" id="sidebar" aria-label="任务导航">
-  <div class="sidebar-heading"><a class="brand" href="/retrieval">${brand}<span>工单检索</span></a><button id="close-nav" class="icon-button" aria-label="收起导航">${close}</button></div>
+  <div class="sidebar-heading"><a class="brand" href="/retrieval">${brand}<span class="brand-name">络寻<small>CaseWeave</small></span></a><button id="close-nav" class="icon-button" aria-label="收起导航">${close}</button></div>
   <a class="new-task" href="/retrieval">${plus}<span>新建检索</span><kbd>Alt N</kbd></a>
   <div class="side-history"><p class="side-label">最近检索</p><nav id="restore" class="history-list" aria-label="最近任务"></nav></div>
   <div class="sidebar-bottom"><button id="model-settings" class="sidebar-settings" type="button">⚙ <span>模型与供应商</span></button><div class="sidebar-foot">${search}<span>从线索，找到答案</span></div></div>
@@ -23,7 +23,7 @@ export const TASK_WORKBENCH_HTML = String.raw`<!doctype html>
   <header class="topbar"><div class="row"><button id="open-nav" class="icon-button" aria-controls="sidebar" aria-expanded="false" aria-label="打开任务导航">${icon('<path d="M4 6h16M4 12h16M4 18h16"/>')}</button><span id="breadcrumb">工作空间</span></div><div class="row"><span id="connection" role="status"></span><a class="mobile-brand icon-button" href="/retrieval" aria-label="新建检索">${plus}</a></div></header>
   <div id="error" class="notice error" role="alert" hidden></div>
   <section id="home" class="home">
-    <div class="home-intro"><div class="home-symbol">${brand}</div><h1>想找什么工单？</h1><p class="home-lead">说说你的需求，剩下的交给检索。</p></div>
+    <div class="home-intro"><div class="home-symbol">${brand}</div><h1>想找什么工单？</h1><p class="home-lead">连接会话、业务条件与证据，让检索有据可查。</p></div>
     <form id="query-form" class="query-box">
       <label for="query" class="sr-only">描述需要查找的工单</label>
       <textarea id="query" rows="2" required maxlength="2000" placeholder="例如：查找副卡解绑后仍合账缴费的工单"></textarea>

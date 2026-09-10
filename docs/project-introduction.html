@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f5f7f2">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23163c2e'/%3E%3Cpath d='M9 9h6v6H9zm9 0h6v6h-6zM9 18h6v6H9z' fill='%23d9eda6'/%3E%3Ccircle cx='21' cy='21' r='3' fill='white'/%3E%3C/svg%3E">
-  <meta name="description" content="Retrieval Agent：面向工单查询工作人员与领导的自然语言检索项目。了解双路召回、专家协作、证据复核、上下文规划与可追溯交付。">
-  <title>Retrieval Agent · 让每一次检索，有据可查</title>
+  <meta name="description" content="络寻 · CaseWeave，企业会话与工单证据检索智能体。将分散会话、业务条件和证据组织起来，支持自然语言检索、证据复核与可追溯交付。">
+  <title>络寻 · CaseWeave｜企业会话与工单证据检索智能体</title>
   <style>
     :root {
       --paper: #f5f7f2; --white: #fff; --ink: #182b24; --muted: #65736a;
@@ -222,6 +222,8 @@
     .source-links a:hover { border-bottom-color: var(--green); }
     .site-footer { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 32px 0 37px; }
     .footer-brand { font-size: 13px; font-weight: 600; }
+    .footer-about { max-width: 600px; }
+    .footer-about p { margin-top: 7px; }
     .footer-note { color: var(--muted); font-size: 10px; }
     .footer-action { display: flex; align-items: center; gap: 18px; }
     .print-button { background: none; border: 0; border-bottom: 1px solid #bdcdb2; color: var(--muted); font-size: 11px; padding: 5px 0; }
@@ -322,7 +324,7 @@
     }
     @media (max-width: 520px) {
       .wrap { width: calc(100% - 36px); }
-      .nav a:nth-child(2) { display: none; }
+      .nav a:nth-child(2), .nav a:nth-child(4) { display: none; }
       .nav { gap: 12px; }
       .eyebrow { font-size: 9px; letter-spacing: 1.25px; }
       h1 { font-size: clamp(32px, 8.45vw, 42px); letter-spacing: -1.6px; margin-top: 21px; }
@@ -453,9 +455,9 @@
   <a class="skip" href="#main">跳到正文</a>
   <header class="site-header">
     <div class="wrap header-inner">
-      <a class="brand" href="#top" aria-label="Retrieval Agent，返回顶部">
+      <a class="brand" href="#top" aria-label="络寻 · CaseWeave，返回顶部">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-        Retrieval Agent
+        络寻 · CaseWeave
       </a>
       <nav class="nav" aria-label="页面导航">
         <a href="#scenarios">应用场景</a><a href="#workflow">工作原理</a><a href="#architecture">技术架构</a><a href="#delivery">结果交付</a>
@@ -468,9 +470,9 @@
       <div class="wrap">
         <div class="hero-grid">
           <div>
-            <p class="eyebrow">Natural language. Traceable evidence.</p>
+            <p class="eyebrow">企业会话与工单证据检索智能体</p>
             <h1 id="hero-title">一句问题，<br>找到<span>有据可查</span><br>的工单。</h1>
-            <p class="hero-copy">为工单查询工作人员与领导打造的检索 Agent。理解自然语言，协同搜索与复核，将零散工单整理为有依据、可追溯、能交接的确认结果。</p>
+            <p class="hero-copy">将分散的会话、业务条件与工单证据组织起来。面向工单查询人员与业务管理人员，理解自然语言，协同搜索与复核，让每一份确认结果有依据、可追溯、能交接。</p>
             <div class="hero-actions">
               <a class="button primary" href="#workflow">看看它如何工作 <span class="arrow" aria-hidden="true">↗</span></a>
               <a class="button" href="#get-started">开始使用 <span class="arrow" aria-hidden="true">↓</span></a>
@@ -695,7 +697,7 @@
       </div>
     </section>
   </main>
-  <footer class="wrap site-footer"><div><div class="footer-brand">Retrieval Agent</div><p class="footer-note">让每一次检索，有据可查。</p></div><div class="footer-action"><span class="footer-note">独立介绍页 · 无外部资源依赖</span><button class="print-button" type="button" id="print-page">打印 / 保存为 PDF ↗</button></div></footer>
+  <footer class="wrap site-footer"><div class="footer-about"><div class="footer-brand">络寻 · CaseWeave</div><p class="footer-note">“络”连接业务关系与通信场景，“寻”聚焦第一阶段的检索；CaseWeave 将分散会话、业务条件和证据组织起来。</p><p class="footer-note">名称暂作工作名，尚未进行商标或同名项目排他性检索。</p></div><div class="footer-action"><span class="footer-note">独立介绍页 · 无外部资源依赖</span><button class="print-button" type="button" id="print-page">打印 / 保存为 PDF ↗</button></div></footer>
   <script>
     'use strict';
     // Presentation only: all DEMO tickets and their evidence are fictional.

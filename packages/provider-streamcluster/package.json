@@ -1,7 +1,7 @@
 {
   "name": "@retrieval-agent/provider-streamcluster",
   "version": "0.1.0",
-  "description": "Versioned read-only StreamCluster HTTP provider for Retrieval Agent",
+  "description": "Versioned read-only StreamCluster HTTP provider for CaseWeave",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

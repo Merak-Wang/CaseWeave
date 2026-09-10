@@ -50,7 +50,7 @@ def _ready(backend: Any, ranking_backend: RetrievalRankingBackend) -> dict[str, 
 
 def create_app(backend: Any, ranking_backend: RetrievalRankingBackend | None = None) -> FastAPI:
     ranking_backend = ranking_backend or RetrievalRankingBackend(backend)
-    app = FastAPI(title="Retrieval Agent service", version=SERVICE_VERSION)
+    app = FastAPI(title="CaseWeave service", version=SERVICE_VERSION)
 
     @app.exception_handler(ServiceError)
     async def service_error_handler(request: Request, error: ServiceError) -> JSONResponse:

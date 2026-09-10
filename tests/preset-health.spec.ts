@@ -22,7 +22,7 @@ beforeAll(async () => {
   bundleAgentEntry = createRequire(resolve('package.json')).resolve('@retrieval-agent/bundle/agent')
 })
 
-describe('shipped Retrieval Agent preset', () => {
+describe('shipped CaseWeave preset', () => {
   it('is healthy in the exact DSH preset YAML dialect', async () => {
     const presets = await agentPresets.scanRoot({
       path: resolve('packages/bundle/presets'),

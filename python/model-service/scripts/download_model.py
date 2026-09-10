@@ -20,7 +20,7 @@ def file_spec(value: str) -> tuple[Path, str | None]:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Download one pinned Retrieval Agent model snapshot")
+    result = argparse.ArgumentParser(description="Download one pinned CaseWeave model snapshot")
     result.add_argument("--repo-id", required=True)
     result.add_argument("--revision", required=True)
     result.add_argument("--destination", type=Path, required=True)

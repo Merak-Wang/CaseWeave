@@ -1,5 +1,6 @@
 {
   "name": "@retrieval-agent/root",
+  "description": "络寻 · CaseWeave — 企业会话与工单证据检索智能体",
   "version": "0.1.0",
   "private": true,
   "type": "module",

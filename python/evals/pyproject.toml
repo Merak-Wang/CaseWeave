@@ -1,7 +1,7 @@
 [project]
 name = "retrieval-agent-evals"
 version = "0.1.0"
-description = "External deterministic evaluation contracts and scorers for Retrieval Agent"
+description = "External deterministic evaluation contracts and scorers for CaseWeave"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []

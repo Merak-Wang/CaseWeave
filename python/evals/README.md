@@ -1,4 +1,4 @@
-# Retrieval Agent Evals
+# CaseWeave Evals
 
 独立的 Python 评测工具，消费产品轨迹和评测样本；不承担生产 Agent 决策，不向运行时注入 Gold。
 

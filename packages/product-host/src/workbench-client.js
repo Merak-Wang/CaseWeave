@@ -181,7 +181,7 @@ function render() {
   const n = snapshot.node, count = totals()?.confirmed ?? 0, result = n?.result
   $('task').dataset.inputRevision = String(snapshot.inputRevision)
   $('home').hidden = true; $('task').hidden = false; $('query-title').textContent = snapshot.query
-  document.title = snapshot.query.slice(0, 28) + ' · 工单检索'; $('breadcrumb').textContent = '我的检索'
+  document.title = snapshot.query.slice(0, 28) + ' · 络寻 CaseWeave'; $('breadcrumb').textContent = '我的检索'
   $('cancel').disabled = stopping || !canStop()
   const status = snapshot.failure || n?.message || (!n ? '需求已保存，后台正在准备检索。' : result ? '本轮核查结束，结果已保存。' : snapshot.question ? '有一处业务范围需要补充，独立工作继续。' : '正在自动检索与核查原文。')
   const failed = snapshot.failure || ['error', 'snapshot_invalid', 'permission_blocked'].includes(n?.status)

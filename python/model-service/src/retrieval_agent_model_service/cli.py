@@ -12,7 +12,7 @@ from .server import serve
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Retrieval Agent local model service")
+    result = argparse.ArgumentParser(description="CaseWeave local model service")
     result.add_argument("--manifest", type=Path, required=True)
     result.add_argument("--embedding-path", type=Path, required=True)
     result.add_argument("--reranker-path", type=Path)

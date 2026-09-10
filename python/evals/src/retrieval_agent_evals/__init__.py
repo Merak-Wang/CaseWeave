@@ -1,4 +1,4 @@
-"""External, deterministic Retrieval Agent evaluation primitives."""
+"""External, deterministic CaseWeave evaluation primitives."""
 
 from .dataset import BronzeCase, BronzeQrel, load_legacy_bronze_cases, verify_legacy_bronze_manifest
 from .models import EvalCase, ProductTrace

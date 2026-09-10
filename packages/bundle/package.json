@@ -1,7 +1,7 @@
 {
   "name": "@retrieval-agent/bundle",
   "version": "0.1.0",
-  "description": "Installable DSH bundle and fixed Retrieval Agent preset",
+  "description": "Installable DSH bundle and fixed CaseWeave preset",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

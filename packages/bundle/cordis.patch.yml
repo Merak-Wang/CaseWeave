@@ -30,7 +30,7 @@
         sandbox: read-only
         approval: ask
         name: 只读
-        description: 只允许读取工作区；工单数据权限仍由 Retrieval Agent Provider 独立执行。
+        description: 只允许读取工作区；工单数据权限仍由 CaseWeave Provider 独立执行。
       workspace-write:
         sandbox: workspace-write
         approval: ask

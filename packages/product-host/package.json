@@ -1,7 +1,7 @@
 {
   "name": "@retrieval-agent/product-host",
   "version": "0.1.0",
-  "description": "Trusted DSH Web and Session adapter for Retrieval Agent Product APIs",
+  "description": "Trusted DSH Web and Session adapter for CaseWeave Product APIs",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

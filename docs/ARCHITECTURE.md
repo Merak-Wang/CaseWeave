@@ -1,4 +1,4 @@
-# Retrieval Agent 架构
+# 络寻 · CaseWeave 架构
 
 本文说明系统的数据流、组件职责与状态边界。产品行为以 [产品规格](PRODUCT_REQUIREMENTS.md) 为准，实际包结构见 [生成依赖图](WORKSPACE_GRAPH.md)。
 

@@ -9,7 +9,7 @@ from .scorers import evaluate_trace
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Score one exported Retrieval Agent trace")
+    parser = argparse.ArgumentParser(description="Score one exported CaseWeave trace")
     parser.add_argument("--case", required=True, type=Path)
     parser.add_argument("--trace", required=True, type=Path)
     args = parser.parse_args()

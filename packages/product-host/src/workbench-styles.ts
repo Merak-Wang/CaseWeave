@@ -45,7 +45,9 @@ svg { width: 19px; height: 19px; flex: none; stroke: currentColor; fill: none; s
 .sidebar { background: var(--sidebar); padding: 28px 16px 20px; position: sticky; top: 0; height: 100dvh; display: flex; flex-direction: column; gap: 28px; min-width: 0; }
 .sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 8px; }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 600; color: var(--text); letter-spacing: .3px; }
-.brand-mark { width: 28px; height: 28px; stroke-width: 1.4; }
+.brand-mark { width: 28px; height: 28px; stroke-width: 1.4; flex-shrink: 0; }
+.brand-name { display: grid; gap: 3px; line-height: 1.15; }
+.brand-name small { font-size: 10px; font-weight: 500; letter-spacing: .5px; color: var(--muted); }
 .new-task { display: flex; align-items: center; gap: 9px; border: 1px solid #dddfd7; border-radius: 10px; padding: 10px 12px; color: var(--text); background: #fafaf7; font-size: 13px; box-shadow: 0 1px 2px #252e2904; }
 .new-task:hover { background: #fff; border-color: #b9c6ba; }
 .new-task kbd { font: 10px/1.5 inherit; margin-left: auto; color: #8b918a; white-space: nowrap; }

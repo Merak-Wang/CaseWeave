@@ -139,7 +139,7 @@ export function modelServiceAction({ ready, manage, baseUrl }) {
 }
 
 export function helpText() {
-  return `Retrieval Agent source launcher
+  return `CaseWeave source launcher
 
 Usage:
   pnpm retrieval-agent setup
@@ -245,7 +245,7 @@ async function ensureProfile(paths, dshBin, environment) {
     throw new Error(`the local ${webProfile} profile does not contain the DSH Base + Web bundles: ${paths.profileRoot}`)
   }
   if (action === 'link') {
-    console.log('Linking the built Retrieval Agent workspace bundle into the persistent DSH profile...')
+    console.log('Linking the built CaseWeave workspace bundle into the persistent DSH profile...')
     run(process.execPath, [dshBin, 'plugin', '--profile', webProfile, 'add', paths.bundleRoot], {
       cwd: paths.root,
       env: dshEnvironment,
@@ -539,14 +539,14 @@ export async function runLocalWeb(forwardedArgs = [], options = {}) {
     RETRIEVAL_AGENT_VECTOR_CACHE_DIR: paths.vectorCacheDir,
     RETRIEVAL_AGENT_RERANKER_ENABLED: normalizedRerankerFlag(environment.RETRIEVAL_AGENT_RERANKER_ENABLED),
   }
-  progress.stage('[startup 8/8] Retrieval Agent Web', `starting with state in ${relative(paths.root, paths.dshHome)}`)
+  progress.stage('[startup 8/8] CaseWeave Web', `starting with state in ${relative(paths.root, paths.dshHome)}`)
   const dsh = spawn(process.execPath, [setup.runtime.dshBin, 'web', ...forwardedArgs], {
     cwd: paths.root,
     env: childEnvironment,
     stdio: 'inherit',
     windowsHide: true,
   })
-  progress.complete('[startup 8/8] Retrieval Agent Web', 'process started')
+  progress.complete('[startup 8/8] CaseWeave Web', 'process started')
   let stopping = false
   const stop = () => {
     stopping = true
@@ -590,7 +590,7 @@ export async function runCli(argv, options = {}) {
     const progress = options.progress ?? createStartupProgressReporter(options.progressStream ?? process.stderr)
     const result = await setupLocalApp({ ...options, progress })
     progress.close()
-    console.log(`Retrieval Agent local profile ready: ${result.paths.dshHome}`)
+    console.log(`CaseWeave local profile ready: ${result.paths.dshHome}`)
     return
   }
   if (parsed.command === 'models') {

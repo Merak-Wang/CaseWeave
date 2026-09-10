@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://retrieval-agent.invalid/schema/workspace.schema.json",
-  "title": "Retrieval Agent workspace capability contract",
+  "title": "CaseWeave workspace capability contract",
   "type": "object",
   "additionalProperties": false,
   "required": [
