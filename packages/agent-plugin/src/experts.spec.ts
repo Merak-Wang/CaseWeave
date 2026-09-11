@@ -1,8 +1,9 @@
+import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import LlmRuntime, { LlmAdapter, CallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { LlmAdapter, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
@@ -103,7 +104,7 @@ class ScriptedExperts extends LlmAdapter {
         coverage: { checked: ['解绑状态与反例'], remaining: [], nextAction: '个案要求已解决，无需继续扩展。', nextActionValue: 'none' } } }
     await new Promise(resolve => setTimeout(resolve, 8))
     yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`${session}-${step}`), name: toolName, arguments: JSON.stringify(args) } }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`${session}-${step}`), name: toolName, arguments: JSON.stringify(args) } }
     yield { type: 'usage', usage: { inputTokens: 500, outputTokens: 100 } }
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
@@ -125,7 +126,7 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
             : { kind: 'finish', reason: 'incomplete', explanation: '当前表达式已枚举，1200 条候选仍需逐项复核；早期欠费反例已取回。' }
         const args = invalid && !(invalid === 'reset' && calls === 2) ? {} : { state_id: header.stateId, judgments: calls === 1 ? [{ candidate_alias: 'c1', verdict: 'exclude', evidence_aliases: ['c1'], reason: '第一个反例只涉及欠费停机。' }] : [], semantic_gaps: [], action }
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`scale-${calls}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`scale-${calls}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
         yield { type: 'usage', usage: { inputTokens: 1800, outputTokens: 100 } }
         yield { type: 'finish', reason: { kind: 'tool-calls' } }
       }
@@ -144,14 +145,14 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
         analyzer: { engine: 'spacy', engineVersion: '1', pipeline: 'fixture', pipelineVersion: '1', lexiconVersion: '1', loaded: true, components: [] }, language: 'zh',
         keywords: ['副卡'], candidates: [], tokens: [], entities: [], triples: [], elapsedMs: 0 }) } })
       installRetrievalTools(ctx, application); installWorkingContext(ctx, application); installRetrievalRuntimeBudget(ctx, application)
-      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
       ctx.llm.registerAdapter(['scale'], new ScaleAdapter())
       const handle = await ctx.agents.create({ sessionId: SessionId('public-scale'), agentOptions: { provider: 'scale', model: 'fixture' } }); dispose = handle.dispose
       handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '查找全部副卡工单' }] }))
       await handle.agent.whenIdle()
       const state = application.current(handle.agent)
       if (invalid) {
-        expect(calls).toBe(invalid === 'reset' ? 5 : 3)
+        expect(calls, JSON.stringify(handle.agent.session.snapshotEvents().filter(e => e.type === 'turn/end'))).toBe(invalid === 'reset' ? 5 : 3)
         expect(state.termination).toBe('budget_exhausted')
         expect(state.stopExplanation).toContain('工具调用死循环')
         expect(state.budget.consecutiveToolErrors).toBe(3)
@@ -160,7 +161,7 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
         expect(foldRetrievalEvents(readRetrievalSessionEvents(handle.agent.session))?.termination).toBe('budget_exhausted')
         return
       }
-      expect(calls).toBe(61)
+      expect(calls, JSON.stringify({surface:handle.agent.session.surface.nodes, events:handle.agent.session.snapshotEvents().filter(e => ['turn/end', 'system/message', 'user/message'].includes(e.type)).map(e => ({seq:e.seq, type:e.type, surfaceOp:e.surfaceOp, reason:e.type === 'turn/end' ? e.data.reason : undefined}))})).toBe(61)
       expect(state.candidates).toHaveLength(1200)
       expect(recovered).toBe(true)
       expect(state.termination).toBe('partial')
@@ -220,7 +221,7 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
         language: 'zh', keywords: ['副卡'], candidates: [], tokens: [], entities: [], triples: [], elapsedMs: 0 }) } })
       installRetrievalTools(ctx, application); installWorkingContext(ctx, application); installRetrievalRuntimeBudget(ctx, application)
       ctx.on('tools/result', (_exec, result) => { if (result.isError) failures.push(result.content) }, { global: true })
-      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
       const expectedWikiReference = useWiki ? (await openWiki('wiki')).read('primary-secondary-card-cross-domain').reference : undefined
       const adapter = new ScriptedExperts(useWiki, questionGate, variant === 'continuation', variant === 'quota', variant === 'broken', expectedWikiReference, pipeline); ctx.llm.registerAdapter(['expert-fixture'], adapter)
       const handle = await ctx.agents.create({ sessionId: SessionId('expert-public-flow'), agentOptions: { provider: 'expert-fixture', model: 'scripted' } }); dispose = handle.dispose
@@ -250,7 +251,7 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
         expect(failures, JSON.stringify({ tasks: state.expertTasks, failures, turns: [...adapter.turns] })).toEqual([])
         expect(state.expertTasks?.every(t => t.actionsUsed === 13 && t.actionsUsed > t.maxActions)).toBe(true)
       } else expect(failures, JSON.stringify({ tasks: state.expertTasks, turns: [...adapter.turns] })).toEqual([])
-      expect(state.expertTasks?.map(t => t.status), JSON.stringify(handle.agent.session.events.filter(e => e.type === 'turn/end'))).toEqual(['completed', 'completed'])
+      expect(state.expertTasks?.map(t => t.status), JSON.stringify(handle.agent.session.snapshotEvents().filter(e => e.type === 'turn/end'))).toEqual(['completed', 'completed'])
       expect(adapter.turns.size).toBe(3)
       for (const request of adapter.requests) {
         const tool = request.tools?.find(t => t.name === 'ticket_decide')

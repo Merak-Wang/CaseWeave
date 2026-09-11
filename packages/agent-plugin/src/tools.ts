@@ -132,7 +132,7 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
       return
     }
     const generation = state.inputGeneration ?? 0, previous = completionRepairs.get(agent)
-    const last = [...agent.session.events].reverse().find(e => e.type === 'assistant/message')
+    const last = [...agent.session.snapshotEvents()].reverse().find(e => e.type === 'assistant/message')
     const reply = last?.type === 'assistant/message' ? JSON.stringify(last.data.message.content) : ''
     const attempts = previous?.generation === generation && previous.reply === reply ? previous.attempts : 0
     if (attempts >= 2) { await application.stopIncomplete(agent, '模型连续三次重复相同答复且未提交有效动作，检测到无进展循环；已保存任务与证据，可调整模型后继续。'); return }

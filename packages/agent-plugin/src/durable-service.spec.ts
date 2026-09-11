@@ -1,3 +1,4 @@
+import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import { createServer } from 'node:http'
 import { mkdtemp, cp, rm, mkdir, readFile, writeFile, realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -8,7 +9,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import LlmRuntime, { LlmAdapter, CallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
@@ -76,7 +77,7 @@ class Adapter extends LlmAdapter {
       const name = options.tools[0].name
       const args = name === 'retrieval_report_review' ? { supported: !this.rejectReport, reason: '可见概览支持副卡解绑场景。' }
         : { paragraphs: [{ text: '已确认记录中的副卡解绑场景与本轮要求一致；应结合所列来源范围使用。', citations: [data.citations[0].id] }] }
-      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`report-${this.reportCalls}`), name, arguments: JSON.stringify(args) } }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`report-${this.reportCalls}`), name, arguments: JSON.stringify(args) } }
       yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
     }
     this.calls++; this.loopRequests.push(options)
@@ -95,7 +96,7 @@ class Adapter extends LlmAdapter {
       action: ask ? { kind: 'clarify', question: '只看上海还是也包括北京？', candidate_aliases: ['c1', 'c2'], evidence_aliases: ['c1', 'c2'] }
         : { kind: 'finish', reason: 'satisfied', explanation: '上海副卡解绑工单已按可见摘要复核。', coverage: { checked: ['上海地域和副卡解绑摘要'], remaining: [], nextAction: '无其他个案要求', nextActionValue: 'none' } } }
     yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`fixture-${this.calls}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`fixture-${this.calls}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
     yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 60 } }
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
@@ -113,7 +114,7 @@ class DeliveryScaleAdapter extends LlmAdapter {
     for (const c of fresh) this.seen.add(c.alias)
     const args = { state_id: header.stateId, judgments: fresh.map(c => ({ candidate_alias: c.alias, verdict: 'accept', evidence_aliases: [c.alias], reason: '受控概览明确描述副卡解绑场景。' })), semantic_gaps: [],
       action: this.seen.size >= this.count ? { kind: 'finish', reason: 'satisfied', explanation: '合成语料逐条通过当前概览复核。' } : header.history.accepted + fresh.length < header.retrievalObservation.cumulativeCandidateCount ? { kind: 'inspect', next_window: true } : { kind: 'search', continue_ranking: true } }
-    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`delivery-scale-${this.calls}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`delivery-scale-${this.calls}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
     yield { type: 'usage', usage: { inputTokens: 2000, outputTokens: 700 } }
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
@@ -150,7 +151,7 @@ class RecoveringExpertAdapter extends LlmAdapter {
           : { kind: 'clarify', question: '是否仅查询上海？', candidate_aliases: ['c1'], evidence_aliases: ['c1'] } }
     }
     yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`recovery-${options.sessionId}-${step}`), name: expert ? 'ticket_expert' : 'ticket_decide', arguments: JSON.stringify(args) } }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`recovery-${options.sessionId}-${step}`), name: expert ? 'ticket_expert' : 'ticket_decide', arguments: JSON.stringify(args) } }
     yield { type: 'usage', usage: { inputTokens: 300, outputTokens: 60 } }
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
@@ -198,7 +199,7 @@ class LearningAdapter extends Adapter {
         action: { kind: 'finish', reason: 'satisfied', explanation: '本次个案已读处理原文并复核。', coverage: { checked: ['处理原文与用户反馈'], remaining: [], nextAction: '无其他个案要求', nextActionValue: 'none' } } }
     }
     yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`learning-${this.calls}`), name, arguments: JSON.stringify(args) } }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`learning-${this.calls}`), name, arguments: JSON.stringify(args) } }
     yield { type: 'usage', usage: { inputTokens: 600, outputTokens: 150 } }
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
@@ -315,7 +316,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       expect(resumedMessages.some(m => m.role === 'assistant')).toBe(false)
       expect(JSON.stringify(resumedMessages)).toContain('这个可能不相关，请复核。')
       const agent = await f.agentFor(id)
-      expect(agent.session.events.some(e => e.type === 'assistant/message')).toBe(true)
+      expect(agent.session.snapshotEvents().some(e => e.type === 'assistant/message')).toBe(true)
       const activity = await (await fetch(f.url + '/' + id + '/activity?after=0')).json() as { items: { seq: number; text: string; kind: string }[]; after: number; more: boolean }
       expect(activity.items, JSON.stringify({ activity, errors: f.errors })).toBeDefined()
       expect(activity.items.filter(i => i.kind === 'user').map(i => i.text)).toEqual(['找副卡解绑工单', '只看上海的工单', '这个可能不相关，请复核。'])
@@ -1090,7 +1091,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     if (learning) new WikiLearningService(ctx, application, learning.root)
     installAutomaticRetrievalStart(ctx, application, { analyzer }); installRetrievalTools(ctx, application); installRetrievalRuntimeBudget(ctx, application)
     ctx.on('tools/result', (_exec, result) => { if (result.isError) errors.push(result.content) })
-    await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+    await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
     const assignments = expertWikiRoot ? (await openWiki(expertWikiRoot)).catalog().slice(0, 3).map((d, i) => ({ domain_id: d.id,
       goal: '核对' + d.title + '的业务边界与处理记录', scope: i === 0 ? '范围确认' : '独立取证', candidate_aliases: ['c1'], knowledge_ids: [d.knowledgeRefs[0]!] })) : undefined
     const adapter = deliveryScale ? new DeliveryScaleAdapter(deliveryScale) : learning?.adapter ?? (experts ? new RecoveringExpertAdapter(gate, assignments) : new Adapter(ask, broken)); ctx.llm.registerAdapter(['phase2-fixture'], adapter)

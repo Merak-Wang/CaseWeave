@@ -51,8 +51,7 @@ function originalQuery(messages: readonly UserMessage[]): string | undefined {
 }
 
 /**
- * 在最后一条 direct-user 输入处切开已准入消息：head 在耗时检索前落库，
- * 快照随后追加，tail（如下游上下文）保持原有相对顺序。
+ * 在最后一条 direct-user 输入处切开已准入消息；返回 DSH 时保留原文、快照、下游上下文的顺序。
  */
 function splitAfterLastDirectUser(
   messages: readonly UserMessage[],
@@ -68,18 +67,22 @@ function splitAfterLastDirectUser(
 }
 
 /**
- * DSH 会把已准入但消息为空的第一步视为无需 LLM 的已完成轮次，因此无模型分支在返回前
- * 主动持久化消息；耗时分支之前的提前落库则保证长检索期间用户输入对 Session/界面可见。
+ * Persist accepted input for immediate display, including turns that need no model.
+ * DSH V3 alone admits model-surface messages after its protected system head.
+ * This log-only fact never becomes a second model input or a product decision.
  */
-function persistAcceptedMessages(agent: Agent, messages: readonly UserMessage[]): void {
+function persistAcceptedMessages(agent: Agent, messages: readonly UserMessage[], turn: number): void {
   for (const message of messages) {
-    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    if (message.source.kind !== 'user') continue
+    if (agent.session.snapshotEvents().some(event => event.type === 'retrieval/input-accepted' && event.data.messageId === message.id)) continue
+    agent.session.append('retrieval/input-accepted', { messageId: message.id,
+      text: message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n'), turn })
   }
 }
 
 /**
  * 在第一次模型请求前用已接受的 direct-user 输入启动检索，并把持久化状态快照追加到同一次请求。
- * 用户输入在进入耗时的首轮分析与排名之前落库；返回给 DSH 的决定只携带尚未记录的增量消息。
+ * 输入的显示回执在耗时分析前落库；模型消息交给 DSH 在合法步骤内写入。
  */
 export function installAutomaticRetrievalStart(
   ctx: Context,
@@ -87,7 +90,7 @@ export function installAutomaticRetrievalStart(
   config: AutomaticRetrievalStartConfig,
 ): void {
   ctx.on('agent/pre-step', async (
-    { agent, messages: proposed, signal },
+    { agent, messages: proposed, signal, turn },
     next,
   ): Promise<PreStepDecision> => {
     const decision = await next()
@@ -99,7 +102,7 @@ export function installAutomaticRetrievalStart(
 
     if (query !== undefined && application.receiveUserInput) {
       await application.receiveUserInput(agent, query, String(direct.at(-1)!.id))
-      persistAcceptedMessages(agent, decision.messages)
+      persistAcceptedMessages(agent, decision.messages, turn)
       return { kind: 'enter', messages: [] }
     }
     if (application.driveAllowed && !application.driveAllowed(agent)) return { kind: 'reject' }
@@ -111,20 +114,20 @@ export function installAutomaticRetrievalStart(
     if (restored === true && authorized !== undefined && authorized.phase === 'stopped'
       && (['permission_blocked', 'backend_error'].includes(authorized.termination)
         || (authorized.termination === 'snapshot_invalid' && query === undefined))) {
-      persistAcceptedMessages(agent, decision.messages)
+      persistAcceptedMessages(agent, decision.messages, turn)
       return { kind: 'enter', messages: [] }
     }
     if (query === undefined) return decision
 
     // 用户输入先落库再进入 spaCy 分析与首轮 Hybrid 排名；长检索不再把消息藏到失败之后。
     const { head, tail } = splitAfterLastDirectUser(decision.messages)
-    persistAcceptedMessages(agent, head)
+    persistAcceptedMessages(agent, head, turn)
 
     const current = application.currentOrUndefined(agent)
     const active = current !== undefined && current.phase !== 'stopped'
     if (active && /^(?:取消|停止|算了|cancel|stop)[。.!！\s]*$/iu.test(query.trim())) {
       await application.cancel(agent)
-      persistAcceptedMessages(agent, tail)
+      persistAcceptedMessages(agent, tail, turn)
       return { kind: 'enter', messages: [] }
     }
 
@@ -174,7 +177,7 @@ export function installAutomaticRetrievalStart(
     if (signal.aborted) return { kind: 'enter', messages: [] }
 
     if (state.phase === 'stopped' && ['permission_blocked', 'snapshot_invalid', 'backend_error'].includes(state.termination)) {
-      persistAcceptedMessages(agent, tail)
+      persistAcceptedMessages(agent, tail, turn)
       return { kind: 'enter', messages: [] }
     }
 
@@ -189,12 +192,12 @@ export function installAutomaticRetrievalStart(
       },
     })
     if (state.phase === 'stopped') {
-      persistAcceptedMessages(agent, [snapshot, ...tail])
+      persistAcceptedMessages(agent, tail, turn)
       return { kind: 'enter', messages: [] }
     }
     return {
       kind: 'enter',
-      messages: [snapshot, ...tail],
+      messages: [...head, snapshot, ...tail],
     }
   }, { prepend: true })
 }

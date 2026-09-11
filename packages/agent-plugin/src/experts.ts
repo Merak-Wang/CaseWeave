@@ -112,7 +112,7 @@ export class ExpertCoordinator {
       await this.pendingMetrics.get(agent)
       const task = this.current(branch).expertTasks!.find(t => t.id === branch.task.id)!
       if (task.status !== 'running' || task.finding || (task.repeatedToolFailure?.count ?? 0) >= 4) return
-      const last = [...agent.session.events].reverse().find(e => e.type === 'assistant/message')
+      const last = [...agent.session.snapshotEvents()].reverse().find(e => e.type === 'assistant/message')
       const reply = last?.type === 'assistant/message' ? JSON.stringify(last.data.message.content) : ''
       const previous = this.repeatedReplies.get(agent)
       const count = previous?.reply === reply ? previous.count + 1 : 1

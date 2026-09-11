@@ -1,8 +1,9 @@
+import { unusedInbox } from '../../../tests/support/unused-inbox.js'
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, {
-  CallId,
-  deepFreeze,
+  ToolCallId,
   isAgentLoopRequest,
   LlmAdapter,
   markAgentLoopRequest,
@@ -39,7 +40,7 @@ function fixtureAgent(ctx: Context): { readonly agent: Agent; readonly state: Re
   const session = Session.create(SessionId('runtime-budget-agent'))
   const direct = createUserMessage({ content: [{ type: 'text', text: '帮我找副卡工单' }], source: { kind: 'user' } })
   session.append('request/header', {
-    header: canonicalHeader({ config: { provider: 'mock', model: 'model' }, system: 'retrieval policy' }),
+    header: canonicalHeader({ config: { provider: 'mock', model: 'model' } }),
     reason: 'initial',
   })
   session.append('user/message', direct, { surfaceOp: 'append' })
@@ -53,7 +54,7 @@ function fixtureAgent(ctx: Context): { readonly agent: Agent; readonly state: Re
     id: session.id,
     options: { provider: 'mock', model: 'model' },
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox: unusedInbox,
     status: 'running',
     ctx,
     send() {}, followup() {}, steer() {}, inject() {}, cancel,
@@ -183,7 +184,7 @@ describe('retrieval runtime budget boundary', () => {
     const result = await runtime(true)
     try {
       await result.ctx.tools.execute({
-        signal: SIGNAL, callId: CallId('missing-ticket-tool'), name: 'ticket_missing', arguments: {}, agent: result.agent,
+        signal: SIGNAL, callId: ToolCallId('missing-ticket-tool'), name: 'ticket_missing', arguments: {}, agent: result.agent,
       })
       await Promise.resolve()
       expect(result.recordToolCall).toHaveBeenCalledWith(result.agent, expect.objectContaining({ success: false }))

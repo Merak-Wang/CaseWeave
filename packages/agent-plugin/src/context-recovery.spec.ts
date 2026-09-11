@@ -1,3 +1,4 @@
+import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -28,7 +29,7 @@ describe('context recovery through the actual DSH request loop', () => {
     try {
       await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime)
       await ctx.plugin(ToolRuntime); await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)
-      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
       const handle = await ctx.agents.create({ sessionId: SessionId('context-read-batches') })
       dispose = handle.dispose
       for (let i = 1; i <= 5; i++) handle.agent.session.append('user/message', createUserMessage({
@@ -66,19 +67,19 @@ describe('context recovery through the actual DSH request loop', () => {
       await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime)
       await ctx.plugin(ToolRuntime); await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)
       installContextRecovery(ctx, { owns: () => true, limit: () => 32768, render: async () => summary })
-      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
       const adapter = new Adapter(failFirst); ctx.llm.registerAdapter(['context-fixture'], adapter)
       const handle = await ctx.agents.create({ sessionId: SessionId(`context-recovery-${failFirst}`), agentOptions: { provider: 'context-fixture', model: 'fixture' } })
       dispose = handle.dispose
       handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: original }] }))
       await handle.agent.whenIdle()
-      const failures = handle.agent.session.events.filter(e => e.type === 'turn/end')
+      const failures = handle.agent.session.snapshotEvents().filter(e => e.type === 'turn/end')
       expect(adapter.requests, JSON.stringify(failures)).toHaveLength(failFirst ? 2 : 1)
       expect(JSON.stringify(adapter.requests.at(-1)?.messages)).toContain(summary)
       expect(contextCompactions(handle.agent)).toBe(1)
       expect(contextCompressionStats(handle.agent)).toMatchObject({ workingSetCount: 0, capacityCount: 1,
         last: { reason: failFirst ? 'provider_overflow' : 'window_pressure', limit: 32768 } })
-      expect(handle.agent.session.events.some(e => e.type === 'user/message' && e.data.content.some(b => b.type === 'text' && b.text === original))).toBe(true)
+      expect(handle.agent.session.snapshotEvents().some(e => e.type === 'user/message' && e.data.content.some(b => b.type === 'text' && b.text === original))).toBe(true)
       expect(handle.agent.status).toBe('idle')
     } finally { await dispose?.(); await ctx.fiber.dispose() }
   })

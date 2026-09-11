@@ -33,6 +33,8 @@ Finding 包含：结论类型、工单/证据引用、适用要求、支持与�
 
 主/专家无固定动作、请求次数或时间完成截止；工具错误返回具体字段和可执行修正，只检测同参数、同错误且无有效进展的重复循环。用户补充递增 inputGeneration，旧分支转 superseded，迟到产物拒绝；旧范围判断失去当前资格，但来源、候选、轨迹与历史核查路径保留。进程内短状态操作按父任务顺序提交，独立模型请求并发；MySQL 短事务继续校验输入代次与 worker fence。后台专家新增证据/发现与主判断兼容时不制造无效版本冲突，真正条件改变仍拒绝旧提交。迟到分歧会重新打开受影响判断，不能由先提交者覆盖。
 
+页面快照和 SSE 的来源重新授权独立于慢搜索写入队列，读取 SQL 当前状态并向 Provider 重新核验。状态或输入版本在核验期间变化则重试；授权失效等状态变化仍通过 SQL 乐观版本检查提交，不能覆盖新输入或较新的证据。
+
 ## 2. 分歧的处理
 
 不以投票数或“专家置信度平均值”判定真伪。多 Agent 辩论研究提示共识压力可能使正确判断转向错误，但其基准不等于通信工单；这里借鉴的是检查分歧依据而非照搬论文算法。[Free-MAD](https://arxiv.org/abs/2509.11035)。
@@ -94,6 +96,10 @@ Finding 包含：结论类型、工单/证据引用、适用要求、支持与�
 当前实现把待答主判断作业置为 waiting，已获 Provider 游标的独立 `page` 作业继续枚举且保留原 questionId。专家在 Finding 中提交问题后，主协调器可以立即继续并提出产品问题，其余独立专家继续运行；持久 worker 等这些分支结束后才释放当前租约。Host 替换时新 worker 从已持久化的 pending/running ExpertTask 重建子会话，保留分支身份、输入代次、额度和旧 manifest，跳过已完成分支；主 Agent 不重复推理或重新提问。纯上下文投影和计量发生提交冲突时，在同一输入版本下重算，最多重试 12 次，不重发 Provider I/O。条件修订或租约失效仍拒绝提交。分支粒度当前限于显式 ExpertTask，不是通用 DAG 调度引擎。
 
 ## 6. DSH 接线与恢复
+
+当前 DSH 为 `0.1.5-rc.2`。读取日志使用 `snapshotEvents()`/`eventAt()`，按需查询序号而不持有可变事件数组。Persona 使用 prefix/suffix 配置，系统指令由 DSH V3 的 `system/message` 保存；上下文压缩分别替换连续的普通消息范围，保留系统头和历史系统增量。
+
+JSONL 预览的已接受输入先以 `retrieval/input-accepted` 显示回执落盘，包含原消息 ID、原文和轮次，快查期间及无需模型的终态均可显示。只有 DSH loop 在开始步骤并写入系统消息后才准入对应 `user/message`；客户端看到同一消息 ID 后隐藏显示回执，避免重复。回执不进入模型表面或领域事件重放。数据库工作台继续从 SQL 命令和任务状态呈现用户输入。
 
 安装版 DSH 的 followup、whenIdle、cancel、pre-step、ToolRuntime 与 Session 镜像已接通持久 worker。专家验收实际调用 rc.2 的 subagent spawn provider、skill register/get 和 userQuestions.ask；后者对被委派子 Agent 返回 DELEGATED_CALLER，因此专家通过 Finding 向主 Agent 转交问题。Cordis 插件作用域用 `ctx.get` 查询可选服务，不能假定根 Context 中可直接访问的服务在挂载 preset 后仍能直接访问。
 

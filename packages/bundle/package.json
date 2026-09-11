@@ -68,15 +68,21 @@
     "@retrieval-agent/product-host": "workspace:*",
     "@retrieval-agent/query-understanding": "workspace:*",
     "@retrieval-agent/ui-ticket-results": "workspace:*",
-    "@deepseek-ai/schemastery": "3.18.1"
+    "@deepseek-ai/schemastery": "3.18.2"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-agent-presets": "0.1.1-rc.2"
+    "@deepseek-ai/dsh-persona": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-compaction-basic": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.1.5-rc.2",
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-agent-presets": "0.1.5-rc.2"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-agent-presets": "0.1.1-rc.2"
+    "@deepseek-ai/dsh-persona": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-compaction-basic": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.1.5-rc.2",
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-agent-presets": "0.1.5-rc.2"
   },
   "publishConfig": {
     "access": "public"

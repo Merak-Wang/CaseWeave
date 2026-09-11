@@ -1,5 +1,6 @@
+import { unusedInbox } from '../../../tests/support/unused-inbox.js'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { Inbox, agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import {
@@ -18,7 +19,7 @@ function fakeAgent(session: Session): Agent {
     id: session.id,
     options: {},
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox: unusedInbox,
     status: 'running',
     ctx: new Context(),
     send() {}, followup() {}, steer() {}, inject() {}, cancel() {},
@@ -55,7 +56,7 @@ describe('retrieval presentation anchors', () => {
         { turn: 1, step: 1, signal: SIGNAL },
         () => Promise.resolve({ provider: 'test', model: 'test' }),
       )
-      const candidateAnchor = session.events.find(event => event.type === RETRIEVAL_PRESENTATION_EVENT_TYPE)
+      const candidateAnchor = session.snapshotEvents().find(event => event.type === RETRIEVAL_PRESENTATION_EVENT_TYPE)
       expect(candidateAnchor?.seq).toBeGreaterThan(queryEvent.seq)
       expect(candidateAnchor?.data).toMatchObject({ phase: 'candidates', turn: 1, step: 1 })
 
@@ -67,7 +68,7 @@ describe('retrieval presentation anchors', () => {
       await agentEvents(ctx, agent).serial('agent/turn-stopping', { turn: 1, signal: SIGNAL })
       await agentEvents(ctx, agent).serial('agent/turn-stopping', { turn: 1, signal: SIGNAL })
 
-      const anchors = session.events.filter(event => event.type === RETRIEVAL_PRESENTATION_EVENT_TYPE)
+      const anchors = session.snapshotEvents().filter(event => event.type === RETRIEVAL_PRESENTATION_EVENT_TYPE)
       expect(anchors).toHaveLength(2)
       expect(anchors[1]?.seq).toBeGreaterThan(lateToolSurface.seq)
       expect(anchors[1]?.data).toMatchObject({ phase: 'result', turn: 1 })
@@ -89,7 +90,7 @@ describe('retrieval presentation anchors', () => {
 
       agentEvents(ctx, agent).emit('agent/status', { status: 'idle' })
 
-      expect(session.events.find(event => event.type === RETRIEVAL_PRESENTATION_EVENT_TYPE)?.data)
+      expect(session.snapshotEvents().find(event => event.type === RETRIEVAL_PRESENTATION_EVENT_TYPE)?.data)
         .toMatchObject({ phase: 'result', turn: 3, retrievalId: state.retrievalId })
     } finally {
       await ctx.fiber.dispose()

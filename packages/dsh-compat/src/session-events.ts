@@ -5,19 +5,22 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {
   RetrievalDomainEvent,
   RetrievalPresentationAnchor,
+  RetrievalInputAccepted,
 } from '@retrieval-agent/contracts'
 import {
   REQUIRED_RETRIEVAL_EVENT_TYPES,
   RETRIEVAL_PRESENTATION_EVENT_TYPE,
+  RETRIEVAL_INPUT_ACCEPTED_EVENT_TYPE,
 } from '@retrieval-agent/contracts'
 
 const require = createRequire(import.meta.url)
 const sessionPackage = require('@deepseek-ai/dsh-session/package.json') as { readonly version?: unknown }
 
-export const PINNED_DSH_SESSION_VERSION = '0.1.1-rc.2' as const
+export const PINNED_DSH_SESSION_VERSION = '0.1.5-rc.2' as const
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    'retrieval/input-accepted': RetrievalInputAccepted
     'retrieval/query-contracted': { readonly event: RetrievalDomainEvent<'retrieval/query-contracted'> }
     'retrieval/snapshot-opened': { readonly event: RetrievalDomainEvent<'retrieval/snapshot-opened'> }
     'retrieval/search-completed': { readonly event: RetrievalDomainEvent<'retrieval/search-completed'> }
@@ -46,6 +49,7 @@ declare module '@deepseek-ai/dsh-session/types' {
 const REQUIRED_RETRIEVAL_SESSION_EVENT_TYPES = Object.freeze([
   ...REQUIRED_RETRIEVAL_EVENT_TYPES,
   RETRIEVAL_PRESENTATION_EVENT_TYPE,
+  RETRIEVAL_INPUT_ACCEPTED_EVENT_TYPE,
 ] as const)
 
 export interface DshSessionCompatibilityReport {
@@ -102,7 +106,7 @@ function resolveRuntimeSessionRegistry(entrypoint: string | undefined): Set<stri
 /**
  * Install the one temporary out-of-tree event-vocabulary adaptation.
  *
- * DSH 0.1.1-rc.2 exposes the generated set but not a keyed downstream
+ * DSH 0.1.5-rc.2 exposes the generated set but not a keyed downstream
  * registration API. This mutation is deliberately centralized and guarded by
  * an exact version handshake so it fails closed when DSH changes.
  */
@@ -144,7 +148,7 @@ export function appendRetrievalPresentationAnchor(
   session: Session,
   anchor: RetrievalPresentationAnchor,
 ): void {
-  const exists = session.events.some(event => event.type === RETRIEVAL_PRESENTATION_EVENT_TYPE
+  const exists = session.snapshotEvents().some(event => event.type === RETRIEVAL_PRESENTATION_EVENT_TYPE
     && event.data.retrievalId === anchor.retrievalId
     && event.data.phase === anchor.phase)
   if (!exists) session.append(RETRIEVAL_PRESENTATION_EVENT_TYPE, anchor)
@@ -182,7 +186,7 @@ export function appendRetrievalSessionEvent(session: Session, event: RetrievalDo
 export function readRetrievalSessionEvents(session: Session): readonly RetrievalDomainEvent[] {
   const known = new Set<string>(REQUIRED_RETRIEVAL_EVENT_TYPES)
   const result: RetrievalDomainEvent[] = []
-  for (const sessionEvent of session.events) {
+  for (const sessionEvent of session.snapshotEvents()) {
     if (!known.has(sessionEvent.type)) continue
     const data = sessionEvent.data as { readonly event?: unknown }
     const event = data.event

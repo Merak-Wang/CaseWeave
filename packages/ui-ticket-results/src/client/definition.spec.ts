@@ -1,6 +1,7 @@
 import type {
   ConversationMatch,
-} from '@deepseek-ai/dsh-client-runtime/client'
+  ConversationStartMatch,
+} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import {
   RETRIEVAL_PRESENTATION_EVENT_TYPE,
   RetrievalId,
@@ -115,10 +116,11 @@ const stopped = makeRetrievalEvent({
   data: { state: stoppedState },
 })
 
+function match(seq: number, event: RetrievalDomainEvent, role: 'start'): ConversationStartMatch
+function match(seq: number, event: RetrievalDomainEvent, role: 'update'): ConversationMatch
 function match(seq: number, event: RetrievalDomainEvent, role: 'start' | 'update'): ConversationMatch {
   return {
-    event: { seq, time: 0, type: event.type, data: { event } } as ConversationMatch['event'],
-    view: undefined,
+    event: { seq, time: 0, type: event.type, data: { event } } as ConversationStartMatch['event'],
     role,
     location: { kind: 'session' },
   }
@@ -132,7 +134,6 @@ function anchorMatch(seq: number, phase: 'candidates' | 'result'): ConversationM
       type: RETRIEVAL_PRESENTATION_EVENT_TYPE,
       data: { retrievalId, phase, turn: 1, ...(phase === 'candidates' ? { step: 1 } : {}) },
     } as ConversationMatch['event'],
-    view: undefined,
     role: 'update',
     location: { kind: 'session' },
   }

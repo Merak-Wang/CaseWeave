@@ -1,6 +1,6 @@
 /// <reference path="../css-modules.d.ts" />
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('./CandidatePanel.js', () => ({ CandidatePanel: () => null }))
@@ -13,7 +13,7 @@ describe('ticket-results client registration', () => {
   it('shadows generic assistant prose while retaining the deterministic candidate renderer', () => {
     const registered: Array<{ readonly name: string; readonly key?: string; readonly priority?: number }> = []
     const ctx = {
-      conversationEvents: { register: vi.fn() },
+      uiConversation: { events: { register: vi.fn() } },
       slots: {
         inject: (_name: string, install: () => unknown) => install(),
         register: (options: { readonly name: string; readonly key?: string; readonly priority?: number }) => {

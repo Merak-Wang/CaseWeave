@@ -1,8 +1,8 @@
 import type {
-  ChatConversationViewNode,
   ConversationMatch,
   ConversationNodeDefinition,
-} from '@deepseek-ai/dsh-client-runtime/client'
+} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ChatConversationViewNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import {
   RETRIEVAL_PRESENTATION_EVENT_TYPE,
@@ -18,7 +18,7 @@ interface CandidateConversationState {
   readonly events: readonly RetrievalDomainEvent[]
 }
 
-declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
+declare module '@deepseek-ai/dsh-client-ui-chat/client' {
   interface ChatNodeDataMap {
     'ticket-candidates': ReturnType<typeof projectTicketCandidateNode>
   }

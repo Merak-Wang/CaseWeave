@@ -22,7 +22,7 @@ import {
 
 describe('DSH Session compatibility boundary', () => {
   it('fails closed for an unreviewed DSH version', () => {
-    expect(() => { assertCompatibleDshVersion('0.1.2') }).toThrow(/expected 0\.1\.1-rc\.2/u)
+    expect(() => { assertCompatibleDshVersion('0.1.2') }).toThrow(`expected ${PINNED_DSH_SESSION_VERSION}`)
   })
 
   it('registers every required retrieval event idempotently', () => {
@@ -92,8 +92,8 @@ describe('DSH Session compatibility boundary', () => {
     appendRetrievalSessionEvent(session, event)
 
     expect(readRetrievalSessionEvents(session)).toEqual([event])
-    expect(session.events[0]).toMatchObject({ type: 'retrieval/stopped', data: { event } })
-    expect(Object.isFrozen(session.events[0]?.data)).toBe(true)
+    expect(session.snapshotEvents()[0]).toMatchObject({ type: 'retrieval/stopped', data: { event } })
+    expect(Object.isFrozen(session.snapshotEvents()[0]?.data)).toBe(true)
   })
 
   it('records each presentation phase once without polluting domain replay', () => {
@@ -104,11 +104,11 @@ describe('DSH Session compatibility boundary', () => {
     appendRetrievalPresentationAnchor(session, { retrievalId, phase: 'candidates', turn: 1, step: 2 })
     appendRetrievalPresentationAnchor(session, { retrievalId, phase: 'result', turn: 1 })
 
-    expect(session.events.map(event => event.type)).toEqual([
+    expect(session.snapshotEvents().map(event => event.type)).toEqual([
       RETRIEVAL_PRESENTATION_EVENT_TYPE,
       RETRIEVAL_PRESENTATION_EVENT_TYPE,
     ])
-    expect(session.events.map(event => event.data)).toEqual([
+    expect(session.snapshotEvents().map(event => event.data)).toEqual([
       { retrievalId, phase: 'candidates', turn: 1, step: 1 },
       { retrievalId, phase: 'result', turn: 1 },
     ])

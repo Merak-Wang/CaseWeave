@@ -15,7 +15,7 @@ describe('SessionRetrievalEventJournal', () => {
     })
     first.append(retrievalId, 'retrieval/stopped', { reason: 'cancelled', remainingGapKinds: ['coverage'] })
 
-    const replayed = Session.create(SessionId('replayed-session'), source.events)
+    const replayed = Session.create(SessionId('replayed-session'), source.snapshotEvents())
     const second = new SessionRetrievalEventJournal(replayed, {
       now: () => new Date('2026-08-27T00:00:01.000Z'),
       eventId: () => 'event-1',

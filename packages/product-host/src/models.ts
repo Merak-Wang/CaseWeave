@@ -3,12 +3,12 @@ import { installModelSelection, type Agent, type ModelSelection, type ModelSelec
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { Config as ProviderConfig, supportedProtocols, type PiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { RetrievalError } from '@retrieval-agent/contracts'
 
-const NS = settingsNamespace('llm-pi-ai')
+const NS = 'llm-pi-ai'
 const ENDPOINT = '/api/retrieval-agent/models'
 const invalid = (message: string): never => { throw new RetrievalError('INVALID_REQUEST', message) }
 
@@ -20,7 +20,7 @@ export class WorkbenchModels {
     let selection = this.selections.get(agent)
     if (selection) return selection
     let saved: ModelSelection | undefined
-    for (const e of agent.session.events) {
+    for (const e of agent.session.snapshotEvents()) {
       if (e.type !== 'user/message' || e.data.source.kind !== 'plugin' || e.data.source.plugin !== 'retrieval-agent-models' || e.data.source.form !== 'snapshot') continue
       const section = e.data.source.sections.find(s => s.name === 'model-selection')
       if (section) saved = JSON.parse(section.text) as ModelSelection
@@ -70,7 +70,7 @@ export class WorkbenchModels {
     if (v.action === 'discover') {
       return { models: await this.ctx.llm.discoverModels(NS, { provider,
         ...(v.baseURL ? { baseURL: String(v.baseURL) } : {}), ...(v.api ? { api: String(v.api) } : {}),
-        ...(v.apiKey ? { apiKey: String(v.apiKey) } : {}), signal: AbortSignal.timeout(20000) }) }
+        ...(v.apiKey ? { apiKey: String(v.apiKey) } : {}) }, AbortSignal.timeout(20000)) }
     }
     if (typeof v.model !== 'string' || !v.model.trim() || v.model.length > 256) invalid('请输入模型 ID。')
     const model = (v.model as string).trim()

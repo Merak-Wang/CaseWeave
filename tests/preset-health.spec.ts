@@ -9,7 +9,7 @@ interface PresetRecord {
 }
 
 interface AgentPresetsModule {
-  readonly scanRoot: (root: { readonly path: string; readonly trust: 'shipped' }) => Promise<readonly PresetRecord[]>
+  readonly scanRoot: (root: { readonly path: string; readonly trust: 'shipped' }, harnessBase: string) => Promise<readonly PresetRecord[]>
 }
 
 let agentPresets: AgentPresetsModule
@@ -27,7 +27,7 @@ describe('shipped CaseWeave preset', () => {
     const presets = await agentPresets.scanRoot({
       path: resolve('packages/bundle/presets'),
       trust: 'shipped',
-    })
+    }, pathToFileURL(resolve('packages/bundle') + '/').href)
     const retrievalAgent = presets.find(preset => preset.id === 'retrieval-agent')
 
     expect(retrievalAgent).toBeDefined()

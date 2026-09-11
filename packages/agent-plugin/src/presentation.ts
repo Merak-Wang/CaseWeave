@@ -45,7 +45,7 @@ export function installRetrievalPresentationAnchors(
   // Publish the same idempotent terminal anchor when that driver becomes idle.
   ctx.on('agent/status', ({ agent, status }) => {
     if (status !== 'idle') return
-    const boundary = agent.session.events.findLast(event => event.type === 'turn/start')
+    const boundary = agent.session.snapshotEvents().findLast(event => event.type === 'turn/start')
     if (boundary?.type === 'turn/start') anchorStoppedResult(agent, application, boundary.data.turn)
   })
 }

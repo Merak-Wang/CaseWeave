@@ -1,3 +1,4 @@
+import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -30,7 +31,7 @@ describe('context recovery and provider retry ownership', () => {
       })
       installContextRecovery(ctx, { owns: () => true, limit: () => 32768,
         render: async () => { projections++; return '已压缩的任务导航' } })
-      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
       class Adapter extends LlmAdapter {
         override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
           requests.push(options)

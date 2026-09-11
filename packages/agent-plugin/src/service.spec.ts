@@ -1,8 +1,10 @@
+import SessionProjection from '@deepseek-ai/dsh-session-projection'
+import { unusedInbox } from '../../../tests/support/unused-inbox.js'
 import { Context, Service } from '@deepseek-ai/cordis'
-import AgentRegistry, { agentEvents, Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import {
-  CallId,
+  ToolCallId,
   createUserMessage,
   LlmAdapter,
   default as LlmRuntime,
@@ -68,7 +70,7 @@ function sessionAgent(session: Session): Agent {
     id: session.id,
     options: {},
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox: unusedInbox,
     status: 'running',
     ctx: new Context(),
     send() {}, followup() {}, steer() {}, inject() {}, cancel() {},
@@ -323,7 +325,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
       installRetrievalTools(ctx, ctx.retrievalAgent)
       installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
-      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
 
       const adapter = new FirstRequestAnswerAdapter()
       ctx.llm.registerAdapter(['fixture-loop'], adapter)
@@ -339,8 +341,8 @@ describe('RetrievalAgentService Cordis binding', () => {
       await handle.agent.whenIdle()
 
       expect(adapter.requests).toHaveLength(3)
-      // 用户输入在 pre-step 提前落库后不能被 DSH 重复追加；快照是 plugin 来源，不计入。
-      expect(handle.agent.session.events
+      // 显示回执与模型准入共享消息 ID；DSH 只追加一份 direct-user 模型消息。
+      expect(handle.agent.session.snapshotEvents()
         .filter(event => event.type === 'user/message' && JSON.stringify(event.data).includes('"kind":"user"')))
         .toHaveLength(1)
       const request = adapter.requests[0]!
@@ -364,7 +366,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       expect(requests).toHaveLength(3)
       expect(requests[0]?.data).toMatchObject({ accepted: true })
       expect(requests[0]?.data.estimatedInputTokens).toBeLessThanOrEqual(32_768)
-      expect(handle.agent.session.events.filter(event => event.type === 'request/header')).toHaveLength(1)
+      expect(handle.agent.session.snapshotEvents().filter(event => event.type === 'request/header')).toHaveLength(1)
     } finally {
       if (disposeAgent !== undefined) await disposeAgent()
       await ctx.fiber.dispose()
@@ -574,17 +576,10 @@ describe('RetrievalAgentService Cordis binding', () => {
       expect(decision.kind).toBe('enter')
       if (decision.kind !== 'enter') throw new Error('pre-step unexpectedly rejected')
       expect(decision.messages).toEqual([])
-      const persistedMessages = session.events
-        .filter(event => event.type === 'user/message')
-        .map(event => event.data)
-      expect(persistedMessages[0]).toEqual(direct)
-      expect(persistedMessages[2]).toEqual(downstreamContext)
-      const snapshotMessage = persistedMessages[1]
-      expect(snapshotMessage?.source).toMatchObject({
-        kind: 'plugin',
-        plugin: 'retrieval-agent',
-        form: 'snapshot',
-      })
+      expect(session.snapshotEvents().filter(event => event.type === 'retrieval/input-accepted').map(event => event.data))
+        .toEqual([{ messageId: direct.id, text: rawQuery, turn: 1 }])
+      // A turn with no model request must not create a pre-step model surface.
+      expect(session.surface.nodes).toEqual([])
 
       const events = readRetrievalSessionEvents(session)
       const contracted = events.find(event => event.type === 'retrieval/query-contracted')
@@ -604,8 +599,6 @@ describe('RetrievalAgentService Cordis binding', () => {
       expect(contracted.data.queryContract).not.toHaveProperty('maxResults')
       expect(contracted.data.queryContract).not.toHaveProperty('resultLimit')
       expect(contracted.data.spec.normalizedQuery).toBe('副卡解绑后流量仍然共享')
-      const snapshotText = snapshotMessage?.content.find(block => block.type === 'text')?.text
-      expect(snapshotText).toBe(projected.data.selection.rendered)
       expect(projected.data.selection.rendered).toContain('<ticket_knowledge_context>')
       expect(ctx.retrievalAgent.current(agent).query.original).toBe(rawQuery)
 
@@ -660,26 +653,27 @@ describe('RetrievalAgentService Cordis binding', () => {
         () => Promise.resolve({ kind: 'enter' as const, messages: [direct] }),
       ).then(decision => { settled = true; return decision })
 
-      // 首轮 Hybrid 排名仍被 Provider 阻塞期间，用户输入必须已经在 Session 表面可见。
+      // 首轮排名仍阻塞时，日志已有可独立呈现的回执；模型表面由 DSH 在步骤内准入。
       for (let flush = 0; flush < 20 && !settled; flush += 1) {
         await new Promise(resolve => setTimeout(resolve, 0))
-        if (session.events.some(event => event.type === 'user/message')) break
+        if (session.snapshotEvents().some(event => event.type === 'retrieval/input-accepted')) break
       }
       expect(settled).toBe(false)
-      expect(session.events
-        .filter(event => event.type === 'user/message')
-        .map(event => event.data)).toEqual([direct])
+      expect(session.snapshotEvents()
+        .filter(event => event.type === 'retrieval/input-accepted')
+        .map(event => event.data)).toEqual([{ messageId: direct.id, text: '帮我找副卡解绑的工单', turn: 1 }])
+      expect(session.surface.nodes).toEqual([])
 
       releaseSearch()
       const decision = await pending
       expect(decision.kind).toBe('enter')
       if (decision.kind !== 'enter') throw new Error('pre-step unexpectedly rejected')
-      // 返回给 DSH 的只剩快照；用户消息不重复落库。
-      expect(decision.messages).toHaveLength(1)
-      expect(decision.messages[0]?.source).toMatchObject({
+      expect(decision.messages).toHaveLength(2)
+      expect(decision.messages[0]).toEqual(direct)
+      expect(decision.messages[1]?.source).toMatchObject({
         kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
       })
-      expect(session.events.filter(event => event.type === 'user/message')).toHaveLength(1)
+      expect(session.snapshotEvents().filter(event => event.type === 'retrieval/input-accepted')).toHaveLength(1)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -733,14 +727,14 @@ describe('RetrievalAgentService Cordis binding', () => {
       )
       expect(decision.kind).toBe('enter')
       if (decision.kind !== 'enter') throw new Error('natural product entry unexpectedly rejected')
-      // 用户消息在首轮检索前已落库；返回给 DSH 的只剩知识状态快照。
-      expect(decision.messages).toHaveLength(1)
-      expect(decision.messages[0]?.source).toMatchObject({
+      expect(decision.messages).toHaveLength(2)
+      expect(decision.messages[0]).toEqual(direct)
+      expect(decision.messages[1]?.source).toMatchObject({
         kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
       })
-      const persistedUser = session.events.filter(event => event.type === 'user/message')
-      expect(persistedUser.map(event => event.data)).toEqual([direct])
-      const firstRetrievalSeq = session.events.find(event => event.type.startsWith('retrieval/'))?.seq
+      const persistedUser = session.snapshotEvents().filter(event => event.type === 'retrieval/input-accepted')
+      expect(persistedUser.map(event => event.data)).toEqual([{ messageId: direct.id, text: '帮我找两条副卡解绑后流量共享的工单', turn: 1 }])
+      const firstRetrievalSeq = session.snapshotEvents().find(event => event.type === 'retrieval/query-contracted')?.seq
       expect(persistedUser[0]?.seq).toBeLessThan(firstRetrievalSeq ?? -1)
 
       let state = ctx.retrievalAgent.current(agent)
@@ -803,7 +797,7 @@ describe('RetrievalAgentService Cordis binding', () => {
 
       const repaired = await ctx.tools.execute({
         signal: SIGNAL,
-        callId: CallId('rag-repair'),
+        callId: ToolCallId('rag-repair'),
         name: 'ticket_decide',
         arguments: { state_id: ctx.retrievalAgent.current(agent).stateId, judgments: [],
           semantic_gaps: [gap('coverage', ['c1'], '仍需要同类工单')],
@@ -971,7 +965,7 @@ async function publicSetup(query = '帮我找副卡工单', Provider: typeof Pub
   }
   await message(query)
   const decide = (action: unknown, judgments: unknown[] = [], semantic_gaps: unknown[] = []) => ctx.tools.execute({
-    signal: SIGNAL, callId: CallId(`decision-${Math.random()}`), name: 'ticket_decide', agent,
+    signal: SIGNAL, callId: ToolCallId(`decision-${Math.random()}`), name: 'ticket_decide', agent,
     arguments: { state_id: ctx.retrievalAgent.current(agent).stateId, judgments, semantic_gaps, action },
   })
   return { ctx, agent, message, decide }
@@ -1187,7 +1181,7 @@ describe('public knowledge-state acceptance A1-A8', () => {
     try {
       // A previous focused summary read must not hide another ticket's newly requested source.
       expect((await decide({ kind: 'inspect', candidate_aliases: ['c1'], fields: [], history: true })).isError).toBe(false)
-      const read = await ctx.tools.execute({ signal: SIGNAL, callId: CallId('focused-source-read'), name: 'ticket_read', agent,
+      const read = await ctx.tools.execute({ signal: SIGNAL, callId: ToolCallId('focused-source-read'), name: 'ticket_read', agent,
         arguments: { state_id: ctx.retrievalAgent.current(agent).stateId, candidate_aliases: ['c2'], fields: ['resolution'], reason: '核对处理结果' } })
       expect(read.isError).toBe(false)
       const state = ctx.retrievalAgent.current(agent)
@@ -1263,7 +1257,7 @@ class KnowledgeLoopAdapter extends LlmAdapter {
       semantic_gaps: turn === 1 ? [gap('ambiguity', ['c1', 'c2'], '需要用户确认地域')]
         : turn === 2 ? [gap('depth', ['c2'], '摘要缺少实际处理过程')] : [],
     }
-    const block = { type: 'tool-call' as const, id: CallId(`loop-${turn}`), name: 'ticket_decide', arguments: JSON.stringify(args) }
+    const block = { type: 'tool-call' as const, id: ToolCallId(`loop-${turn}`), name: 'ticket_decide', arguments: JSON.stringify(args) }
     yield { type: 'block-start', index: 0, blockType: 'tool-call' }
     yield { type: 'block-end', index: 0, block }
     yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 60 } }
@@ -1290,7 +1284,7 @@ class PersistentRepairAdapter extends LlmAdapter {
       : { state_id, judgments: [], semantic_gaps: [],
         action: { kind: 'search', mode: 'keyword', changes: [{ type: 'add_terms', terms: [`缓存${turn}`] }] } }
     yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`persist-${turn}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`persist-${turn}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
     yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 60 } }
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
@@ -1315,7 +1309,7 @@ describe('actual DSH message and ToolRuntime loop with a deterministic model ada
       installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
       installRetrievalTools(ctx, ctx.retrievalAgent)
       installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
-      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
       class RecoverableAnswerAdapter extends KnowledgeLoopAdapter {
         proseSent = false
         override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -1371,7 +1365,7 @@ describe('actual DSH message and ToolRuntime loop with a deterministic model ada
       installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
       installRetrievalTools(ctx, ctx.retrievalAgent)
       installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
-      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
       const adapter = new PersistentRepairAdapter(10)
       ctx.llm.registerAdapter(['persistent-repair'], adapter)
       const handle = await ctx.agents.create({ sessionId: SessionId('persistent-repair-loop'), agentOptions: { provider: 'persistent-repair', model: 'deterministic-fixture' } })
@@ -1403,7 +1397,7 @@ describe('actual DSH message and ToolRuntime loop with a deterministic model ada
       installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
       installRetrievalTools(ctx, ctx.retrievalAgent)
       installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
-      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
       const adapter = new PersistentRepairAdapter(2, 61_000)
       ctx.llm.registerAdapter(['slow-repair'], adapter)
       const handle = await ctx.agents.create({ sessionId: SessionId('wall-clock-observational-loop'), agentOptions: { provider: 'slow-repair', model: 'deterministic-fixture' } })
@@ -1442,7 +1436,7 @@ describe('public DSH restoration authorization boundary', () => {
             : { kind: 'clarify', question: '只看上海的案例吗？', candidate_aliases: ['c1', 'c2'], evidence_aliases: ['c1', 'c2'] },
         }
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`restore-seed-${this.requests.length}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`restore-seed-${this.requests.length}`), name: 'ticket_decide', arguments: JSON.stringify(args) } }
         yield { type: 'finish', reason: { kind: 'tool-calls' } }
       }
     }
@@ -1463,7 +1457,7 @@ describe('public DSH restoration authorization boundary', () => {
       installAutomaticRetrievalStart(ctx, ctx.retrievalAgent, { analyzer: QUERY_ANALYZER })
       installRetrievalTools(ctx, ctx.retrievalAgent)
       installRetrievalRuntimeBudget(ctx, ctx.retrievalAgent)
-      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
       const adapter = new ReadThenWaitAdapter()
       ctx.llm.registerAdapter(['restored-access'], adapter)
       const source = await ctx.agents.create({ sessionId: SessionId('restoration-access-source'), agentOptions: { provider: 'restored-access', model: 'fixture' } })
@@ -1473,7 +1467,7 @@ describe('public DSH restoration authorization boundary', () => {
       const before = ctx.retrievalAgent.current(source.agent)
       expect(before.termination, JSON.stringify(restorationToolErrors)).toBe('needs_clarification')
       expect(before.promotedEvidence[0]?.text).toContain('重新同步后共享关系解除')
-      const seed = source.agent.session.events
+      const seed = source.agent.session.snapshotEvents()
       const priorRequests = adapter.requests.length
       expect(priorRequests).toBe(2)
       await source.dispose()

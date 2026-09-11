@@ -30,7 +30,7 @@ const pnpmCli = process.env.npm_execpath?.endsWith('.cjs') === true
 const packageManager = pnpmCli !== undefined
   ? { command: process.execPath, prefix: [pnpmCli] }
   : { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', prefix: [] }
-const pinnedDshVersion = '0.1.1-rc.2'
+const pinnedDshVersion = '0.1.5-rc.2'
 const tempRoot = mkdtempSync(join(tmpdir(), 'retrieval-agent-clean-install-'))
 const browserReview = process.env.RETRIEVAL_AGENT_BROWSER_REVIEW === '1'
 
@@ -249,8 +249,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createServer as createHttpServer } from 'node:http'
 import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { createRequire } from 'node:module'
 import { RetrievalId } from '@retrieval-agent/contracts'
 import { foldRetrievalEvents, RetrievalController } from '@retrieval-agent/domain'
 import { RetrievalAgentService, SessionRetrievalEventJournal } from '@retrieval-agent/agent-plugin'
@@ -261,6 +260,10 @@ import { HybridRankingEngine } from '@retrieval-agent/model-service-client/ranki
 import { FixturePrincipalProviderService, LocalTicketProviderService } from '@retrieval-agent/bundle'
 import { CandidateDetailService, InMemoryDetailReadAuditSink, projectTicketCandidateState } from '@retrieval-agent/product-api'
 
+// Resolve peers from their real consumer, as DSH does for an installed plugin.
+const pluginRequire = createRequire(import.meta.resolve('@retrieval-agent/agent-plugin/package.json'))
+const { Context } = pluginRequire('@deepseek-ai/cordis')
+const { Session, SessionId } = pluginRequire('@deepseek-ai/dsh-session')
 installDshSessionCompatibility()
 const session = Session.create(SessionId('clean-install-session'))
 if (session.id !== 'clean-install-session') throw new Error('DSH Session package did not load')
@@ -469,7 +472,7 @@ try {
   assert.ok(serviceState.promotedEvidence.every(evidence => evidence.readers.includes('user')),
     'installed detail did not record the actual user reader')
 
-  const restoredAgent = { session: Session.create(SessionId('clean-install-cordis-restored'), serviceAgent.session.events) }
+  const restoredAgent = { session: Session.create(SessionId('clean-install-cordis-restored'), serviceAgent.session.snapshotEvents()) }
   const restoredEvents = new SessionRetrievalEventJournal(restoredAgent.session).read(serviceState.retrievalId)
   assert.deepStrictEqual(foldRetrievalEvents(restoredEvents), JSON.parse(JSON.stringify(serviceState)),
     'packed Seed replay changed the full durable knowledge state')
@@ -481,14 +484,16 @@ try {
   const authorizedState = await serviceCtx.retrievalAgent.authorizePresentation(restoredAgent, serviceState.retrievalId)
   assert.equal(authorizedState.accessValidation, 'current', 'installed Provider did not reauthorize the restored evidence')
   assert.notEqual(authorizedState.stateId, serviceState.stateId, 'reauthorization must record a new state identity')
+  assert.deepStrictEqual(authorizedState.measurementStateIds, [],
+    'reauthorization must invalidate decision aliases from before the new authorization grant')
   assert.deepStrictEqual(authorizedState, { ...JSON.parse(JSON.stringify(serviceState)),
     stateId: authorizedState.stateId, previousStateId: serviceState.stateId, revision: serviceState.revision + 1,
-    updatedAt: authorizedState.updatedAt, accessValidation: 'current' },
+    updatedAt: authorizedState.updatedAt, accessValidation: 'current', measurementStateIds: [] },
     'reauthorization must only add its state transition and preserve the original evidence and task')
   const presentation = projectTicketCandidateState(authorizedState, authorizedState.retrievalId)
   assert.deepStrictEqual(presentation.alreadyReadEvidence, serviceState.promotedEvidence,
     'authorized presentation changed the restored evidence identities or readers')
-  const reauthorizedSeed = Session.create(SessionId('clean-install-cordis-reauthorized-seed'), restoredAgent.session.events)
+  const reauthorizedSeed = Session.create(SessionId('clean-install-cordis-reauthorized-seed'), restoredAgent.session.snapshotEvents())
   assert.deepStrictEqual(foldRetrievalEvents(new SessionRetrievalEventJournal(reauthorizedSeed).read(serviceState.retrievalId)),
     JSON.parse(JSON.stringify(authorizedState)), 'reauthorization did not persist a valid replay state chain')
   console.log('packed restored access verified: full Seed equality, pre-authorization denial, Local Provider reauthorization, evidence identity and reader equality')
@@ -520,7 +525,7 @@ if (state.candidates.length === 0
   throw new Error('packed vertical slice did not return ESFT development candidates')
 }
 if (journal.read(RetrievalId(state.retrievalId)).length === 0) throw new Error('packed event journal is empty')
-const replayedSession = Session.create(SessionId('clean-install-replayed'), session.events)
+const replayedSession = Session.create(SessionId('clean-install-replayed'), session.snapshotEvents())
 const replayedEvents = new SessionRetrievalEventJournal(replayedSession).read(RetrievalId(state.retrievalId))
 const replayedState = foldRetrievalEvents(replayedEvents)
 assert.deepStrictEqual(replayedState, JSON.parse(JSON.stringify(state)),

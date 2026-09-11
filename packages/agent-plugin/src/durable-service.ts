@@ -215,7 +215,33 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
   }
   override async authorizePresentation(agent: Agent, id: RetrievalId, signal?: AbortSignal): Promise<RetrievalState> {
     const p = await this.resolve(agent, 'detail_read', signal)
-    return this.execute(agent, (c, s) => c.reauthorize(p, s, signal), { semantic: false, taskId: id })
+    // Presentation must remain available while a search holds the mutation queue.
+    // Validate an authoritative snapshot independently; SQL fences any changed grant.
+    for (let attempt = 0; ; attempt++) {
+      const base = await this.store.read(id)
+      if (!base?.state_json) throw new RetrievalError('INVALID_TRANSITION', '当前任务尚未开始。')
+      if (base.session_id !== String(agent.session.id) || base.owner_hash !== taskOwner(p)) {
+        throw new RetrievalError('UNAUTHORIZED', '当前身份无权访问任务。')
+      }
+      const journal = new TaskJournal([], await this.store.domainEventCount(id))
+      const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, undefined,
+        { ...this.persistentConfig, retrievalId: id })
+      const state = await controller.reauthorize(p, base.state_json, signal)
+      try {
+        if (state.stateId !== base.state_json.stateId) {
+          await this.store.commit(base, state, journal.pending, undefined, false)
+          try { await this.mirror(agent) } catch { /* recoverable outbox */ }
+          await this.loadTask(agent)
+        } else {
+          const current = (await this.store.rows<{ input_revision: number; state_id: string }>(
+            "SELECT input_revision,JSON_UNQUOTE(JSON_EXTRACT(state_json,'$.stateId')) AS state_id FROM ra_task WHERE id=?", [id]))[0]
+          if (current?.input_revision !== base.input_revision || current.state_id !== state.stateId) throw staleTask()
+        }
+        return state
+      } catch (error) {
+        if (attempt >= 3 || !(error instanceof RetrievalError) || !error.retryable) throw error
+      }
+    }
   }
   override async ensureModelAccess(agent: Agent, signal?: AbortSignal): Promise<RetrievalState | undefined> {
     await this.loadTask(agent)

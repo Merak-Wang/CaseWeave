@@ -1,10 +1,14 @@
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 import { CandidatePanel } from './CandidatePanel.js'
 import { ticketCandidateDefinition } from './definition.js'
 import { ProductHeaderExport } from './HeaderExport.js'
+import { AcceptedTicketInput, ticketInputDefinition } from './input.js'
 
-export const inject = ['conversationEvents', 'slots']
+export const inject = ['uiConversation', 'slots']
 
 /**
  * Retrieval product prose is rendered only from deterministic domain nodes.
@@ -20,7 +24,11 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
     name: 'conversation.session.header.utilities', id: 'retrieval-agent-export', order: 100, label: '导出工单',
   }, ProductHeaderExport))
-  ctx.conversationEvents.register(ticketCandidateDefinition)
+  ctx.uiConversation.events.register(ticketCandidateDefinition)
+  ctx.uiConversation.events.register(ticketInputDefinition)
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node', key: 'ticket-input',
+  }, AcceptedTicketInput))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node',
     key: 'assistant-step',

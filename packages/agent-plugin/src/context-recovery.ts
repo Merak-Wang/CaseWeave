@@ -7,7 +7,7 @@ import { compactRetrievalSurface } from './working-context.js'
 
 /** Count logged automatic compactions, including those restored from a previous host. */
 export function contextCompactions(agent: Agent): number {
-  return agent.session.events.filter(e => e.type === 'user/message' && e.data.source.kind === 'plugin'
+  return agent.session.snapshotEvents().filter(e => e.type === 'user/message' && e.data.source.kind === 'plugin'
     && e.data.source.plugin === 'retrieval-agent' && e.data.source.form === 'snapshot'
     && e.data.source.sections.some(s => s.name === 'retrieval-agent:compaction')).length
 }
@@ -15,7 +15,7 @@ export function contextCompactions(agent: Agent): number {
 /** Legacy working-set notes can be classified without rewriting saved events. */
 export function contextCompressionStats(agent: Agent): ContextCompressionStats {
   let workingSetCount = 0, capacityCount = 0, last: ContextCompressionStats['last']
-  for (const e of agent.session.events) {
+  for (const e of agent.session.snapshotEvents()) {
     if (e.type !== 'user/message' || e.data.source.kind !== 'plugin' || e.data.source.plugin !== 'retrieval-agent' || e.data.source.form !== 'snapshot') continue
     const note = e.data.source.sections.find(s => s.name === 'retrieval-agent:compaction')
     if (!note) continue

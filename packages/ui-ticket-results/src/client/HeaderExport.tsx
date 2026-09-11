@@ -36,9 +36,9 @@ function useCompactHeaderUtility(): boolean {
   return compact
 }
 
-export function ProductHeaderExport({ sessionId, useSession }: ProductHeaderExportProps) {
-  const order = useSession(snapshot => snapshot.chat.order)
-  const nodes = useSession(snapshot => snapshot.chat.nodes)
+export function ProductHeaderExport({ sessionId, useChat }: ProductHeaderExportProps) {
+  const order = useChat(snapshot => snapshot.order)
+  const nodes = useChat(snapshot => snapshot.nodes)
   const data = useMemo(() => latestTicketCandidateNode(order, nodes), [nodes, order])
   const [status, setStatus] = useState<'idle' | 'preparing' | 'success' | 'error'>('idle')
   const [failure, setFailure] = useState<ExportCandidatesFailure>()

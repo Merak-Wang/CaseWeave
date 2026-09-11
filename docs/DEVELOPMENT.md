@@ -199,13 +199,32 @@ node scripts/verify-workbench-browser.mjs --session=workbench --scenario=files -
 
 ## OpenCode Go 会话路由
 
-当前固定的 DSH `0.1.1-rc.2` 已把 `sessionId` 传至 pi-ai，但原适配器没有发送 OpenCode Go 新要求的 `x-opencode-session`。项目 bundle 现禁用默认 `llm-pi-ai` 组合行，装配 `@retrieval-agent/bundle/opencode-pi-ai` 兼容入口；仍使用同一 `llm-pi-ai` 设置、模型目录、凭证和上游请求实现。无需在设置中手填固定请求头。政策依据见 [上游讨论 #5495](https://github.com/deepseek-ai/deepseek-harness/discussions/5495)。
+当前固定的 DSH `0.1.5-rc.2` 已把 `sessionId` 传至 pi-ai，但原适配器没有发送 OpenCode Go 要求的 `x-opencode-session`。项目 bundle 现禁用默认 `llm-pi-ai` 组合行，装配 `@retrieval-agent/bundle/opencode-pi-ai` 兼容入口；仍使用同一 `llm-pi-ai` 设置、模型目录、凭证和上游请求实现。无需在设置中手填固定请求头。政策依据见 [上游讨论 #5495](https://github.com/deepseek-ai/deepseek-harness/discussions/5495)。
 
 每次请求根据 DSH 的完整会话身份生成稳定 UUID：已有 UUID（含 `session-` 前缀）保留其 UUID，其他历史/自定义身份确定性映射为 UUID v5。续问、重试、恢复和带相同身份的压缩调用保持一致；新建/分叉/子会话使用其各自身份。仅 OpenCode provider 或解析后地址的精确 `opencode.ai` 主机启用，缺少会话身份时在发出请求前报错；同时查询不会修改或共用 provider 配置里的会话头。
 
 更新后执行 `pnpm -r --if-present run build` 并重启 `pnpm start:database --no-open --port 3084`（JSONL 入口为 `pnpm start`）。已有 profile、模型、凭证与 Session 继续复用。定向验收为 `pnpm exec vitest run packages/dsh-compat/src/opencode-pi-ai.spec.ts`；`pnpm verify:install` 另检查发布包可解析、兼容入口实际装配且原适配器已禁用。
 
 兼容实现仅在 dsh-compat 内包裹固定版本的 `PiAiAdapter.streamWithSnapshot`，覆盖普通与 prepared-call 两条入口；内部方法变化会明确拒绝启动，升级 DSH 时必须复核该接点。退出条件是上游原生适配器通过相同 HTTP 请求头测试与真实 Go 入口验证，然后一并移除 facade、bundle 导出和组合替换。仅修改本地 DSH 源码或缓存文件不会更新项目的发布包入口。
+
+### DSH 升级与历史会话
+
+DSH 版本及发布提交由 `provenance/baseline-manifest.json` 固定。Workspace 和独立启动器分别使用根目录及 `config/app/runtime/pnpm-lock.yaml`；源码启动器复制经过核验的运行时锁文件并冻结安装，已有设置和数据目录继续复用。不要单独更新全局 `dsh` 来替代项目运行时。
+
+从 DSH `0.1.1-rc.2` 升级时，先停止使用同一 `DSH_HOME` 的全部 Host 并备份该目录。完成依赖安装和构建后，对旧 CaseWeave Session 显式执行：
+
+```powershell
+node scripts/migrate-dsh-sessions.mjs --home=.cache/retrieval-agent-local/dsh-home --check
+node scripts/migrate-dsh-sessions.mjs --home=.cache/retrieval-agent-local/dsh-home --write
+```
+
+完整容器部署使用同一工具：先 `docker compose stop app`、备份 app-state 卷，再 `docker compose build app`；在应用保持停止时运行 `docker compose run --rm --no-deps app node scripts/migrate-dsh-sessions.mjs --home=/app/.cache/local/dsh-home --check`，核对拒绝项后将 `--check` 换为 `--write`。完成后通过正常 `start` 入口启动。使用部署配置中的原卷，不能另建空状态卷代替迁移。
+
+自定义目录替换 `--home`。检查不写文件；写入逐会话发布 `session.v3.jsonl` 或 `.zstd`，保留原始 `session.jsonl`/`.zstd` 和校验回执。已迁移会话可重复执行。历史上先写用户消息、后开始步骤的会话，转换会在同一已开启轮次内前移已有的首个 `step/start`，同时重映射 DSH 引用；原消息顺序、时间戳、业务事件身份及内容保留。原始字节不修改。
+
+工具对未支持的业务 schema、未知扩展、缺少可对应步骤等返回 `refused`，退出码为 1；其他可迁移会话仍可独立完成。拒绝项保留原文件，不生成猜测的步骤、结果或证据。升级后这些拒绝项不能作为已完成的新格式恢复结果。普通 DSH 会话交由上游原生迁移器处理。本操作只升级 DSH 日志，不导入或替换 MySQL 权威任务。
+
+回退必须使用升级前的完整备份：新版继续运行后，新增事件只写 V3，旧程序读取保留的 V0 文件会得到过时状态。若旧文件在迁移后又被写入，校验回执会阻止继续迁移，需先恢复一致备份。
 
 ## Python 模型服务容器部署
 

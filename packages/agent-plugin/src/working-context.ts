@@ -7,7 +7,9 @@ import type { RetrievalAgentService } from './service.js'
 
 /** Replace only the model surface. Original messages, evidence and decisions remain replayable. */
 export function compactRetrievalSurface(agent: Agent, options: { freshTurn?: boolean; contextWindow?: number | undefined } = {}): void {
-  const nodes = [...agent.session.surface.nodes]
+  // DSH V3 owns the head and may append further system prompts in history.
+  const surface = [...agent.session.surface.nodes]
+  const nodes = surface.filter(seq => agent.session.eventAt(seq)?.type !== 'system/message')
   const window = options.contextWindow ?? agent.session.requestContext()?.contextWindow ?? 32000
   const threshold = Math.floor(window * .65)
   // Measure model messages, not durable envelopes: source.sections repeats content for replay.
@@ -21,7 +23,7 @@ export function compactRetrievalSurface(agent: Agent, options: { freshTurn?: boo
   let keepFrom = nodes.length
   let exchanges = 0
   for (let i = options.freshTurn ? -1 : nodes.length - 1; i >= 0; i--) {
-    const event = agent.session.events[nodes[i]!]
+    const event = agent.session.eventAt(nodes[i]!)
     if (event?.type === 'assistant/message') { keepFrom = i; if (++exchanges === 4) break }
   }
   const old = nodes.slice(0, keepFrom)
@@ -30,7 +32,17 @@ export function compactRetrievalSurface(agent: Agent, options: { freshTurn?: boo
     sections: [{ name: options.freshTurn ? 'retrieval-agent:history' : 'retrieval-agent:compaction', text: '历史已外置；当前任务要求、覆盖、判断导航和可引用证据以随后最新工作视窗为准。可用 ticket_read 取回旧候选与来源片段。' },
       ...(!options.freshTurn ? [{ name: 'retrieval-agent:compaction-details', text: JSON.stringify({ reason: 'working_set', beforeTokens: tokens, thresholdTokens: threshold, limit: window, at: new Date().toISOString() }) }] : [])] },
     content: [{ type: 'text', text: '历史工具载荷已外置并保留原始日志；当前用户要求与证据见最新工作视窗，旧事实可按稳定引用重读。' }] })
-  agent.session.append('user/message', note, { surfaceOp: { op: 'replace', start: old[0]!, end: old.at(-1)! }, sourceEventSeqs: old })
+  const selected = new Set(old)
+  const groups: typeof old[] = []
+  let group: typeof old = []
+  for (const seq of surface) {
+    if (selected.has(seq)) group.push(seq)
+    else if (group.length) { groups.push(group); group = [] }
+  }
+  if (group.length) groups.push(group)
+  for (const range of groups) agent.session.append('user/message', createUserMessage({ source: note.source, content: note.content }), {
+    surfaceOp: { op: 'replace', startSeq: range[0]!, endSeq: range.at(-1)! }, sourceEventSeqs: range,
+  })
 }
 
 export function installWorkingContext(ctx: Context, application: RetrievalAgentService): void {
@@ -43,7 +55,9 @@ export function installWorkingContext(ctx: Context, application: RetrievalAgentS
       await application.prepareExperts(agent, signal)
       compactRetrievalSurface(agent, { contextWindow: application.modelContextTokenLimit(agent) })
       const selection = await application.projectContext(agent)
-      return { kind: 'enter' as const, messages: [createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
+      const pending = decision.messages.filter(message => !(message.source.kind === 'plugin' && message.source.plugin === 'retrieval-agent'
+        && message.source.form === 'snapshot' && message.source.sections.some(section => section.name === 'retrieval-agent:state')))
+      return { kind: 'enter' as const, messages: [...pending, createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
         sections: [{ name: 'retrieval-agent:state', text: selection.rendered }] }, content: [{ type: 'text', text: selection.rendered }] })] }
     } catch (error) {
       if (!(error instanceof RetrievalError) || error.code !== 'CAPACITY_EXCEEDED') throw error

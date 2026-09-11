@@ -1,7 +1,8 @@
+import { unusedInbox } from '../../../tests/support/unused-inbox.js'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import AgentRegistry, { agentEvents, Inbox } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import AgentRegistry, { agentEvents } from '@deepseek-ai/dsh-agent'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -12,7 +13,7 @@ import { installRetrievalTools, type RetrievalToolApplication } from './tools.js
 const SIGNAL = new AbortController().signal
 function fakeAgent(): Agent {
   const session = Session.create(SessionId('decision-tools'))
-  return { id: session.id, options: {}, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+  return { id: session.id, options: {}, session, inbox: unusedInbox,
     status: 'running', ctx: new Context(), send() {}, followup() {}, steer() {}, inject() {}, cancel() {},
     runMaintenance: task => task(SIGNAL), whenIdle: () => Promise.resolve(), }
 }
@@ -35,7 +36,7 @@ async function mounted() {
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   installRetrievalTools(ctx, app)
-  const execute = (args: unknown) => ctx.tools.execute({ signal: SIGNAL, callId: CallId('decide'), name: 'ticket_decide', arguments: args, agent: fakeAgent() })
+  const execute = (args: unknown) => ctx.tools.execute({ signal: SIGNAL, callId: ToolCallId('decide'), name: 'ticket_decide', arguments: args, agent: fakeAgent() })
   return { ctx, app, decisions, execute }
 }
 const base = { state_id: 'state-1', judgments: [], semantic_gaps: [] }
@@ -45,11 +46,11 @@ describe('public decision tool', () => {
     const { ctx } = await mounted()
     try {
       const preset = parse(await readFile(new URL('../../bundle/presets/retrieval-agent/agent.cordis.yml', import.meta.url), 'utf8'),
-        { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] }) as { id: string; config: { text: string; complete?: boolean } }[]
+        { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] }) as { id: string; config: { prefix: string; complete?: boolean } }[]
       const persona = preset.find(row => row.id === 'persona')!.config
       // Exercise the native complete-section rule with the shipped persona,
       // not a string check that could miss its effect on other contributions.
-      ctx.systemPrompt.section({ name: 'retrieval-agent:shipped-persona', order: 0, text: persona.text, complete: persona.complete ?? false })
+      ctx.systemPrompt.section({ name: 'retrieval-agent:shipped-persona', order: 0, text: persona.prefix, complete: persona.complete ?? false })
       const assembly = await ctx.systemPrompt.assemble()
       expect(assembly.sections.map(s => s.name)).toEqual(expect.arrayContaining([
         'retrieval-agent:shipped-persona', 'retrieval-agent:policy', 'retrieval-agent:evidence-review', 'retrieval-agent:collaboration',
@@ -89,7 +90,7 @@ describe('public decision tool', () => {
   })
   it('recovers specified summaries and searches through the same versioned controller without accepting candidates', async () => {
     const { ctx, decisions } = await mounted()
-    const call = (name: string, args: unknown) => ctx.tools.execute({ signal: SIGNAL, callId: CallId(name), name, arguments: args, agent: fakeAgent() })
+    const call = (name: string, args: unknown) => ctx.tools.execute({ signal: SIGNAL, callId: ToolCallId(name), name, arguments: args, agent: fakeAgent() })
     try {
       expect((await call('ticket_read', { state_id: 'state-1', candidate_aliases: ['c2'], fields: [], reason: '补充条件后重读依据' })).isError).toBe(false)
       expect(decisions[0]).toMatchObject({ stateId: 'state-1', judgments: [], action: { kind: 'inspect', candidateRefs: ['candidate-2'], fields: [], history: true } })

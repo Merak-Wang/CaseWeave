@@ -1,3 +1,4 @@
+import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -7,7 +8,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import SystemPrompt, { PERSONA_ORDER, PERSONA_SECTION } from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt, { PERSONA_PREFIX_SECTION } from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import Subagents from '@deepseek-ai/dsh-subagent'
 import * as Spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
@@ -71,7 +72,7 @@ it.skipIf(!enabled)('A3 real model: distinguishes completed operations and the r
       ...(process.env.RETRIEVAL_AGENT_BOUNDARY_REASONING ? { reasoningEffort: process.env.RETRIEVAL_AGENT_BOUNDARY_REASONING } : {}) }
     const config = settings['llm-pi-ai']
     const preset = parse(await readFile(new URL('../../bundle/presets/retrieval-agent/agent.cordis.yml', import.meta.url), 'utf8'),
-      { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] }) as { id: string; config: { text: string; complete?: boolean; includeRuntimeContext?: boolean } }[]
+      { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] }) as { id: string; config: { prefix: string; complete?: boolean; includeRuntimeContext?: boolean } }[]
     const persona = preset.find(row => row.id === 'persona')!.config
     if (process.env.RETRIEVAL_AGENT_BOUNDARY_MODEL) {
       const discovery = await fetch(process.env.RETRIEVAL_AGENT_BOUNDARY_DISCOVERY_URL ?? 'http://127.0.0.1:3086/api/retrieval-agent/models',
@@ -107,12 +108,12 @@ it.skipIf(!enabled)('A3 real model: distinguishes completed operations and the r
     installAutomaticRetrievalStart(ctx, application, { analyzer }); installWorkingContext(ctx, application)
     installRetrievalTools(ctx, application); installRetrievalRuntimeBudget(ctx, application)
     ctx.on('tools/result', (_exec, result) => { if (result.isError) errors.push(JSON.stringify(result.content)) })
-    await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+    await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
     const agents = new Map<string, Promise<Agent>>()
     const agentFor = (id: string): Promise<Agent> => {
       if (!agents.has(id)) agents.set(id, (async () => {
         const handle = await ctx.agents.create({ sessionId: SessionId(id), agentOptions: selection, setup: async agentCtx => {
-          agentCtx.systemPrompt.section({ name: PERSONA_SECTION, order: PERSONA_ORDER, text: persona.text, complete: persona.complete ?? false })
+          agentCtx.systemPrompt.section({ name: PERSONA_PREFIX_SECTION, order: agentCtx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'), text: persona.prefix, complete: persona.complete ?? false })
           if (persona.includeRuntimeContext === false) agentCtx.systemPrompt.suppressRuntimeContext()
         } })
         disposers.push(handle.dispose); return handle.agent
@@ -154,9 +155,9 @@ it.skipIf(!enabled)('A3 real model: distinguishes completed operations and the r
         state: task?.state_json, snapshot, errors: errors.slice(errorOffset) }
       records.push(record)
       await writeFile(`${output}/${example.name}.json`, JSON.stringify(record, null, 2))
-      await writeFile(`${output}/${example.name}-events.json`, JSON.stringify(agent.session.events, null, 2))
-      expect.soft(agent.session.requestHeader()?.system).toContain('默认采用标题与摘要优先')
-      expect.soft(agent.session.requestHeader()?.system).toContain('用户已回答的口径持续有效')
+      await writeFile(`${output}/${example.name}-events.json`, JSON.stringify(agent.session.snapshotEvents(), null, 2))
+      expect.soft(agent.session.deriveMessages().filter(m => m.role === 'system').flatMap(m => m.content.map(b => b.type === 'text' ? b.text : '')).join('\n')).toContain('默认采用标题与摘要优先')
+      expect.soft(agent.session.deriveMessages().filter(m => m.role === 'system').flatMap(m => m.content.map(b => b.type === 'text' ? b.text : '')).join('\n')).toContain('用户已回答的口径持续有效')
       expect.soft(snapshot?.question, JSON.stringify(snapshot?.question)).toBeUndefined()
       expect.soft(snapshot?.failure).toBeNull()
       expect.soft(task?.state_json?.phase).toBe('stopped')

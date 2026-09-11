@@ -32,6 +32,13 @@ export const SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS = Object.freeze([5, 6, 7,
  * users perceive. This event records that boundary without changing evidence.
  */
 export const RETRIEVAL_PRESENTATION_EVENT_TYPE = 'retrieval/presentation-anchored' as const
+/** Log-only UI receipt; model input is admitted separately by the DSH loop. */
+export const RETRIEVAL_INPUT_ACCEPTED_EVENT_TYPE = 'retrieval/input-accepted' as const
+export interface RetrievalInputAccepted {
+  readonly messageId: string
+  readonly text: string
+  readonly turn: number
+}
 export type RetrievalPresentationPhase = 'candidates' | 'result'
 
 export interface RetrievalPresentationAnchor {

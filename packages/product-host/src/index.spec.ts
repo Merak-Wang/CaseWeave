@@ -141,11 +141,13 @@ async function isolatedPresetHarness(): Promise<{
   const ctx = new Context()
   ctx.baseUrl = pathToFileURL(`${process.cwd()}/`).href
   await ctx.plugin(Loader)
+  await ctx.plugin(SessionProjection)
   ctx.loader.builtins.group = Group
   await ctx.plugin(AgentPresets, {
     default: 'isolated-export',
     roots: [{ path: root, trust: 'user' }],
     includeUserRoot: false,
+    includeShippedRoot: false,
   })
   const joined = createScope(ctx, { productHostTest: 'joined' })
   const unjoined = createScope(ctx, { productHostTest: 'unjoined' })
@@ -416,3 +418,4 @@ describe('DSH product Host adapter', () => {
     }
   })
 })
+import SessionProjection from '@deepseek-ai/dsh-session-projection'

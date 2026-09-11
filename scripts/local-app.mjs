@@ -195,21 +195,24 @@ async function pinnedDshVersion(paths) {
 
 async function ensureDshRuntime(paths) {
   const version = await pinnedDshVersion(paths)
+  const runtimeTemplate = join(paths.root, 'config', 'app', 'runtime')
+  const manifest = await readJson(join(runtimeTemplate, 'package.json'))
+  if (manifest.dependencies?.['@deepseek-ai/dsh'] !== version) throw new Error('DSH runtime manifest differs from the reviewed baseline')
+  const lock = await readFile(join(runtimeTemplate, 'pnpm-lock.yaml'), 'utf8')
+  const lockPath = join(paths.runnerRoot, 'pnpm-lock.yaml')
   const dshBin = join(paths.runnerRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   if (existsSync(dshBin)) {
     const installed = run(process.execPath, [dshBin, '--version'], { cwd: paths.root }).trim()
-    if (installed === version) return { dshBin, version, installed: false }
+    if (installed === version && existsSync(lockPath) && await readFile(lockPath, 'utf8') === lock) {
+      return { dshBin, version, installed: false }
+    }
   }
 
   await mkdir(paths.runnerRoot, { recursive: true })
-  await writeFile(join(paths.runnerRoot, 'package.json'), `${JSON.stringify({
-    name: 'retrieval-agent-local-dsh-runner',
-    private: true,
-    packageManager: 'pnpm@10.28.2',
-    dependencies: { '@deepseek-ai/dsh': version },
-  }, undefined, 2)}\n`, 'utf8')
+  await writeFile(join(paths.runnerRoot, 'package.json'), `${JSON.stringify(manifest, undefined, 2)}\n`, 'utf8')
+  await writeFile(lockPath, lock, 'utf8')
   console.log(`Installing the pinned DSH ${version} runtime once in ${relative(paths.root, paths.runnerRoot)}...`)
-  runPnpm(['install', '--ignore-workspace', '--ignore-scripts', '--frozen-lockfile=false'], paths.runnerRoot)
+  runPnpm(['install', '--ignore-workspace', '--ignore-scripts', '--frozen-lockfile'], paths.runnerRoot)
   if (!existsSync(dshBin)) throw new Error(`DSH installation completed without ${dshBin}`)
   const installed = run(process.execPath, [dshBin, '--version'], { cwd: paths.root }).trim()
   if (installed !== version) throw new Error(`expected DSH ${version}, installed ${installed}`)

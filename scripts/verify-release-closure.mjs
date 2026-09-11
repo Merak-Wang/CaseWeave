@@ -22,7 +22,7 @@ const manifests = new Map()
 const packageByName = new Map(contract.packages.map(entry => [entry.name, entry]))
 const prohibitedDependency = /(?:^|[-_/])(evals?|gold|judges?|simulators?|datasets?)(?:$|[-_/])/iu
 const prohibitedPackedPath = /(?:^|\/)(?:tests?|evals?|datasets?|gold|judges?|simulators?)(?:\/|$)|\.spec\.[cm]?[jt]sx?$/iu
-const pinnedDshVersion = '0.1.1-rc.2'
+const pinnedDshVersion = '0.1.5-rc.2'
 
 for (const entry of contract.packages) {
   const manifestPath = join(packagesRoot, entry.directory, 'package.json')
