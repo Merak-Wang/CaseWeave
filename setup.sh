@@ -152,7 +152,7 @@ if [[ $action != install ]]; then
       compose ps --all ;;
     logs)
       stage='读取最近日志'
-      compose logs --tail 100 app model-service ;;
+      compose logs --tail 100 app model-service semantic-operators ;;
   esac
   exit 0
 fi
@@ -207,12 +207,12 @@ step() {
   compose "$@"
 }
 if $build; then
-  step '[1/8] 构建应用和模型服务镜像' build app model-service
+  step '[1/8] 构建应用、算子和模型服务镜像' build app semantic-operators model-service
 else
   printf '\n[1/8] 使用已有镜像\n'
 fi
 step '[2/8] 下载并校验模型（首次下载可能较慢）' run --rm --no-deps model-prepare prepare --download
-step '[3/8] 启动数据库与模型服务，等待健康检查' up -d --wait mysql milvus model-service
+step '[3/8] 启动数据库、算子与模型服务，等待健康检查' up -d --wait mysql milvus model-service semantic-operators
 step '[4/8] 下载数据、清洗脱敏并校验' run --rm --no-deps app-prepare
 step '[5/8] 导入工单并建立向量索引（按进度输出，支持续跑）' run --rm --no-deps app-prepare node scripts/database.mjs prepare
 step '[6/8] 准备关键词索引' run --rm --no-deps app-prepare node scripts/database.mjs grams

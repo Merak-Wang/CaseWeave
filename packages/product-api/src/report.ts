@@ -15,7 +15,7 @@ export interface RetrievalReport {
   coverage: { stoppingReason: string; semanticStatus: 'satisfied' | 'no_result' | 'incomplete'; complete: boolean; resultPagesExhausted: boolean; semanticRecallKnown: boolean;
     assessment?: { checked: readonly string[]; remaining: readonly string[]; nextAction: string; nextActionValue: string };
     resultMayBeIncomplete: boolean; searches: unknown; gaps: readonly { kind: string; description: string }[] };
-  examples: { candidateRef: string; displayId: string; title: string; reason: string; citations: string[] }[];
+  examples: { candidateRef: string; displayId: string; title: string; reason: string; basis?: string; citations: string[] }[];
   citations: ReportCitation[];
   narrative: { status: 'structured' | 'model'; paragraphs: ReportNarrative['paragraphs']; reason?: string };
   usage: string[];
@@ -29,15 +29,18 @@ export function createRetrievalReport(state: RetrievalState, inputs: RetrievalRe
   const examples = result.tickets.slice(0, 5).map(c => {
     const judgment = result.judgments.find(j => j.candidateRef === c.ref)
     const selected = result.evidence.filter(e => e.candidateRef === c.ref && judgment?.evidenceRefs.includes(e.evidenceId)
-      && state.modelVisibleEvidenceIds?.includes(e.evidenceId)).slice(0, 2)
+      && (judgment?.basis === 'proxy' || state.modelVisibleEvidenceIds?.includes(e.evidenceId) || state.contextManifests?.some(m => m.inputGeneration === (state.inputGeneration ?? 0)
+        && m.measurement === 'dsh_request' && m.evidenceIds.includes(e.evidenceId)))).slice(0, 2)
     for (const e of selected) citations.push({ id: e.evidenceId, candidateRef: c.ref, displayId: c.displayId,
       sourceVersion: c.sourceVersion, contentHash: c.contentHash, field: e.field, text: e.text.slice(0, 1600),
       start: e.start, end: e.start + Math.min(1600, e.text.length), origin: e.origin ?? { kind: 'unknown' } })
-    if (judgment?.evidenceRefs.includes(c.ref) && state.modelVisibleCandidateRefs?.includes(c.ref)) {
+    if (judgment?.evidenceRefs.includes(c.ref) && (judgment.basis === 'proxy' || state.modelVisibleCandidateRefs?.includes(c.ref) || state.contextManifests?.some(m => m.inputGeneration === (state.inputGeneration ?? 0)
+      && m.measurement === 'dsh_request' && m.candidateRefs.includes(c.ref)))) {
       citations.push({ id: c.ref, candidateRef: c.ref, displayId: c.displayId, sourceVersion: c.sourceVersion, contentHash: c.contentHash,
         field: 'summary', text: c.summary.slice(0, 1600), start: 0, end: Math.min(1600, c.summary.length), origin: c.summaryOrigin ?? { kind: 'unknown' } })
     }
-    return { candidateRef: c.ref, displayId: c.displayId, title: c.title, reason: judgment?.reason ?? '历史确认未保存逐条理由。', citations: citations.filter(e => e.candidateRef === c.ref).map(e => e.id) }
+    return { candidateRef: c.ref, displayId: c.displayId, title: c.title, ...(judgment?.basis ? { basis: judgment.basis } : {}),
+      reason: judgment?.reason ?? '历史确认未保存逐条理由。', citations: citations.filter(e => e.candidateRef === c.ref).map(e => e.id) }
   })
   const s = state.snapshot
   return { schemaVersion: 1, taskId: state.retrievalId, resultRevision: result.resultRevision,

@@ -12,7 +12,7 @@ const ticketRoot = join(dataRoot, 'tickets')
 const evalRoot = join(dataRoot, 'evals')
 
 const SOURCE_COMMIT = '3746ca74410c92163cc521571dbd17579bfdc962'
-const TRANSFORMATION_VERSION = 'retrieval-agent.esft-summary.v1'
+const TRANSFORMATION_VERSION = 'retrieval-agent.esft-summary.v2'
 const SOURCE_DATASET = 'deepseek-ai/ESFT'
 const SOURCE_LICENSE_REVIEW = 'dataset-specific-license-not-identified'
 const REDACTION_TOKEN = '[已脱敏]'
@@ -139,7 +139,7 @@ function replacePattern(state, pattern, kind, replacement = REDACTION_TOKEN) {
   })
 }
 
-function redactText(value) {
+export function redactText(value) {
   const state = { text: String(value).normalize('NFKC'), counts: {} }
   replacePattern(state, /\*{3,}/gu, 'existing_mask')
   replacePattern(state, /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, 'email')
@@ -155,6 +155,9 @@ function redactText(value) {
   })
   replacePattern(state, /((?:我叫|姓名(?:是|为|[：:])|联系人(?:是|为|[：:]))\s*)\p{Script=Han}{2,4}(?=[，。；！？\s])/gu, 'person_name', (_match, prefix) => `${prefix}${REDACTION_TOKEN}`)
   replacePattern(state, /((?:住址|家庭地址|联系地址)[：:\s]*(?:是|为)?[：:\s]*)[^，。；！？\n]{4,80}/gu, 'address', (_match, prefix) => `${prefix}${REDACTION_TOKEN}`)
+  replacePattern(state, /((?:客户|用户|联系人|机主|户主)\s*)[\p{Script=Han}]{2,4}(?=反映|表示|反馈|称|咨询|投诉|要求|来电|[，。；：:])/gu, 'person_name', (_match, prefix) => `${prefix}${REDACTION_TOKEN}`)
+  replacePattern(state, /[\p{Script=Han}]{1,4}(?=先生|女士|小姐)/gu, 'person_name')
+  replacePattern(state, /[\p{Script=Han}A-Za-z0-9-]{1,30}(?:村|屯|寨|小区|花园|公寓|社区|路|街|巷)[\p{Script=Han}A-Za-z0-9-]{0,20}?(?:\d+|[一二三四五六七八九十百]+)(?:组|号|栋|幢|单元|室)(?:(?:\d+|[一二三四五六七八九十百]+)(?:组|号|栋|幢|单元|室))*/gu, 'address')
   state.text = state.text.replace(/[ \t]+/gu, ' ').replace(/ *\n */gu, '\n').trim()
   return state
 }
@@ -248,7 +251,7 @@ function sourceRow(split, row) {
   }
 }
 
-function normalizedRecord(split, row) {
+export function normalizedRecord(split, row) {
   const source = sourceRow(split, row)
   const parsed = parseDialogue(source.prompt)
   const cleanedSummary = redactText(source.summary)
@@ -289,7 +292,7 @@ function normalizedRecord(split, row) {
     created_at: null,
     tags: classification.tags,
     raw_dialogue: parsed.turns,
-    pii_redaction_status: 'redacted',
+    pii_redaction_status: 'rules_applied',
     source_metadata: source.sourceMetadata,
     transformation: {
       schema_version: TRANSFORMATION_VERSION,
@@ -298,6 +301,7 @@ function normalizedRecord(split, row) {
       generated_fields: generatedFields,
       unverifiable_fields_left_null: ['created_at', 'region', 'status', ...(priority === null ? ['priority'] : [])],
       pii_redaction_counts: parsed.redactionCounts,
+      pii_redaction_verification: 'not_individually_reviewed',
     },
   }
 }
@@ -459,7 +463,7 @@ async function verifyNormalized(path, expectedCount, expectedSplit) {
     if (typeof record.summary !== 'string' || record.summary.length === 0) throw new Error(`${path} has invalid summary`)
     if (typeof record.problem_description !== 'string' || record.problem_description.length === 0) throw new Error(`${path} has invalid problem_description`)
     if (!Array.isArray(record.raw_dialogue) || record.raw_dialogue.length === 0) throw new Error(`${path} has invalid raw_dialogue`)
-    if (record.pii_redaction_status !== 'redacted') throw new Error(`${path} has invalid redaction status`)
+    if (record.pii_redaction_status !== 'rules_applied' || record.transformation?.pii_redaction_verification !== 'not_individually_reviewed') throw new Error(`${path} has invalid redaction status`)
     if ('answer' in record || 'answers' in record || 'raw_answers' in record || 'prompt' in record || 'messages' in record) {
       throw new Error(`${path} retains an upstream prompt or answer field instead of the normalized schema`)
     }
@@ -497,6 +501,7 @@ async function download() {
   return await Promise.all(Object.entries(sourceFiles).map(([name, source]) => downloadSource(name, source)))
 }
 
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 const command = process.argv[2] ?? 'verify'
 let result
 if (command === 'download') result = await download()
@@ -511,3 +516,4 @@ else if (command === 'all') {
   throw new Error(`unknown command ${command}; expected download, build, verify, or all`)
 }
 console.log(JSON.stringify(result, null, 2))
+}

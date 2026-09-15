@@ -17,7 +17,7 @@ function button(label, action, cls = 'secondary') { const b = text('button', lab
 const verdict = v => ({ accept: '已确认', exclude: '已排除', undetermined: '核查中' }[v] || '核查中')
 const motion = () => matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'
 const audit = (label, value) => { const d = text('details', '', 'report-audit'); d.append(text('summary', label), text('small', value)); return d }
-const origin = o => o?.kind === 'generated' ? '生成摘要' : o?.kind === 'source' ? '来源原文' : '类型未标注'
+const origin = o => o?.verification === 'conflicting' ? '摘要与原文冲突 · 须核实原文' : o?.verification === 'unverified' ? '来源摘要 · 未逐条核实' : o?.kind === 'generated' ? '生成摘要' : o?.kind === 'source' ? '来源原文' : '类型未标注'
 const fieldLabel = f => ({ problemDescription: '问题描述', resolutionSteps: '处理记录', rootCause: '原因记录', answer: '答复', conversationOrUpdates: '对话与更新' }[f.key] || f.label)
 const totals = () => snapshot?.node?.collectionWindow
 const valid = (gen, id = taskId) => gen === generation && id === taskId
@@ -212,8 +212,9 @@ function render() {
   $('process-search').replaceChildren(text('p', status), text('p', n?.resultPagesExhausted ? '已检查本次搜索返回的全部线索。' : '仍有线索需要检查。', 'muted'))
   const feedbacks = snapshot.feedback ?? []; $('feedback-panel').hidden = !feedbacks.length
   const latestFeedback = feedbacks.at(-1)
-  if (snapshot.commands.at(-1)?.kind === 'feedback' && latestFeedback) $('receipt').textContent = latestFeedback.status === 'reviewed' ? '反馈已处理 · ' + verdict(latestFeedback.verdict) : '反馈已收到，正在核实'
-  $('feedback-history').replaceChildren(...feedbacks.map(f => { const row = text('div', '', 'card'); row.append(text('p', '你的意见：' + f.text), text('p', f.status === 'reviewed' ? 'Agent 已处理 · ' + verdict(f.verdict) + '：' + f.reason : '已持久接收，Agent 复核中。', f.status === 'reviewed' ? '' : 'notice')); return row }))
+  const pendingFeedback = snapshot.orchestration?.terminal ? '反馈已保存，本轮结束前尚未完成复核。' : '反馈已收到，正在核实'
+  if (snapshot.commands.at(-1)?.kind === 'feedback' && latestFeedback) $('receipt').textContent = latestFeedback.status === 'reviewed' ? '反馈已处理 · ' + verdict(latestFeedback.verdict) : pendingFeedback
+  $('feedback-history').replaceChildren(...feedbacks.map(f => { const row = text('div', '', 'card'); row.append(text('p', '你的意见：' + f.text), text('p', f.status === 'reviewed' ? 'Agent 已处理 · ' + verdict(f.verdict) + '：' + f.reason : pendingFeedback, f.status === 'reviewed' ? '' : 'notice')); return row }))
   $('early-progress').hidden = count > 0
   if (!count) {
     const incomplete = result && !['top_k_accepted', 'no_result'].includes(result.stoppingReason)
@@ -249,15 +250,19 @@ async function loadPage(cursor, reset = false) {
 }
 function renderPage() {
   const judgments = new Map(page.judgments.map(j => [j.candidateRef, j])), history = page.view === 'history', readable = new Set(page.readableCandidateRefs)
-  $('candidate-note').textContent = history ? '历史线索可能已不符合当前要求。' : page.view === 'confirmed' ? '' : '线索仍在核实，确认后会加入结果。'
+  $('candidate-note').textContent = history ? '历史线索可回看原文，是否纳入以当前确认结果为准。' : page.view === 'confirmed' ? ''
+    : snapshot?.orchestration?.terminal ? '本轮已结束。未确认线索未纳入报告和下载。' : '线索仍在核实，确认后会加入结果。'
   $('cards').replaceChildren(...page.items.map(c => {
     const j = judgments.get(c.ref), card = text('article', '', 'card ticket-card'), meta = text('div', '', 'ticket-meta'); card.dataset.ref = c.ref
     meta.append(text('span', c.displayId, 'ticket-id'))
-    if (page.view !== 'confirmed') { const badge = text('span', history ? '历史线索' : verdict(j?.verdict), 'badge'); badge.dataset.verdict = j?.verdict || ''; meta.append(badge) }
+    if (j?.basis === 'proxy') meta.append(text('span', '代理推断', 'badge'))
+    if (page.view !== 'confirmed') { const badge = text('span', history ? '历史线索' : snapshot?.orchestration?.terminal && (!j || j.verdict === 'undetermined') ? '未确认' : verdict(j?.verdict), 'badge'); badge.dataset.verdict = j?.verdict || ''; meta.append(badge) }
     card.append(meta, text('h3', ''))
     card.querySelector('h3').append(readable.has(c.ref) ? button(c.title, () => detail(c), 'link ticket-title') : text('span', c.title, 'ticket-title'))
     card.append(text('p', c.summary, 'summary'))
     const footer = text('div', '', 'ticket-footer'); footer.append(text('small', origin(c.summaryOrigin)))
+    const privacy = c.l0?.additionalFields?.find(f => f.key === 'source.redaction')
+    if (privacy) footer.append(text('small', privacy.value))
     if (readable.has(c.ref)) footer.append(button(j ? '查看依据 ↗' : '查看原文 ↗', () => detail(c), 'link'))
     card.append(footer); return card
   }))
@@ -280,7 +285,9 @@ async function detail(candidate, citation) {
     const [d, e] = await Promise.all([readTicketDetail(snapshot.sessionId, id, candidate.ref, fields.map(f => f.key)), api(endpoint + '/' + id + '/evidence?candidateRef=' + encodeURIComponent(candidate.ref))])
     if (!valid(gen, id) || request !== detailRequest) return
     if (d.sourceVersion !== e.sourceVersion || (citation && citation.sourceVersion !== e.sourceVersion)) throw new Error('引用的来源版本已变化，请重新读取当前结果。')
-    $('detail-title').textContent = d.displayId; const box = $('detail'); box.replaceChildren(text('h2', d.title), text('span', verdict(e.judgment?.verdict), 'badge'), text('h3', '匹配依据'), text('p', e.judgment?.reason || '正在结合原文核实。'))
+    const detailVerdict = e.current === false ? '历史线索' : snapshot?.orchestration?.terminal && (!e.judgment || e.judgment.verdict === 'undetermined') ? '未确认' : verdict(e.judgment?.verdict)
+    $('detail-title').textContent = d.displayId; const box = $('detail'); box.replaceChildren(text('h2', d.title), text('span', detailVerdict, 'badge'), text('h3', '匹配依据'), text('p', e.judgment?.reason ||
+      (page?.view === 'history' ? '此条为历史线索，当前没有有效确认依据。' : snapshot.orchestration?.terminal ? '本轮已结束，此条尚未形成确认依据。' : '正在结合原文核实。')))
     box.append(text('h3', e.citationCount ? '引用原文 · ' + e.citations.length + (e.citationCount > e.citations.length ? ' / ' + e.citationCount : '') : '暂无引用片段'))
     const spans = new Map()
     for (const c of e.citations) {
@@ -302,7 +309,7 @@ async function detail(candidate, citation) {
     }
     if (d.unavailableFields.length) box.append(text('h3', '未知或缺失字段'), text('p', '本工单未提供：' + d.unavailableFields.map(f => labels.get(f) || f).join('、'), 'muted'))
     box.append(audit('来源信息', '来源版本 ' + d.sourceVersion))
-    const feedback = text('div', '', 'feedback-entry'); feedback.append(button('反馈问题', () => openFeedback({ ...candidate, displayId: d.displayId }))); box.append(feedback)
+    if (e.current !== false) { const feedback = text('div', '', 'feedback-entry'); feedback.append(button('反馈问题', () => openFeedback({ ...candidate, displayId: d.displayId }))); box.append(feedback) }
     if (citation) [...box.querySelectorAll('[data-citation]')].find(q => q.dataset.citation === citation.id)?.scrollIntoView({ block: 'nearest' })
   } catch (e) { if (!valid(gen, id) || request !== detailRequest) return; $('detail').replaceChildren(text('p', e.code ? detailFailureMessage(e) : e.message, 'notice error'), button('重试读取', () => detail(candidate, citation))) }
 }
@@ -381,6 +388,10 @@ async function loadArtifacts() {
     const list = await api(endpoint + '/' + id + '/artifacts')
     if (!valid(gen, id) || request !== artifactRequest || snapshot.node?.result?.resultRevision !== revision) return
     const current = list.filter(d => d.resultRevision === revision), key = JSON.stringify(current)
+    if (current.some(d => ['queued', 'running'].includes(d.status))) $('download-receipt').textContent = '正在生成文件…'
+    else if (current.some(d => d.status === 'failed')) $('download-receipt').textContent = '部分文件生成失败，可重试；已就绪文件仍可保存。'
+    else if (current.some(d => d.status === 'ready') && !$('download-receipt').textContent.startsWith('已保存')) $('download-receipt').textContent = '文件已就绪，可以保存。'
+    else if (current.length && current.every(d => d.status === 'expired')) $('download-receipt').textContent = '文件已到期，请重新生成。'
     const wasGenerating = generatingReport
     generatingReport = current.some(d => d.kind === 'report' && d.audience === $('audience').value && ['queued', 'running'].includes(d.status))
     $('report-generating').hidden = !generatingReport; $('save-report').disabled = generatingReport || !deliveryReady()

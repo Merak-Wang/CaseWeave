@@ -162,6 +162,7 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
   }
   readEvidence(principal: TrustedPrincipalContext, request: EvidenceReadRequest, options?: ProviderCallOptions): Promise<TicketEvidenceResult> { return this.provider.readEvidence(principal, request, options) }
   readDetails(principal: TrustedPrincipalContext, request: DetailReadRequest, options?: ProviderCallOptions): Promise<TicketDetailResult> { return this.provider.readDetails(principal, request, options) }
+  override readFeatures: NonNullable<import('@retrieval-agent/contracts').TicketRetrievalProvider['readFeatures']> = (...args) => this.provider.readFeatures?.(...args) ?? Promise.resolve([])
   async status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus> {
     await this.preparation
     if (this.preparationError !== undefined) {

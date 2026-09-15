@@ -6,6 +6,7 @@ ENV UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONUNBUFFERED=1 PYTHONDONTWRI
 COPY pyproject.toml uv.lock ./
 COPY python/evals/pyproject.toml python/evals/README.md ./python/evals/
 COPY python/model-service/pyproject.toml python/model-service/README.md ./python/model-service/
+COPY python/semantic-operators/pyproject.toml python/semantic-operators/README.md ./python/semantic-operators/
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --project python/model-service --group runtime --no-dev --no-install-workspace
 COPY python/model-service/src ./python/model-service/src
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --project python/model-service --group runtime --no-dev --no-editable \

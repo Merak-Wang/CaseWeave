@@ -16,13 +16,15 @@ export async function externalizeArtifacts(connection: PoolConnection, taskId: s
   function visit(v: unknown): unknown {
     if (Array.isArray(v)) return v.map(visit)
     if (!object(v)) return v
+    // Identity-only command projections keep the original immutable body handle.
+    if (object(v.$raArtifact)) return { $raArtifact: v.$raArtifact }
     const kind: Kind | undefined = typeof v.evidenceId === 'string' && typeof v.text === 'string' ? 'evidence'
       : typeof v.ref === 'string' && typeof v.summary === 'string' && typeof v.snapshotId === 'string' ? 'candidate'
         : typeof v.id === 'string' && typeof v.roleId === 'string' && typeof v.renderedHash === 'string' ? 'context' : undefined
     if (kind) {
       const key = hash(v)
       bodies.set(`${kind}:${key}`, { kind, body: v, identity: String(v.evidenceId ?? v.ref ?? v.id) })
-      return { $raArtifact: { kind, hash: key } }
+      return { $raArtifact: { kind, hash: key, identity: String(v.evidenceId ?? v.ref ?? v.id) } }
     }
     return Object.fromEntries(Object.entries(v).map(([k, child]) => [k, visit(child)]))
   }
@@ -36,6 +38,41 @@ export async function externalizeArtifacts(connection: PoolConnection, taskId: s
     }
   }
   return encoded
+}
+
+/** Command admission only needs candidate membership. It must not read evidence/context bodies under a task lock. */
+export async function artifactIdentities(query: (sql: string, values: unknown[]) => Promise<unknown>, taskId: string, value: unknown): Promise<unknown> {
+  const missing = new Map<Kind, Set<string>>()
+  function collect(v: unknown): void {
+    if (Array.isArray(v)) { v.forEach(collect); return }
+    if (!object(v)) return
+    if (object(v.$raArtifact)) {
+      const { kind, hash: key, identity } = v.$raArtifact
+      if (typeof kind !== 'string' || !(kind in tables) || typeof key !== 'string' || !/^[a-f0-9]{64}$/u.test(key)) throw new RetrievalError('PROTOCOL_MISMATCH', '持久证据引用无效。')
+      if (typeof identity !== 'string') { const keys = missing.get(kind as Kind) ?? new Set(); keys.add(key); missing.set(kind as Kind, keys) }
+    } else Object.values(v).forEach(collect)
+  }
+  collect(value)
+  const legacy = new Map<string, string>()
+  for (const [kind, keys] of missing) {
+    const list = [...keys]
+    for (let i = 0; i < list.length; i += 500) {
+      const batch = list.slice(i, i + 500)
+      const [rows] = await query(`SELECT content_hash,identity_key FROM ${tables[kind]} WHERE task_id=? AND content_hash IN (${batch.map(() => '?').join(',')})`, [taskId, ...batch]) as [RowDataPacket[], unknown]
+      for (const row of rows) legacy.set(`${kind}:${row.content_hash}`, row.identity_key)
+    }
+  }
+  function visit(v: unknown): unknown {
+    if (Array.isArray(v)) return v.map(visit)
+    if (!object(v)) return v
+    if (object(v.$raArtifact)) {
+      const ref = v.$raArtifact, identity = ref.identity ?? legacy.get(`${ref.kind}:${ref.hash}`)
+      if (typeof identity !== 'string') throw new RetrievalError('PROTOCOL_MISMATCH', '持久证据身份缺失。')
+      return { $raArtifact: { ...ref, identity }, [ref.kind === 'candidate' ? 'ref' : ref.kind === 'evidence' ? 'evidenceId' : 'id']: identity }
+    }
+    return Object.fromEntries(Object.entries(v).map(([k, child]) => [k, visit(child)]))
+  }
+  return visit(value)
 }
 
 export async function hydrateArtifacts(query: (sql: string, values: unknown[]) => Promise<unknown>, taskId: string, value: unknown): Promise<unknown> {

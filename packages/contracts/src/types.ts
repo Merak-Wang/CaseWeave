@@ -137,9 +137,10 @@ export type TicketFastQueryPlan =
  * language, domain, entities, constraints, and result-set policy it used.
  */
 export interface TicketQueryContract {
+  readonly semanticPlan?: import('./semantic-operators.js').SemanticQueryPlan
   readonly queryPlan?: QueryPlan
   /** Version 8 records sourced user requirements; older persisted contracts remain readable. */
-  readonly schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+  readonly schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10
   readonly original: string
   readonly normalized: string
   readonly task: TicketTaskTarget
@@ -469,7 +470,7 @@ export interface NormalizedTicketRecord {
   readonly language?: string
   readonly region?: string
   readonly errorCodes: readonly string[]
-  readonly piiRedactionStatus: 'not_applicable' | 'redacted' | 'unreviewed'
+  readonly piiRedactionStatus: 'not_applicable' | 'redacted' | 'rules_applied' | 'unreviewed'
   /** Optional source-native document retained inside the Provider and never projected wholesale. */
   readonly rawSource?: {
     readonly datasetId: string

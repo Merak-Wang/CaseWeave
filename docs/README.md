@@ -9,6 +9,7 @@
 | 查询范围、证据、反馈和交付规则 | [产品规格](PRODUCT_REQUIREMENTS.md) |
 | 系统组件、状态存储与数据流 | [架构说明](ARCHITECTURE.md) |
 | 关键词、向量召回和索引一致性 | [检索设计](design/RETRIEVAL.md) |
+| Python 语义算子、DSH 桥接、FastAPI 与计量 | [算子设计](design/OPERATORS.md) |
 | Agent 调度、领域专家、取消与恢复 | [Agent 运行](design/AGENT_RUNTIME.md) |
 | 工单分层、上下文容量和引用身份 | [上下文设计](design/CONTEXT.md) |
 | 页面交互、报告和完整结果下载 | [工作台与交付](design/WORKBENCH.md) |

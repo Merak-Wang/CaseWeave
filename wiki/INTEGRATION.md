@@ -18,7 +18,7 @@ python scripts/wiki-build.spec.py
 python scripts/verify-wiki-artifacts.py
 ```
 
-最后一个 search 返回空数组：首轮快查不得利用 Wiki 语义扩写。此处是知识搜索端口的阶段约束，调用方仍需保证首轮不直接调用 read 或另行注入知识。
+`first-pass` 是旧结构化快查调用者的兼容模式，返回空数组。新 Python 规划器与过滤算子使用 `post-fast-query` 知识读取能力，即使规划与原句向量并行启动，也会把固定版本的相关 Wiki 作为可被证据否定的先验；实际条目进入各算子的 ContextManifest。
 
 `verify-wiki-artifacts.py` 将可读 Markdown 与 `curation.json` 指定的离线发布版本比对，并通过运行时读取器独立验证当前发布。文件增量与自动学习条目不需要生成离线 Markdown 副本。报告分别列出离线 `releaseId` 和当前 `runtimeReleaseId`；当前发布损坏或只能回退时检查失败。`--private` 额外核对离线来源绑定，私有路径不写入输出。
 

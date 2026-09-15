@@ -69,6 +69,9 @@ function validOffset(start: unknown, end: unknown, query: string): boolean {
 function validResponse(value: unknown, requestId: string, query: string): value is QueryAnalysisResponse {
   const response = object(value)
   const analyzer = object(response?.analyzer)
+  // Python 返回完整轨迹：候选通过 occupied 去重且占用互斥 token，token/实体均为非空原文片段。
+  // 每类数量最多等于原文字符数，UTF-16 长度是安全上界；不能截断依存 head 所引用的 token 数组。
+  const maxProvenanceItems = query.length
   // 第一层检查响应身份、分析器身份和集合规模，先拒绝版本漂移或异常放大的载荷。
   if (response?.protocolVersion !== QUERY_ANALYSIS_PROTOCOL_VERSION || response.requestId !== requestId
     || analyzer?.engine !== 'spacy' || analyzer.loaded !== true
@@ -79,9 +82,9 @@ function validResponse(value: unknown, requestId: string, query: string): value 
     || !Array.isArray(response.keywords) || response.keywords.length > 8
     || !response.keywords.every(term => nonEmptyString(term) && query.includes(term))
     || new Set(response.keywords).size !== response.keywords.length
-    || !Array.isArray(response.candidates) || response.candidates.length > 32
-    || !Array.isArray(response.tokens) || response.tokens.length > 64
-    || !Array.isArray(response.entities) || response.entities.length > 32
+    || !Array.isArray(response.candidates) || response.candidates.length > maxProvenanceItems
+    || !Array.isArray(response.tokens) || response.tokens.length > maxProvenanceItems
+    || !Array.isArray(response.entities) || response.entities.length > maxProvenanceItems
     || !Array.isArray(response.triples) || response.triples.length > 8) return false
 
   // 候选词必须是原始 query 的连续表面片段；领域词典只能合并原文，不能在首轮生成同义词。
@@ -423,3 +426,4 @@ export async function buildPlannedTicketRequest(query: string, parser: QueryPlan
   return { target, query, retrievalQuery: contract.normalized, countPolicy, ...(result?.requestedCount ? { requestedCount: result.requestedCount } : {}),
     filters: [], ambiguities, fastQuery, queryContract: contract }
 }
+export { buildSemanticTicketRequest } from './semantic-request.js'

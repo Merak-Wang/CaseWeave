@@ -4,6 +4,7 @@ import { RetrievalId, RetrievalError, type RetrievalState, type TicketRetrievalR
   type EvidenceContextSelection, type CandidateDetailReadReceipt, type TicketDetailResult, type CandidateExportReceipt } from '@retrieval-agent/contracts'
 import { RetrievalController, type RetrievalClarificationAnswer, type RetrievalSearchInput } from '@retrieval-agent/domain'
 import { compileUserConditions, compileUserResultPolicy } from '@retrieval-agent/query-understanding'
+import type { SemanticQueryPlan, ContextManifest, OperatorDecision } from '@retrieval-agent/contracts'
 import { randomUUID } from 'node:crypto'
 import { appendRetrievalSessionEvent, readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
 import { RetrievalAgentService, type RetrievalAgentServiceConfig } from './service.js'
@@ -45,7 +46,8 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
   }
   private async executionTask(agent: Agent): Promise<TaskRecord | undefined> {
     const job = this.jobs.get(agent)
-    return job ? this.store.read(job.task_id) : this.store.forSession(String(agent.session.id))
+    const previous = this.states.get(agent)
+    return job ? this.store.read(job.task_id, previous) : this.store.forSession(String(agent.session.id), previous)
   }
   private async executionIdentity(agent: Agent): Promise<Pick<TaskRecord, 'id' | 'owner_hash'> | undefined> {
     await this.store.ready
@@ -55,7 +57,7 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
       : 'SELECT id,owner_hash FROM ra_task WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 1', [job?.task_id ?? String(agent.session.id)]))[0]
   }
   override async stateForTask(agent: Agent, retrievalId: RetrievalId): Promise<RetrievalState | undefined> {
-    const task = await this.store.read(retrievalId)
+    const task = await this.store.read(retrievalId, this.states.get(agent))
     if (!task || task.session_id !== String(agent.session.id)) return undefined
     return task.state_json ?? undefined
   }
@@ -87,7 +89,10 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
     if (this.jobs.has(agent)) throw staleTask()
     this.jobs.set(agent, job)
     try { return await work() } finally {
-      if (this.jobs.get(agent) === job) { this.jobs.delete(agent); await this.loadTask(agent) }
+      if (this.jobs.get(agent) === job) {
+        this.jobs.delete(agent)
+        if (job.kind !== 'source_check' && job.kind !== 'unlearn') await this.loadTask(agent)
+      }
     }
   }
   driveAllowed(agent: Agent): boolean { return this.jobs.get(agent)?.kind === 'agent' }
@@ -106,7 +111,7 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
     } else if (/^(?:取消|停止|算了|cancel|stop)[。.!！\s]*$/iu.test(text.trim())) {
       await this.store.submit(task.id, principal, operationId, { kind: 'cancel' })
     } else {
-      const information = compileTaskInformation(text)
+      const information = compileTaskInformation(text, !this.operators)
       const question = await this.store.question(task.id)
       await this.store.submit(task.id, principal, operationId, question
         ? { kind: 'answer', text, information, questionId: question.id }
@@ -136,7 +141,7 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
     options: { start?: boolean; information?: readonly RetrievalClarificationAnswer[]; semantic?: boolean; taskId?: string }): Promise<RetrievalState> {
     const execution = options.taskId ? undefined : await this.executionTask(agent)
     const active = execution ?? await this.executionIdentity(agent)
-    let base = options.taskId ? await this.store.read(options.taskId) : execution
+    let base = options.taskId ? await this.store.read(options.taskId, this.states.get(agent)) : execution
     if (base && base.session_id !== String(agent.session.id)) throw new RetrievalError('UNAUTHORIZED', '任务不属于此会话。')
     if (!base || (!base.state_json && !options.start)) throw new RetrievalError('INVALID_TRANSITION', '当前任务尚未开始。')
     const journal = new TaskJournal([], await this.store.domainEventCount(base.id))
@@ -151,8 +156,9 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
       // Mirror delivery is recoverable and cannot roll back or replace the authoritative commit.
       try { await this.mirror(agent) } catch { /* persistent outbox is drained by the Host */ }
     }
-    const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, undefined,
-      { ...this.persistentConfig, retrievalId: RetrievalId(base.id), ...(options.information ? { initialInformation: options.information } : {}), onState: commit })
+    const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, this.createContextPolicy(),
+      { ...this.persistentConfig, ...(this.operators ? { initialPlanner: (state: RetrievalState, signal?: AbortSignal) => this.operators!.plan(agent, state, signal) } : {}),
+        retrievalId: RetrievalId(base.id), ...(options.information ? { initialInformation: options.information } : {}), onState: commit })
     try {
       let state = await work(controller, base.state_json!, journal)
       state = await controller.finalizeExhaustedEmptyResult(state)
@@ -203,6 +209,27 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
     const p = await this.resolve(agent, decision.action.kind === 'inspect' ? 'evidence_read' : 'search', signal)
     return this.execute(agent, (c, s) => c.decide(p, s, decision, signal))
   }
+  override async acceptSemanticPlan(agent: Agent, plan: SemanticQueryPlan, manifests: readonly ContextManifest[], signal?: AbortSignal): Promise<RetrievalState> {
+    const p = await this.resolve(agent, 'search', signal)
+    return this.execute(agent, async (c, s) => c.acceptSemanticPlan(await c.reauthorize(p, s, signal), plan, manifests))
+  }
+  override async acceptOperatorResults(agent: Agent, generation: number, decisions: readonly OperatorDecision[], signal?: AbortSignal): Promise<RetrievalState> {
+    await this.coordinator?.validateKnowledge?.(agent)
+    const p = await this.resolve(agent, 'evidence_read', signal)
+    return this.execute(agent, async (c, s) => c.acceptOperatorResults(await c.reauthorize(p, s, signal), generation, decisions))
+  }
+  override async recordSemanticSearch(agent: Agent, key: string): Promise<RetrievalState> {
+    return this.execute(agent, async (c, s) => c.recordSemanticSearch(s, key))
+  }
+  override async recordOperatorActivity(agent: Agent, activity: NonNullable<RetrievalState['operatorActivity']>): Promise<RetrievalState> {
+    return this.execute(agent, async (c, s) => c.recordOperatorActivity(s, activity), { semantic: false })
+  }
+  override async recordOperatorUsage(agent: Agent, generation: number, metrics: Readonly<Record<string, unknown>>): Promise<RetrievalState> {
+    return this.execute(agent, async (c, s) => c.recordOperatorUsage(s, generation, metrics), { semantic: false })
+  }
+  override async recordOperatorArtifact(agent: Agent, artifact: import('@retrieval-agent/contracts').OperatorArtifact): Promise<RetrievalState> {
+    return this.execute(agent, async (c, s) => c.recordOperatorArtifact(s, artifact))
+  }
   override async resumeClarification(agent: Agent, input: RetrievalClarificationAnswer, signal?: AbortSignal): Promise<RetrievalState> {
     const p = await this.resolve(agent, 'search', signal); return this.execute(agent, (c, s) => c.resumeClarification(p, s, input, signal))
   }
@@ -218,13 +245,13 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
     // Presentation must remain available while a search holds the mutation queue.
     // Validate an authoritative snapshot independently; SQL fences any changed grant.
     for (let attempt = 0; ; attempt++) {
-      const base = await this.store.read(id)
+      const base = await this.store.read(id, this.states.get(agent))
       if (!base?.state_json) throw new RetrievalError('INVALID_TRANSITION', '当前任务尚未开始。')
       if (base.session_id !== String(agent.session.id) || base.owner_hash !== taskOwner(p)) {
         throw new RetrievalError('UNAUTHORIZED', '当前身份无权访问任务。')
       }
       const journal = new TaskJournal([], await this.store.domainEventCount(id))
-      const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, undefined,
+      const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, this.createContextPolicy(),
         { ...this.persistentConfig, retrievalId: id })
       const state = await controller.reauthorize(p, base.state_json, signal)
       try {
@@ -267,7 +294,7 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
       accepted = input.estimatedInputTokens + (input.outputReservedTokens ?? 0) + (input.protocolMarginTokens ?? 0) <= limit
       const state = c.recordModelRequest(s, { ...input, accepted, ...(Number.isFinite(limit) ? { effectiveContextLimit: limit } : {}),
         ...(!accepted ? { rejectionReason: 'model_context' as const } : {}) })
-      return accepted ? state : c.freezeForInterruption(state, 'budget_exhausted')
+      return accepted ? state : c.freezeForInterruption(state, 'capacity_exceeded')
     }, { semantic: false }))
     return { accepted }
   }
@@ -304,10 +331,13 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
   }
 }
 
-export function compileTaskInformation(text: string): RetrievalClarificationAnswer {
-  const conditions = compileUserConditions(text, [], new Date(), Intl.DateTimeFormat().resolvedOptions().timeZone, { mode: 'supplement' })
-  const result = compileUserResultPolicy(text)
-  return { accepted: true, answer: text, filters: conditions.filters, removedFilterFields: conditions.removedFilterFields,
-    requirements: conditions.userRequirements, ambiguities: conditions.ambiguities,
-    ...(result?.countPolicy ? { result: { ...result, countPolicy: result.countPolicy } } : {}) }
+export function compileTaskInformation(text: string, legacyStructured = false): RetrievalClarificationAnswer {
+  if (legacyStructured) {
+    const conditions = compileUserConditions(text, [], new Date(), Intl.DateTimeFormat().resolvedOptions().timeZone, { mode: 'supplement' })
+    const result = compileUserResultPolicy(text)
+    return { accepted: true, answer: text, filters: conditions.filters, removedFilterFields: conditions.removedFilterFields,
+      requirements: conditions.userRequirements, ambiguities: conditions.ambiguities,
+      ...(result?.countPolicy ? { result: { ...result, countPolicy: result.countPolicy } } : {}) }
+  }
+  return { accepted: true, answer: text }
 }

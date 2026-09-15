@@ -2,11 +2,11 @@
 
 本文说明查询计划、MySQL 字面检索、Milvus 向量召回及索引一致性。运行命令见 [开发与运行](../DEVELOPMENT.md)，查询语义见 [产品规格](../PRODUCT_REQUIREMENTS.md)，验证场景见 [评测策略](../EVALUATION_STRATEGY.md)。
 
-主要实现入口为 [QueryPlan 契约](../../packages/contracts/src/query-plan.ts)、[解析端口及规则实现](../../packages/query-understanding/src/query-plan.ts) 和 [数据库 Provider](../../packages/provider-database/src/provider.ts)。数据库当前物理表以 [store.ts 的 DDL](../../packages/provider-database/src/store.ts) 为事实源：`ra_generation`/`ra_ticket`/独立字段投影、`ra_index`/job/checkpoint/cache、原子 publication、每路 search_run/search_hit。它们存来源与检索产物；确认、反馈和合法转移仍由 Controller 和权威任务状态维护，不能用 SQL 命中直接替代 Agent 判断。
+主要实现入口为 [语义计划契约](../../packages/contracts/src/semantic-operators.ts)、[Python 规划器](../../python/semantic-operators/src/caseweave_ops/planner.py) 和 [数据库 Provider](../../packages/provider-database/src/provider.ts)。数据库当前物理表以 [store.ts 的 DDL](../../packages/provider-database/src/store.ts) 为事实源：`ra_generation`/`ra_ticket`/独立字段投影、`ra_index`/job/checkpoint/cache、原子 publication、每路 search_run/search_hit。它们存来源与检索产物；确认、反馈和合法转移仍由 Controller 和权威任务状态维护，不能用 SQL 命中直接替代 Agent 判断。
 
 当前字段映射 `normalized-fields-v2` 遍历完整原始字段值，不沿用旧 searchText 的 256 值上限；NULL 保持未知，生成字段能力显式引用生成策略。NFKC 小写规范化与二进制 LOCATE 实现任意字面子串基线。可选 bigram 倒排只做必要条件，后置精确谓词始终保留；正向必要 gram 中选择最窄的 posting，超过语料 10% 时回退精确扫描，避免宽条件强制 join 的实测退化。OR 只使用全部分支共同需要的 gram，NOT 不提供正向剪枝。扫描及加速均用 keyset 全集枚举；最终排序页宽与向量工单 Top-K 分离。
 
-索引使用 `field-codepoints-v3`：ESFT 摘要与完整 raw_dialogue，360 Unicode 字符分片、保留全部尾部；problem_description 是客户轮次的派生副本，避免重复索引。模型身份包含 revision/维度/归一化/距离、切片版本；每个命中复核 ticket/contentHash/sourceVersion/片段位置及哈希。SQL 生成授权且满足硬条件的工单集合，下推 Milvus 分组搜索，合并为工单 Top-K。更新和删除生成新的不可变来源/集合，复用相同内容 embedding；完全就绪后单一发布指针切换，滞后索引不能混入当前 SQL 版本。
+索引使用 `field-codepoints-v3`：ESFT 摘要与完整 raw_dialogue，360 Unicode 字符分片、保留全部尾部；problem_description 是客户轮次的派生副本，避免重复索引。模型身份包含 revision/维度/归一化/距离、切片版本；每个命中复核 ticket/contentHash/sourceVersion/片段位置及哈希。SQL 生成授权且满足硬条件的工单集合。整个不可变索引集合均可用时直接执行一次 Milvus 分组搜索；受限范围按 SQL ID 游标流式交集，每批最多 1,000 个 ID、最多四批并发，只保留合并后的工单 Top-K。任一批失败不把剩余批次冒充完整向量结果。更新和删除生成新的不可变来源/集合，复用相同内容 embedding；完全就绪后单一发布指针切换，滞后索引不能混入当前 SQL 版本。
 
 ## 模型服务部署边界
 
@@ -16,25 +16,15 @@
 
 首批目标 Windows/WSL 2、Linux x86_64、NVIDIA GPU 或显式 CPU，其他架构不在当前支持承诺内。依赖/Compose 参数参考 [uv 官方 Docker 指南](https://docs.astral.sh/uv/guides/integration/docker/) 和 [Docker GPU reservation](https://docs.docker.com/compose/how-tos/gpu-support/)，具体冻结版本由 Dockerfile/uv.lock 维护。部署命令、旧宿主路径消费者与退出条件见 [开发说明](../DEVELOPMENT.md)。
 
-## 1. Query Understanding 的输出
+## 1. 查询规划与语义判据
 
-解析器接受原句、用户后续修订、查询时刻/时区、字段能力目录。输出版本化 QueryPlan，不能让 LLM 直接生成并执行任意 SQL。
+新任务使用 schemaVersion 10 的自然语言契约，入口为 `buildSemanticTicketRequest`。Host 立即启动原句向量召回，并通过 DSH 调用 Python `query_plan`；后者接收原句、用户补充、字段目录、任务时刻与固定版本 Wiki，输出 `keywords`、`instruction`、`retrieval_expressions`、`goal` 和步骤。
 
-| 层 | 示例 | 谁能改变 |
-| --- | --- | --- |
-| 用户业务要求 | 找副卡与跨域有关的问题；排除欠费导致的故障 | 用户修订，或依据原句纠正错误解释并显式记录 |
-| 可执行硬条件 | 指定地区、创建时间、必须出现某词 | 编译器保留出处，Provider 执行；不得静默放宽 |
-| 关键词检索表达 | `OR(contains("副卡"), contains("跨域"))` | 普通主题取并集，明确要求同时出现才用 AND；后续 Agent 可提出检索假设 |
-| 向量检索表达 | 首轮为原始 query；后续为补充的语义描述 | 后续 Agent，保留改写原因和原始要求 |
-| 待解决项 | “上月处理的”指处理发生时间还是当前已处理状态 | Agent 结合数据能力/工单证据解决，必要时询问 |
+关键词只用于 OR 宽召回，业务布尔关系留在完整自然语言判据中。普通检索由 `sem_filter` 进行有证据的三态判断，缺原文时保留未决并由 Agent 定向取证。指定 ID 必须保持完整身份；时间、字段和业务排除不得被改写为更宽的确认条件。语义改写是搜索先验，不是事实或新增要求。
 
-`AND/OR/NOT` 是可嵌套 AST；字段谓词包含 eq/in/range/exists，字面谓词包含 contains/phrase。每个用户条件保留原文位置、解释、字段来源、确定/待核实状态。编译器使用白名单字段和参数绑定，拒绝不支持的操作；规则、spaCy 或 LLM 是同一解析端口的实现选择，不把某引擎的 tokens/triples 写成通用业务契约。
+Python 负责语义计算，Host 负责身份、来源、当前输入代次、实际 DSH 请求、合法转移和结果发布。详细接口、恢复与常驻 FastAPI 服务见 [Python 算子](OPERATORS.md)。
 
-首轮先处理明确结构，再对不确定片段做有限提取；不新增原句没有的同义词、产品关系或因果条件。解析不完整可以产生标明条件待核实的过程候选，但不能在最终确认时忽略这些要求。明确硬过滤必须同时约束两路；语义原因排除留给取证判断，不能机械编译成正文 `NOT contains`。
-
-业务时序排除同样保留为完整的语义要求，例如“不纳入套餐或关系已解除后仅剩独立合账取消的诉求”。其中“或”属于该排除项，不能拆成新的正向召回分支；被排除业务的词语也不能作为首轮正向关键词。询问“是否属于‘某范围’”时，引号命名待判断的业务范围，不自动要求工单逐字包含该名称；“摘要包含‘某短语’”仍是显式字面条件。
-
-条件下推必须保留括号关系。例如“上海的副卡问题，或广东的宽带问题”，不能把各分支条件拆散后全局 AND。编译器只提前下推整个表达式必需的条件；复杂分支保留完整 AST，Provider/判断阶段复核原有组合。缺字段或未解析的子句用 unknown 表达，不能在 NOT/OR 运算中偷偷当作已满足。
+旧 `QueryPlan` AST 继续服务显式结构化 Provider 请求、旧 Session 重放和相应契约测试；新自然语言入口不依赖 spaCy 编译 AST。旧调用者退出及历史任务迁移后才删除该兼容入口。不得让模型生成任意 SQL，结构化字段执行继续使用白名单和参数绑定。
 
 ## 2. 需要覆盖的自然语言
 
@@ -43,7 +33,7 @@
 | 自然语言 | 应保留的含义/检查点 |
 | --- | --- |
 | 帮我找副卡和跨域有关工单 | 关键词默认 OR，任一主题出现即召回；原句向量召回；两路并集再判相关 |
-| 必须同时包含副卡与跨域 / 副卡 AND 跨域 | 明确交集跨字段匹配，保留原有括号、字段和否定范围 |
+| 必须同时包含副卡与跨域 / 副卡 AND 跨域 | 宽召回后按明确交集跨字段核实，保留原有括号、字段和否定范围 |
 | 找副卡绑定失败或者解绑后仍共享流量的工单 | 明确括号为两类业务分支；保留副卡共同范围，歧义时展示解释 |
 | 宽带断网的，或者手机因为欠费停机的 | `(宽带 AND 断网) OR (手机 AND 欠费停机原因)`，不拉平为词袋 |
 | 找副卡不能上网，排除欠费导致的 | 欠费是原因排除；“已缴清欠费仍不能上网”不能因出现欠费而被机械排除 |
@@ -60,7 +50,7 @@
 
 定义 `contains(ticket, term)` 为：规范化后的 term 连续出现在该工单任一允许搜索的字段中。不同 term 可以出现在不同字段；一个 term 自身不能由两个字段尾首拼出来。规范化版本化，以 NFKC、明确的大小写策略为初始基线，不默认做同义替换或删改业务标点。
 
-逻辑等价于：`AND_k (OR_field literal_contains(field, k))`。空值字段不匹配；用单独的文本字段投影或字段表表达，避免字符串无分隔拼接造成假命中。SQL 由编译器绑定参数，LIKE 路径需转义 `%`、`_` 和 escape 字符；可先用明确排序规则下的 INSTR/LOCATE 实现正确性对照，实际排序规则和 Unicode 行为需要 MySQL 集成验收。
+宽召回逻辑为 `OR_k (OR_field literal_contains(field, k))`；显式结构化 Provider 请求仍支持 AND 和嵌套布尔条件。空值字段不匹配；用单独的文本字段投影或字段表表达，避免字符串无分隔拼接造成假命中。SQL 由编译器绑定参数，LIKE 路径需转义 `%`、`_` 和 escape 字符；可先用明确排序规则下的 INSTR/LOCATE 实现正确性对照，实际排序规则和 Unicode 行为需要 MySQL 集成验收。
 
 MySQL ngram 支持中文，但 token 长度、停用词、短语与空格处理会影响命中，不能直接承诺等价于任意子串包含。[MySQL 8.4 ngram 官方说明](https://dev.mysql.com/doc/refman/8.4/en/fulltext-search-ngram.html)。本项目据此采用：
 
@@ -75,17 +65,15 @@ MySQL ngram 支持中文，但 token 长度、停用词、短语与空格处理�
 
 首轮向量输入保持用户原句。查询 embedding 使用与索引一致的模型/revision、向量维度、归一化及距离约定；缓存键包含这些身份。后续可并行发多个经 Agent 解释的搜索表达，避免仅把首句反复执行。
 
-spaCy 的最近邻连接词关系仅作解释提示，不得用连接词左右两个词替换全句业务词集合。QueryPlan 用原句和保留的表面词编译完整 AST；字段条件共同约束两路，普通主题的“和/与”默认 OR。关键词全集以 500 条 SQL 批次保存命中，保留逐条身份、通道、rank 与来源哈希，不逐条往返写入；进度按批推送，前端和模型仍用有限窗口。
+关键词全集以 SQL 批次保存命中，保留逐条身份、通道、字面资格与来源哈希，进度按批推送。Python `sem_search` 逐页消费当前字面游标后再切换检索表达，防止另一向量排名覆盖尚未完成的关键词枚举。
 
-用户回答先按补充语义处理：举例、引文、用户所在地不产生地域硬筛选。显式移除字段条件须同时修改平面 filter 和 QueryPlan 的 keyword/hard AST。纯业务解释沿用现有候选/来源，只重审受影响判断；执行条件改变才重新检索。
-
-省市字典和 spaCy 的 GPE/LOC 实体共用地域意图校验，并保留真正限制条件出现的位置；同一句较早的案例所在地不能覆盖后面的“只看某地”。Python 查询分析在线协议边界将 Unicode 码点位置转换为 UTF-16 偏移，TypeScript 逐项核对 candidates/tokens/entities 对应的原文切片；词语在原句其他位置出现不能证明来源位置有效。预先取消的请求不发送 HTTP，读取响应期间取消的结果也不进入检索状态。
+用户回答按补充语义处理：举例、引文、用户所在地不自动产生地域硬筛选。新的自然语言计划沿用候选和来源，以输入代次隔离旧判断；执行条件或有价值的搜索方向变化时再检索，不重复原始快查。旧 spaCy HTTP 分析接口仍用于其显式调用者，保留 UTF-16 来源位置和历史协议校验，但不再作为生产自然语言规划的前置步骤。
 
 Milvus 可先执行元数据过滤再 ANN，也提供迭代过滤，适合不同选择性与表达复杂度；选择要实测。[Milvus filtered search](https://milvus.io/docs/filtered-search.md)。推入索引的共同条件是可执行用户硬条件和访问范围；“副卡/跨域”作为提取的关键词假设，不默认强加到向量分支。
 
 索引初始采用摘要向量与来源正文片段向量两类表示，比较单摘要基线的遗漏和成本。长正文按字段/对话结构切片，保存片段位置、内容哈希和截断情况；不要把全文静默截成 embedding 模型的前 512 tokens。片段 Top-K 需聚合成工单候选并保留命中片段；过采样/分组避免同一长工单垄断候选。具体切片大小、K、ANN 参数和重排范围见实验后配置，不固定进产品要求。
 
-合并按 `(datasetId, ticketId)` 去重，来源版本冲突先核对；保留每路命中理由、片段、原始分数及查询身份。RRF 可作为阅读排序基线，融合分数不删除关键词全集；可选 reranker 只重排需要优先处理的窗口，不能将窗口外候选无理由排除。各通道分数不可未经校准直接当相关概率。
+合并按 `(datasetId, ticketId)` 去重，来源版本冲突先核对；保留每路命中理由、片段、原始分数及查询身份。字面通道只提供集合资格，每条命中的融合贡献相同（当前为 1/61），不把 ID 枚举顺序当相关性名次；向量通道使用真实返回名次的倒数贡献（当前为 1/(60+rank)）。SQL 的排序索引负责读取窗口，稳定 ID 仅作同分分页次序，融合分数不删除关键词全集；可选 reranker 只重排需要优先处理的窗口，不能将窗口外候选无理由排除。各通道分数不可未经校准直接当相关概率。
 
 单路失败时已取得结果继续进入候选库，显式标记缺失通道并安排重试/替代动作。未执行向量时不能显示“双路已完成”。快查零候选也不是无条件终止信号，Agent 仍可核对解析、数据能力和后续扩搜价值。
 
@@ -103,9 +91,19 @@ Milvus 可先执行元数据过滤再 ANN，也提供迭代过滤，适合不同
 
 JSONL 先导入相同规范化模型，文件 Provider 保留为确定性对照。开发版本按不可变 dataset generation 查询；未来业务数据采用版本/水位与短事务，不能为一次 3 分钟检索保持整库长事务。
 
-MySQL 工单是事实源；索引异步构建，按 sourceVersion 幂等 upsert/delete，完成校验后发布 generation。任务固定可查询的数据/索引版本组合，标识向量是否落后于 SQL。Milvus 自身的一致性选项不能自动保证与 MySQL 同步。[Milvus consistency](https://milvus.io/docs/consistency.md)。索引滞后时保留 SQL 结果和缺口，不虚称语义覆盖完整；新代索引切换不改变旧证据身份。
+MySQL 工单是事实源；索引异步构建，按 sourceVersion 幂等 upsert/delete，完成校验后发布 generation。任务固定可查询的数据/索引版本组合，标识向量是否落后于 SQL。已发布新代不自动使所有旧任务失效：保留的旧来源和旧索引仍可查询，输出前将涉及的工单与当前发布版本逐项核对存在、内容版本和当前访问资格；相关工单改变、删除或撤权时明确拒绝，无关新增或索引切换不改变旧引用。Milvus 自身的一致性选项不能自动保证与 MySQL 同步。[Milvus consistency](https://milvus.io/docs/consistency.md)。索引滞后时保留 SQL 结果和缺口，不虚称语义覆盖完整；新代索引切换不改变旧证据身份。
 
 向量返回 ID 必须回 MySQL/Provider 核对存在、版本、当前资格和可访问字段。索引中的镜像权限或状态只作预过滤，不成为最终授权依据。当前同数据范围仍需要后端任务与数据访问边界；业务库不接受模型任意写操作。
+
+## 在线存储与资源边界
+
+数据库快照保存版本、授权绑定和字段目录，不持有整代工单正文。`ra_ticket_access` 保存可索引的访问属性和 L0/L1 投影，`ra_search_candidate` 保存两路并集及可索引排序，`ra_provider_candidate` 保存已发出的稳定引用。初始化为旧代补齐缺失投影；查询、恢复和进度只读取当前窗口，原文与向量片段身份核对按工单 ID 读取。`ra_search_hit` 继续保留通道审计。
+
+关键词全部枚举在 SQL 内执行，ID 批次最多 500 条；`searchMaxScan` 对数据库路径限制每批物化的 ID 数，不再以授权库总条数拒绝窄条件查询或截断结果全集。文件 Provider 仍以此限制一次内存扫描，主 Agent 和专家共用同一配置。批次与取消约束不等于 SQL 扫描耗时保证，窄过滤、复杂授权和实际数据规模仍需测量。
+
+进度查询走排序索引的有限窗口，不在 Node 中重复排序累计全集。搜索尚未稳定时不提供排名续页游标；完成后游标绑定查询和最后排序键。旧数据库快照保留原复合版本哈希及引用算法；读取合法旧排名游标时明确提示排序升级，从新顺序的首项重新枚举，由稳定引用去重，避免沿旧偏移跳过工单。
+
+相同查询通过数据库连接级互斥协调不同 Provider 实例，锁连接与执行查询的连接池分开，避免所有执行连接都被锁占用。已完成结果复用固定集合；中断尝试仅重建该查询的派生候选与通道审计，不沿用残留向量分数。此互斥不持有业务工单的长事务或写锁。
 
 ## 6. 性能与验证
 

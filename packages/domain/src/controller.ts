@@ -40,6 +40,8 @@ import { modelRequestBudget, modelResponseBudget, toolCallBudget } from './runti
 import { advanceRetrievalState, recordMeasuredBudget, recordRetrievalState, retrievalStateId } from './state-transition.js'
 import { planExperts, findingPatch, type ExpertUpdate } from './experts.js'
 import { updateCandidateRanking } from './policy.js'
+import { admitOperatorDecisions, semanticPlanPatch, validateOperatorRecord, validateOperatorArtifact } from './semantic-operators.js'
+import type { SemanticQueryPlan, ContextManifest, OperatorDecision } from '@retrieval-agent/contracts'
 
 function frozenCandidate(candidate: TicketCandidate, evidence: readonly TicketEvidenceSegment[]): FrozenEvidencePack['candidates'][number] {
   const supporting = evidence.filter(item => item.candidateRef === candidate.ref)
@@ -49,6 +51,7 @@ function frozenCandidate(candidate: TicketCandidate, evidence: readonly TicketEv
 }
 
 export interface RetrievalControllerConfig {
+  readonly initialPlanner?: (state: RetrievalState, signal?: AbortSignal) => Promise<{ plan: SemanticQueryPlan; manifests: readonly ContextManifest[] }>
   readonly onState?: (state: RetrievalState) => void | Promise<void>
   readonly retrievalId?: RetrievalId
   readonly initialInformation?: readonly RetrievalClarificationAnswer[]
@@ -87,7 +90,7 @@ export class RetrievalController {
   readonly #contextPolicy: EvidenceContextPolicy
   readonly #rulesVersion: string
   readonly #promptVersion: string
-  readonly #maxSearches: number
+  readonly #initialPlanner: RetrievalControllerConfig['initialPlanner']
   readonly #maxRepeatedToolErrors: number | undefined
   readonly #searchTopK: number
   readonly #searchMaxScan: number
@@ -103,7 +106,7 @@ export class RetrievalController {
     this.#contextPolicy = contextPolicy
     this.#rulesVersion = config.rulesVersion ?? 'retrieval-rules-v1'
     this.#promptVersion = config.promptVersion ?? 'retrieval-prompt-v2'
-    this.#maxSearches = config.maxSearches ?? 2_500
+    this.#initialPlanner = config.initialPlanner
     this.#maxRepeatedToolErrors = config.maxRepeatedToolErrors ?? 4
     if (this.#maxRepeatedToolErrors !== undefined && (!Number.isSafeInteger(this.#maxRepeatedToolErrors) || this.#maxRepeatedToolErrors < 1)) throw new TypeError('maxRepeatedToolErrors must be a positive integer')
     this.#searchTopK = config.searchTopK ?? 20
@@ -182,7 +185,7 @@ export class RetrievalController {
         })),
       ],
       allowedActions: [action('search'), action('read_state')],
-      budget: { ...emptyBudget({ maxSearches: this.#maxSearches }), ...(this.#maxRepeatedToolErrors === undefined ? {} : { maxRepeatedToolErrors: this.#maxRepeatedToolErrors }), consecutiveToolErrors: 0 },
+      budget: { ...emptyBudget({}), ...(this.#maxRepeatedToolErrors === undefined ? {} : { maxRepeatedToolErrors: this.#maxRepeatedToolErrors }), consecutiveToolErrors: 0 },
       progress: { newCandidateRefs: [], newEvidenceIds: [], rankOverlap: 0, newDecisiveEvidence: false, resolvedGaps: [], noProgressStreak: 0 },
       termination: 'active',
       provenance: {
@@ -203,11 +206,24 @@ export class RetrievalController {
       if (!snapshot.capabilities.keywordSearch || !snapshot.capabilities.denseSearch || !snapshot.capabilities.hybridFusion) {
         throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Provider 未声明首轮 Hybrid 所需的真实双通道能力。')
       }
-      return await this.#executeSearch(principal, state, 'initial_hybrid', {}, signal)
+      if (queryContract.schemaVersion !== 10) return await this.#executeSearch(principal, state, 'initial_hybrid', {}, signal)
+      if (!this.#initialPlanner) throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Python 查询规划器尚未装配。')
+      // Both start against the already persisted snapshot. Provider progress remains visible while the plan runs.
+      const [searched, planned] = await Promise.allSettled([
+        this.#executeSearch(principal, state, 'initial_hybrid', {}, signal), this.#initialPlanner(state, signal),
+      ])
+      if (searched.status === 'rejected') throw searched.reason
+      state = searched.value
+      if (planned.status === 'rejected') throw planned.reason
+      state = this.acceptSemanticPlan(state, planned.value.plan, planned.value.manifests)
+      await this.#onState?.(state)
+      return state
     } catch (error) {
       if (!(error instanceof RetrievalError)) throw error
       const reason = stopReason(error)
       if (reason === undefined) throw error
+      const metrics = (error.cause as { operatorUsage?: Readonly<Record<string, unknown>> } | undefined)?.operatorUsage
+      if (metrics) state = this.recordOperatorUsage(state, state.inputGeneration ?? 0, metrics)
       return this.stop(state, reason, error)
     }
   }
@@ -234,6 +250,7 @@ export class RetrievalController {
 
   /** Exhausted empty Provider pages can finish without a semantic model judgment. */
   async finalizeExhaustedEmptyResult(state: RetrievalState, _signal?: AbortSignal): Promise<RetrievalState> {
+    if (state.query.contract?.schemaVersion === 10) return state
     if (state.phase === 'stopped' || state.candidates.length > 0 || !state.lastPage?.boundary.resultPagesExhausted
       || state.query.unresolvedConstraints.length > 0) return state
     const current = this.#record(state, {
@@ -411,6 +428,48 @@ export class RetrievalController {
     return this.#requalifyUserInformation(principal, updated, input, signal)
   }
 
+  acceptSemanticPlan(state: RetrievalState, plan: SemanticQueryPlan, manifests: readonly ContextManifest[]): RetrievalState {
+    let current = state
+    const catalog = manifests.find(m => m.operator?.operation === 'query_plan')?.operator?.catalog
+    if (!current.knowledgeCatalog && catalog) current = this.expertUpdate(current, plan.inputGeneration, { kind: 'catalog', catalog })
+    for (const manifest of manifests) current = this.expertUpdate(current, plan.inputGeneration, { kind: 'manifest', manifest })
+    if (!current.contextManifests?.some(m => m.operator?.operation === 'query_plan' && m.operator.pythonManifestId === plan.manifest_id
+      && m.inputGeneration === plan.inputGeneration && m.measurement === 'dsh_request')) throw new RetrievalError('INVALID_REQUEST', '查询计划没有实际 DSH 请求依据。')
+    const metrics = manifests.findLast(m => m.operator?.metrics)?.operator?.metrics
+    return this.#record(current, { ...semanticPlanPatch(current, plan), ...(metrics ? { budget: { ...current.budget, operatorUsage: metrics } } : {}) })
+  }
+
+  acceptOperatorResults(state: RetrievalState, generation: number, decisions: readonly OperatorDecision[]): RetrievalState {
+    const patch = admitOperatorDecisions(state, generation, decisions)
+    if (JSON.stringify(patch.judgments) === JSON.stringify(state.judgments)) return state
+    // Publish the admitted authority once, so feedback and replay consume the same judgment.
+    this.#journal.append(state.retrievalId, 'retrieval/decision-submitted', { inputGeneration: generation,
+      decision: { stateId: state.stateId, judgments: (patch.judgments ?? []).filter(j => decisions.some(d => d.ref === j.candidateRef)),
+        gaps: [], action: { kind: 'inspect', fields: [] } } })
+    return this.#record(state, patch)
+  }
+  recordSemanticSearch(state: RetrievalState, key: string): RetrievalState {
+    return state.semanticSearchKeys?.includes(key) ? state : this.#record(state, { semanticSearchKeys: [...(state.semanticSearchKeys ?? []), key] })
+  }
+  recordOperatorUsage(state: RetrievalState, generation: number, metrics: Readonly<Record<string, unknown>>): RetrievalState {
+    if (generation !== (state.inputGeneration ?? 0)) throw new RetrievalError('INVALID_TRANSITION', '算子计量属于旧输入代次。')
+    return this.#record(state, { budget: { ...state.budget, operatorUsage: metrics } })
+  }
+  recordOperatorActivity(state: RetrievalState, activity: NonNullable<RetrievalState['operatorActivity']>): RetrievalState {
+    if (activity.inputGeneration !== (state.inputGeneration ?? 0) || state.phase === 'stopped') return state
+    return this.#record(state, { operatorActivity: activity })
+  }
+  recordOperatorArtifact(state: RetrievalState, artifact: import('@retrieval-agent/contracts').OperatorArtifact): RetrievalState {
+    validateOperatorArtifact(state, artifact)
+    if (state.phase === 'stopped' || artifact.inputGeneration !== (state.inputGeneration ?? 0)
+      || artifact.candidateRefs.some(ref => !state.candidates.some(c => c.ref === ref))
+      || artifact.manifestIds.some(id => !state.contextManifests?.some(m => m.id === id && m.inputGeneration === artifact.inputGeneration))) {
+      throw new RetrievalError('INVALID_TRANSITION', '算子产物不属于当前任务与证据。')
+    }
+    if (state.operatorArtifacts?.some(a => a.id === artifact.id)) return state
+    return this.#record(state, { operatorArtifacts: [...(state.operatorArtifacts ?? []), artifact] })
+  }
+
   /** A pending business question does not block enumeration of the already authorized query. */
   async continueIndependentPage(principal: TrustedPrincipalContext, state: RetrievalState, signal?: AbortSignal): Promise<RetrievalState> {
     if (state.phase !== 'awaiting_clarification' || !state.lastPage?.nextCursor) throw new RetrievalError('INVALID_TRANSITION', '当前没有独立于问题的待取结果页。')
@@ -513,7 +572,7 @@ export class RetrievalController {
     // Validate terminal and clarification intent before accepting any of the judgments.
     const reason = nextAction.kind === 'finish' ? finishReason(proposed, nextAction) : undefined
     if (nextAction.kind === 'clarify') validateVisibleEvidence(proposed, [...nextAction.candidateRefs, ...nextAction.evidenceRefs])
-    const event = this.#journal.append(state.retrievalId, 'retrieval/decision-submitted', { decision })
+    const event = this.#journal.append(state.retrievalId, 'retrieval/decision-submitted', { decision, inputGeneration: state.inputGeneration ?? 0 })
     let current: RetrievalState = { ...proposed, provenance: { ...state.provenance, sourceEventIds: [event.eventId] } }
     this.#proposalBases.set(current, state)
     try {
@@ -530,7 +589,7 @@ export class RetrievalController {
           if (nextAction.nextWindow) {
             if (nextAction.candidateRefs?.length || nextAction.fields?.length) throw new RetrievalError('INVALID_REQUEST', '摘要翻窗与正文字段读取必须分开指定。')
             const unseen = current.candidateHistory.filter(candidate => current.candidates.some(c => c.ref === candidate.ref)
-              && !(current.modelVisibleCandidateRefs ?? []).includes(candidate.ref)).slice(0, 8).map(c => c.ref)
+              && !(current.modelVisibleCandidateRefs ?? []).includes(candidate.ref)).slice(0, this.#contextPolicy.maxCandidates).map(c => c.ref)
             if (unseen.length) return this.#record(current, { contextCandidateRefs: unseen, evidenceWindowOffset: 0 })
             const evidenceOffset = this.#contextPolicy.nextEvidenceWindowOffset(current)
             if (evidenceOffset < 0) throw new RetrievalError('INVALID_TRANSITION', '当前候选摘要与已取得证据已全部提供；如需更多候选请继续检索。')
@@ -538,7 +597,7 @@ export class RetrievalController {
           }
           if (nextAction.history) {
             const refs = validateRefs(current, nextAction.candidateRefs ?? [])
-            if (!refs.length || refs.length > 8) throw new RetrievalError('INVALID_REQUEST', '历史重读每次指定 1–8 个仍有效的候选。')
+            if (!refs.length || refs.length > this.#contextPolicy.maxCandidates) throw new RetrievalError('INVALID_REQUEST', `历史重读每次指定 1–${this.#contextPolicy.maxCandidates} 个仍有效的候选。`)
             if (!nextAction.fields?.length) return this.#record(current, { contextCandidateRefs: refs, evidenceWindowOffset: 0 })
           }
           return await this.inspect(principal, current, nextAction, signal)
@@ -589,14 +648,17 @@ export class RetrievalController {
     if (result.snapshotId !== state.snapshot?.snapshotId || result.rejectedCandidateRefs.length > 0) {
       throw new RetrievalError('UNAUTHORIZED', '详情结果未获得当前快照的完整授权。')
     }
-    const refs = validateRefs(state, receipt.candidateRefs)
+    const refs = [...new Set(receipt.candidateRefs)]
+    if (!refs.length || refs.some(ref => ![...state.candidates, ...state.candidateHistory].some(c => c.ref === ref))) {
+      throw new RetrievalError('INVALID_REQUEST', '详情回执不属于此任务的检索历史。')
+    }
     if (refs.length !== result.details.length || result.details.some((detail, index) => detail.candidateRef !== refs[index])) {
       throw new RetrievalError('PROTOCOL_MISMATCH', '详情响应的候选集合或顺序与读取回执不一致。')
     }
     const visibleValues = new Map<string, number>()
     const key = (ref: string, field: string, text: string): string => JSON.stringify([ref, field, text])
     for (const detail of result.details) {
-      const candidate = state.candidates.find(candidate => candidate.ref === detail.candidateRef)!
+      const candidate = [...state.candidates, ...state.candidateHistory].find(candidate => candidate.ref === detail.candidateRef)!
       if (detail.sourceVersion !== candidate.sourceVersion || detail.displayId !== candidate.displayId
         || detail.title !== candidate.title || detail.summary !== candidate.summary) {
         throw new RetrievalError('PROTOCOL_MISMATCH', '详情内容的候选身份或来源版本与当前状态不一致。')
@@ -632,6 +694,7 @@ export class RetrievalController {
     const receivedIds = new Set<string>()
     for (const item of received) {
       const candidate = state.candidates.find(candidate => candidate.ref === item.candidateRef)
+        ?? (reader === 'user' ? state.candidateHistory.find(candidate => candidate.ref === item.candidateRef) : undefined)
       const descriptor = state.snapshot?.fieldCatalog.find(field => field.key === item.field)
       if (receivedIds.has(item.evidenceId) || typeof item.text !== 'string' || !Number.isSafeInteger(item.start) || item.start < 0
         || !Number.isSafeInteger(item.end) || item.end - item.start !== item.text.length || typeof item.truncated !== 'boolean'
@@ -684,11 +747,15 @@ export class RetrievalController {
       case 'knowledge_invalidated': {
         const affected = state.expertTasks?.filter(t => t.inputGeneration === generation && t.status !== 'failed'
           && t.knowledgeRefs.some(ref => update.references.includes(ref))) ?? []
-        if (!affected.length) return state
+        const operatorManifests = state.contextManifests?.filter(m => m.operator && m.inputGeneration === generation
+          && m.knowledgeRefs.some(ref => update.references.includes(ref))) ?? []
+        if (!affected.length && !operatorManifests.length) return state
         const ids = new Set(affected.map(t => t.id))
-        const refs = new Set(affected.flatMap(t => [...t.candidateRefs, ...(t.finding?.judgments.map(j => j.candidateRef) ?? [])]))
+        const refs = new Set([...affected.flatMap(t => [...t.candidateRefs, ...(t.finding?.judgments.map(j => j.candidateRef) ?? [])]),
+          ...operatorManifests.flatMap(m => m.candidateRefs)])
         return this.#record(state, { knowledgeCatalog: update.catalog,
-          expertTasks: state.expertTasks!.map(t => {
+          contextManifests: (state.contextManifests ?? []).filter(m => !operatorManifests.includes(m)),
+          expertTasks: (state.expertTasks ?? []).map(t => {
             if (!ids.has(t.id)) return t
             const { finding: _retiredFinding, ...retained } = t
             return { ...retained, status: 'failed' as const,
@@ -712,9 +779,10 @@ export class RetrievalController {
       }
       case 'manifest': {
         const m = update.manifest
-        if (m.inputGeneration !== generation || (m.roleId !== 'main' && !state.expertTasks?.some(t => t.id === m.roleId))
+        if (m.inputGeneration !== generation || (m.roleId !== 'main' && !(m.roleId.startsWith('operator:') && m.operator) && !state.expertTasks?.some(t => t.id === m.roleId))
           || m.candidateRefs.some(ref => !state.candidates.some(c => c.ref === ref))
           || m.evidenceIds.some(id => !state.promotedEvidence.some(e => e.evidenceId === id))) throw new RetrievalError('INVALID_REQUEST', '专家上下文引用越界。')
+        for (const row of m.operator?.records ?? []) validateOperatorRecord(state, row)
         if (state.contextManifests?.some(item => item.id === m.id)) return state
         return this.#record(state, { contextManifests: [...(state.contextManifests ?? []), m],
           measurementStateIds: [...(state.measurementStateIds ?? []), state.stateId] })
@@ -729,7 +797,6 @@ export class RetrievalController {
         const { page, spec } = update
         if (state.sharedSearches?.some(s => s.key === update.key && s.inputGeneration === generation)) return state
         if (page.snapshotId !== state.snapshot?.snapshotId || page.candidates.some(c => c.snapshotId !== state.snapshot?.snapshotId)) throw new RetrievalError('PROTOCOL_MISMATCH', '专家搜索快照不一致。')
-        if (state.budget.searchesUsed >= state.budget.maxSearches) throw new RetrievalError('BUDGET_EXHAUSTED', '检索页数已达上限。')
         const event = this.#journal.append(state.retrievalId, 'retrieval/search-completed', { stage: 'repair_search', spec, page })
         const ranking = updateCandidateRanking({ previousHistory: state.candidateHistory, previousActive: state.candidates,
           resetEligibility: false, observationStart: state.activeRankingStart ?? 0, previousObservations: state.rankingHistory,
@@ -774,7 +841,7 @@ export class RetrievalController {
     const measured = recordMeasuredBudget(this.#journal, state, event.eventId, toolCallBudget(state.budget, input), this.#now, this.#id)
     if (measured.phase !== 'stopped' && this.#maxRepeatedToolErrors !== undefined && (measured.budget.repeatedToolFailure?.count ?? 0) >= this.#maxRepeatedToolErrors) {
       const explained = this.#record(measured, { stopExplanation: `检测到工具调用死循环：相同参数和相同错误连续出现 ${measured.budget.repeatedToolFailure!.count} 次，期间没有有效动作或新证据。已保留任务与证据，需要调整模型或补充处理方式后继续。` })
-      return this.freezeForInterruption(explained, 'budget_exhausted')
+      return this.stop(explained, 'backend_error')
     }
     return measured
   }
@@ -833,7 +900,8 @@ export class RetrievalController {
     const semanticRecallKnown = state.lastPage?.boundary?.semanticRecallKnown ?? false
     const nextPageAvailable = state.lastPage?.nextCursor !== undefined
     const stoppingReason = reason
-    if (stoppingReason === 'no_result' && state.candidates.some(candidate => !state.excludedCandidateRefs.includes(candidate.ref))) throw new RetrievalError('INVALID_TRANSITION', '存在候选时不能冻结为无结果。')
+    if (stoppingReason === 'no_result' && (state.query.contract?.schemaVersion !== 10 || state.task.countPolicy === 'exhaustive')
+      && state.candidates.some(candidate => !state.excludedCandidateRefs.includes(candidate.ref))) throw new RetrievalError('INVALID_TRANSITION', '全集或旧结构化任务存在未判候选时不能冻结为无结果。')
     const pack: FrozenEvidencePack = {
       packId: this.#id(),
       retrievalId: state.retrievalId,

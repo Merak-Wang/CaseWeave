@@ -29,6 +29,7 @@ declare module '@deepseek-ai/cordis' {
 /** Cordis bridge for the provider port defined in `contracts`. */
 export abstract class TicketRetrievalProviderService extends Service implements TicketRetrievalProvider {
   abstract readonly providerId: string
+  readFeatures: NonNullable<TicketRetrievalProvider['readFeatures']> = async () => []
 
   constructor(ctx: Context) {
     super(ctx, 'ticketRetrievalProvider')

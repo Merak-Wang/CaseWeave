@@ -58,9 +58,9 @@
       config:
         # 跨动作总页上限覆盖关键词全集与 Dense Top-15 的融合候选；单动作仍至多推进一页，且它不是最终结果条数上限。
         # 模型步数与墙钟时间只观测记录，不再终止任务。
-        maxSearches: 2500
         taskPersistence: !!js "process.env.RETRIEVAL_AGENT_STORAGE === 'mysql_milvus' ? 'mysql' : 'session'"
         searchTopK: 20
+        reviewBatchSize: !!js Number(process.env.RETRIEVAL_AGENT_REVIEW_BATCH_SIZE ?? 8)
         searchMaxScan: 50000
         queryAnalysisBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
         queryAnalysisDeadlineMs: 5000

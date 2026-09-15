@@ -17,7 +17,7 @@ import Subagents from '@deepseek-ai/dsh-subagent'
 import * as Spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import Skills from '@deepseek-ai/dsh-skill'
 import { createPool } from 'mysql2/promise'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LocalTicketProvider, normalizeFixtureTicket } from '@retrieval-agent/provider-local'
 import type { TicketRetrievalProvider, TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import { foldRetrievalEvents } from '@retrieval-agent/domain'
@@ -30,6 +30,7 @@ import { exportCandidatesForAgent, parseExportCandidatesParams, readTicketDetail
 import { InMemoryExportAuditSink, InMemoryDetailReadAuditSink } from '@retrieval-agent/product-api'
 import { readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
 import { DurableRetrievalAgentService } from './durable-service.js'
+import { SemanticOperators } from './semantic-operators.js'
 import { MySqlTaskStore, type TaskJob } from './task-store.js'
 import { TicketPrincipalProviderService, TicketRetrievalProviderService } from './provider-services.js'
 import { installAutomaticRetrievalStart } from './pre-step.js'
@@ -68,9 +69,14 @@ class Adapter extends LlmAdapter {
   readonly loopRequests: GenerateOptions[] = []
   reportCalls = 0
   rejectReport = false
+  failModel = false
   beforeAnswer?: () => Promise<void>
   constructor(readonly ask = false, readonly broken = false) { super() }
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (this.failModel) {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'MODEL_NOT_FOUND', status: 404, message: 'fixture-provider-private-response' } } }
+      return
+    }
     if (options.tools?.[0]?.name.startsWith('retrieval_report')) {
       this.reportCalls++
       const data = JSON.parse(options.messages[0]!.content.flatMap(b => b.type === 'text' ? [b.text] : []).join(''))
@@ -103,6 +109,7 @@ class Adapter extends LlmAdapter {
 }
 class DeliveryScaleAdapter extends LlmAdapter {
   calls = 0
+  readonly reviewCounts: number[] = []
   seen = new Set<string>()
   constructor(readonly count: number) { super() }
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -111,6 +118,7 @@ class DeliveryScaleAdapter extends LlmAdapter {
     const header = [...text.matchAll(/<ticket_knowledge_context>(.*?)<\/ticket_knowledge_context>/gu)].map(m => JSON.parse(m[1]!)).at(-1).knowledgeState
     const visible = [...text.matchAll(/<untrusted_ticket_candidate>(.*?)<\/untrusted_ticket_candidate>/gu)].map(m => JSON.parse(m[1]!)).filter(c => !this.seen.has(c.alias))
     const fresh = [...new Map(visible.map(c => [c.alias, c])).values()]
+    this.reviewCounts.push(fresh.length)
     for (const c of fresh) this.seen.add(c.alias)
     const args = { state_id: header.stateId, judgments: fresh.map(c => ({ candidate_alias: c.alias, verdict: 'accept', evidence_aliases: [c.alias], reason: '受控概览明确描述副卡解绑场景。' })), semantic_gaps: [],
       action: this.seen.size >= this.count ? { kind: 'finish', reason: 'satisfied', explanation: '合成语料逐条通过当前概览复核。' } : header.history.accepted + fresh.length < header.retrievalObservation.cumulativeCandidateCount ? { kind: 'inspect', next_window: true } : { kind: 'search', continue_ranking: true } }
@@ -231,6 +239,31 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     finally { await pool.end() }
   })
 
+  it.each([8, 16])('uses review batch %i in the durable HTTP task and reduces model requests without changing search pages', async reviewBatchSize => {
+    const f = await fixture(false, false, false, false, false, undefined, 32, undefined, reviewBatchSize)
+    try {
+      f.host.start()
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '查找全部副卡工单' })).status).toBe(202)
+      const done = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped', 60000)
+      const state = done!.state_json!
+      expect(f.errors).toEqual([])
+      expect(state.selectedCandidateRefs).toHaveLength(32)
+      expect(state.budget.searchesUsed).toBe(2)
+      // Continuing a Provider page retains the existing focus until next_window;
+      // count that real DSH request too, instead of reporting ideal batch counts.
+      expect((f.adapter as DeliveryScaleAdapter).reviewCounts).toEqual(reviewBatchSize === 8 ? [8, 8, 4, 0, 8, 4] : [16, 4, 0, 12])
+      expect((f.adapter as DeliveryScaleAdapter).calls).toBe(reviewBatchSize === 8 ? 6 : 4)
+      const response = await fetch(f.url + '/' + id)
+      expect(response.status).toBe(200)
+      const snapshot = await response.json() as TaskSnapshot
+      expect(snapshot.node?.collectionWindow?.confirmed).toBe(32)
+      const agent = await f.agentFor(id)
+      expect((await f.application.projectContext(agent)).includedCandidateRefs.length).toBeLessThanOrEqual(reviewBatchSize)
+      expect(foldRetrievalEvents(readRetrievalSessionEvents(agent.session))?.selectedCandidateRefs).toEqual(state.selectedCandidateRefs)
+    } finally { await f.close() }
+  }, 90000)
+
   it('deduplicates commands, rejects changed payloads, fences expired owners, and persists retry limits', async () => {
     const id = randomUUID(); const p = principal()
     const first = await store.create(id, id, p, '副卡')
@@ -284,6 +317,29 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       f.principal.revoked = true
       await expect(f.host.snapshot(id)).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
     } finally { f.release(); await f.close() }
+  })
+
+  it('admits feedback using artifact identities and replays the same result without hydrating bodies in the transaction', async () => {
+    const f = await fixture(false, false)
+    try {
+      const id = randomUUID(); await f.post('', { kind: 'query', operationId: id, text: '找副卡解绑工单' })
+      const done = (await until(async () => { await f.host.pump(); return store.read(id) }, task => task?.state_json?.phase === 'stopped'))!
+      await f.application.loadTask(await f.agentFor(id))
+      const hydrated = vi.spyOn(store as any, 'hydrateTask')
+      await f.host.snapshot(id); await f.host.snapshot(id)
+      expect(hydrated).not.toHaveBeenCalled()
+      const command = { kind: 'feedback' as const, candidateRef: done.state_json!.candidates[0]!.ref, relevance: 'unrelated' as const, text: '请重新核对业务边界。' }
+      await store.submit(id, principal(), 'identity-feedback', command)
+      expect(hydrated).not.toHaveBeenCalled()
+      hydrated.mockRestore()
+      const current = (await store.read(id))!
+      expect(current.state_json!.candidates.map(c => c.summary)).toEqual(done.state_json!.candidates.map(c => c.summary))
+      expect(current.state_json!.selectedCandidateRefs).toEqual([])
+      expect(foldRetrievalEvents(await store.domainEvents(id))?.stateId).toBe(current.state_json!.stateId)
+      const reuse = vi.spyOn(store as any, 'hydrateTask')
+      expect((await store.read(id, current))!.state_json).toBe(current.state_json)
+      expect(reuse).not.toHaveBeenCalled(); reuse.mockRestore()
+    } finally { await f.close() }
   })
 
   it('persists a real DSH question, binds answers to its identity, and reopens terminal feedback for review', async () => {
@@ -536,7 +592,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       expect((await f.post('', { kind: 'query', operationId: id, text: '找副卡解绑工单' })).status).toBe(202)
       const stopped = await until(async () => { await f.host.pump(); return store.read(id) }, t => t?.state_json?.phase === 'stopped')
       const state = stopped!.state_json!
-      expect(state.termination).toBe('budget_exhausted')
+      expect(state.termination).toBe('backend_error')
       expect(state.stopExplanation).toContain('工具调用死循环')
       expect(state.budget.repeatedToolFailure?.count).toBe(3)
       expect(state.selectedCandidateRefs).toEqual([])
@@ -544,12 +600,12 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       expect(state.budget.consecutiveToolErrors).toBe(3)
       expect((await f.host.snapshot(id)).node).toBeDefined()
       await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
-      expect(foldRetrievalEvents(await store.domainEvents(id))?.termination).toBe('budget_exhausted')
+      expect(foldRetrievalEvents(await store.domainEvents(id))?.termination).toBe('backend_error')
       expect((await f.post(`/${id}`, { kind: 'supplement', operationId: 'retry-invalid-model', text: '请重新核对原始工单' })).status).toBe(202)
       expect((await store.read(id))?.state_json?.budget.consecutiveToolErrors).toBe(0)
       await until(async () => { await f.host.pump(); return store.read(id) }, t => t?.state_json?.phase === 'stopped')
       expect(f.adapter.calls).toBe(6)
-      expect((await store.read(id))?.state_json?.termination).toBe('budget_exhausted')
+      expect((await store.read(id))?.state_json?.termination).toBe('backend_error')
     } finally { await f.close() }
   })
 
@@ -1044,7 +1100,101 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     } finally { await f.close() }
   }, 920000)
 
-  async function fixture(ask: boolean, slow: boolean, extraPage = false, experts = false, broken = false, learning?: { root: string; adapter: LearningAdapter; live?: boolean }, deliveryScale = 0, expertWikiRoot?: string) {
+  it('persists Python operator judgments through public HTTP, Host replacement and confirmed CSV export', async () => {
+    const first = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true)
+    const id = randomUUID()
+    let revision: string
+    try {
+      first.host.start()
+      expect((await first.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
+      const done = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped', 60000)
+      expect(done?.state_json?.termination, JSON.stringify(first.errors)).toBe('top_k_accepted')
+      expect(done!.state_json!.judgments!.filter(j => j.operatorManifestId)).toHaveLength(2)
+      expect(done!.state_json!.selectedCandidateRefs).toHaveLength(1)
+      revision = done!.state_json!.frozenEvidence!.packId
+      expect((await first.exportCsv(id, revision)).status).toBe(200)
+      expect(first.errors).toEqual([])
+    } finally { await first.close() }
+    const restored = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true)
+    try {
+      const snapshot = await fetch(restored.url + '/' + id)
+      expect(snapshot.status).toBe(200)
+      const exported = await restored.exportCsv(id, revision!)
+      expect(exported.status).toBe(200)
+      expect(exported.body.receipt).toMatchObject({ rowCount: 1, resultRevision: revision! })
+      expect(restored.adapter.calls).toBe(0)
+      expect(foldRetrievalEvents(await store.domainEvents(id))?.selectedCandidateRefs).toEqual((await store.read(id))!.state_json!.selectedCandidateRefs)
+    } finally { await restored.close() }
+  }, 90000)
+
+  it('review repairs: exposes a safe actionable provider error through the public task snapshot', async () => {
+    const f = await fixture(false, false)
+    ;(f.adapter as Adapter).failModel = true
+    try {
+      f.host.start()
+      const id = randomUUID()
+      await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })
+      const task = await until(() => store.read(id), t => Boolean(t?.failure), 60000)
+      expect(task!.state_json?.termination).toBe('partial')
+      const snapshot = await fetch(f.url + '/' + id).then(r => r.json())
+      expect(snapshot.failure).toContain('MODEL_NOT_FOUND / HTTP 404')
+      expect(snapshot.failure).toContain('模型设置')
+      expect(JSON.stringify(snapshot)).not.toContain('fixture-provider-private-response')
+      expect(task!.state_json?.selectedCandidateRefs).toHaveLength(0)
+    } finally { await f.close() }
+  }, 90000)
+
+  it('review repairs: public feedback receipts, historical source reading and stable legacy clocks', async () => {
+    const f = await fixture(false, false)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })
+      const first = (await until(() => store.read(id), t => t?.state_json?.phase === 'stopped'))!.state_json!
+      const history = first.candidates.find(c => c.l0.region === '北京')!
+      await f.post('/' + id, { operationId: 'scope-shanghai', kind: 'supplement', text: '只看上海' })
+      const revised = (await until(() => store.read(id), t => t?.state_json?.phase === 'stopped' && t.state_json.inputGeneration === 1))!.state_json!
+      expect(revised.candidates.some(c => c.ref === history.ref)).toBe(false)
+      const historical = await fetch(`${f.url}/${id}/candidates?view=history`)
+      expect((await historical.json()).readableCandidateRefs).toContain(history.ref)
+      const read = await fetch(f.url.replace('/tasks', '/detail'), { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: id, retrievalId: id, candidateRefs: [history.ref], fields: ['problemDescription'] }) })
+      expect(read.status, await read.clone().text()).toBe(200)
+      const evidence = await fetch(`${f.url}/${id}/evidence?candidateRef=${history.ref}`)
+      expect(evidence.status).toBe(200)
+      expect(await evidence.json()).toMatchObject({ current: false, judgment: null })
+      expect((await store.read(id))!.state_json!.selectedCandidateRefs).toEqual(revised.selectedCandidateRefs)
+      const stopped = (await store.domainEvents(id)).findLast(e => e.type === 'retrieval/stopped')!
+      await store.pool.query("UPDATE ra_task SET state_json=JSON_SET(JSON_REMOVE(state_json,'$.executionClock'),'$.updatedAt',?) WHERE id=?", ['2099-01-01T00:00:00Z', id])
+      const recovered = (await store.read(id))!.state_json!
+      expect(recovered.executionClock?.waitingSince).toBe(stopped.occurredAt)
+      const snapshot = await f.host.snapshot(id)
+      expect(snapshot.orchestration?.clock.elapsedMs).toBeLessThan(60000)
+      if (process.env.RETRIEVAL_AGENT_REVIEW_BROWSER === '1') {
+        await mkdir('output/playwright', { recursive: true })
+        await writeFile('output/playwright/review-browser.json', JSON.stringify({ url: f.url.replace('/api/retrieval-agent/tasks', '/retrieval') + '?task=' + id, id }))
+        await until(async () => { try { return JSON.parse(await readFile('output/playwright/review-browser-finish.json', 'utf8')).id === id } catch { return false } }, Boolean, 240000)
+      }
+      f.principal.revoked = true
+      expect((await fetch(`${f.url}/${id}/evidence?candidateRef=${history.ref}`)).status).toBe(403)
+    } finally { await f.close() }
+    const operator = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true)
+    operator.host.start()
+    try {
+      const id = randomUUID()
+      await operator.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })
+      const state = (await until(() => store.read(id), t => t?.state_json?.phase === 'stopped', 60000))!.state_json!
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
+      await (await operator.agentFor(id)).whenIdle()
+      await operator.post('/' + id, { operationId: 'operator-feedback', kind: 'feedback', candidateRef: state.selectedCandidateRefs[0], relevance: 'unrelated', text: '请复核是否相关。' })
+      await until(() => store.read(id), t => t?.state_json?.phase === 'stopped' && t.state_json.inputGeneration === 1, 60000)
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
+      expect((await operator.host.snapshot(id)).feedback).toEqual([expect.objectContaining({ status: 'reviewed', reason: '受控接线验收判断' })])
+      expect(operator.errors).toEqual([])
+    } finally { await operator.close() }
+  }, 320000)
+
+  async function fixture(ask: boolean, slow: boolean, extraPage = false, experts = false, broken = false, learning?: { root: string; adapter: LearningAdapter; live?: boolean }, deliveryScale = 0, expertWikiRoot?: string, reviewBatchSize = 8, operatorMode = false) {
     let liveSelection: { provider: string; model: string } | undefined
     let liveConfig: Parameters<typeof piAi.apply>[1] | undefined
     let credentialRef: string | undefined, previousCredential: string | undefined
@@ -1082,19 +1232,41 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       ranker, defaultMode: 'hybrid', ...(deliveryScale ? { snapshotTtlMs: 3600000 } : {}) }); const providerPort = new Provider(ctx, provider)
     const replaceSource = () => { provider = new LocalTicketProvider(records.map(r => normalizeFixtureTicket({ ...r,
       sourceVersion: 'fixture-v2', problemDescription: '来源已修订：该问题不能沿用此前工单判断。' })), { ranker, defaultMode: 'hybrid' }); providerPort.p = provider }
-    const application = new DurableRetrievalAgentService(ctx, { ...(extraPage ? { searchTopK: 2 } : {}), ...(broken ? { maxRepeatedToolErrors: 3 } : {}) }, store)
+    const application = new DurableRetrievalAgentService(ctx, { reviewBatchSize, ...(extraPage ? { searchTopK: 2 } : {}), ...(broken ? { maxRepeatedToolErrors: 3 } : {}) }, store)
     if (experts || learning) {
       await ctx.plugin({ name: 'durable-expert-scope', inject, apply(scope: Context) { new ExpertCoordinator(scope, application, learning?.root ?? expertWikiRoot) } })
       installWorkingContext(ctx, application)
     }
     if (deliveryScale) installWorkingContext(ctx, application)
+    if (operatorMode) new SemanticOperators(ctx, application)
     if (learning) new WikiLearningService(ctx, application, learning.root)
     installAutomaticRetrievalStart(ctx, application, { analyzer }); installRetrievalTools(ctx, application); installRetrievalRuntimeBudget(ctx, application)
     ctx.on('tools/result', (_exec, result) => { if (result.isError) errors.push(result.content) })
     await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
     const assignments = expertWikiRoot ? (await openWiki(expertWikiRoot)).catalog().slice(0, 3).map((d, i) => ({ domain_id: d.id,
       goal: '核对' + d.title + '的业务边界与处理记录', scope: i === 0 ? '范围确认' : '独立取证', candidate_aliases: ['c1'], knowledge_ids: [d.knowledgeRefs[0]!] })) : undefined
-    const adapter = deliveryScale ? new DeliveryScaleAdapter(deliveryScale) : learning?.adapter ?? (experts ? new RecoveringExpertAdapter(gate, assignments) : new Adapter(ask, broken)); ctx.llm.registerAdapter(['phase2-fixture'], adapter)
+    class OperatorAdapter extends Adapter {
+      override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        this.calls++
+        let name = 'submit_result', payload: unknown
+        if (options.sessionId?.startsWith('operator-')) {
+          const data = JSON.parse(options.messages[0]!.content.flatMap(b => b.type === 'text' ? [b.text] : []).join(''))
+          payload = options.system?.includes('当前操作：query_plan') ? {
+            keywords: ['副卡'], instruction: '查找副卡解绑案例', retrieval_expressions: [], goal: { mode: 'adaptive', count: null },
+            steps: [{ id: 'filter', op: 'sem_filter', inputs: ['$source'], instruction: '核对工单', params: {} }],
+          } : { rows: data.records.map((r: any, i: number) => ({ ref: r.ref, label: i === 0 ? 'accept' : 'exclude', reason: '受控接线验收判断', knowledge_ids: [],
+            citations: [{ ref: r.ref, passage_id: 'summary', quote: r.passages.find((p: any) => p.id === 'summary').text }] })) }
+        } else {
+          name = 'ticket_decide'
+          const state = application.current(ctx.agents.get(options.sessionId!)!)
+          payload = { state_id: state.stateId, judgments: [], semantic_gaps: [], action: { kind: 'finish', reason: 'satisfied', explanation: '所需案例已有证据支持',
+            coverage: { checked: ['当前案例'], remaining: [], nextAction: '无需继续', nextActionValue: 'none' } } }
+        }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(randomUUID()), name, arguments: JSON.stringify(payload) } }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      }
+    }
+    const adapter = operatorMode ? new OperatorAdapter(false) : deliveryScale ? new DeliveryScaleAdapter(deliveryScale) : learning?.adapter ?? (experts ? new RecoveringExpertAdapter(gate, assignments) : new Adapter(ask, broken)); ctx.llm.registerAdapter(['phase2-fixture'], adapter)
     const agents = new Map<string, Promise<Agent>>(); const disposers: (() => Promise<void>)[] = []
     const agentFor = (id: string): Promise<Agent> => {
       if (!agents.has(id)) agents.set(id, (async () => {

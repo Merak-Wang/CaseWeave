@@ -6,6 +6,8 @@ x-app: &app
     dockerfile: config/app/Dockerfile
   init: true
   environment:
+    CASEWEAVE_OPERATORS_URL: http://semantic-operators:8013
+    CASEWEAVE_OPERATORS_TOKEN: ${CASEWEAVE_OPERATORS_TOKEN:-}
     RETRIEVAL_AGENT_BROWSER_LLM_PROVIDER: ${RETRIEVAL_AGENT_BROWSER_LLM_PROVIDER:-}
     RETRIEVAL_AGENT_BROWSER_LLM_MODEL: ${RETRIEVAL_AGENT_BROWSER_LLM_MODEL:-}
     RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL: ${RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL:-}
@@ -13,12 +15,29 @@ x-app: &app
     RETRIEVAL_AGENT_BROWSER_LLM_REASONING: ${RETRIEVAL_AGENT_BROWSER_LLM_REASONING:-off}
     RETRIEVAL_AGENT_MAIN_MODEL_API_KEY: ${RETRIEVAL_AGENT_MAIN_MODEL_API_KEY:-}
     RETRIEVAL_AGENT_WIKI_LEARNING: ${RETRIEVAL_AGENT_WIKI_LEARNING:-1}
+    RETRIEVAL_AGENT_REVIEW_BATCH_SIZE: ${RETRIEVAL_AGENT_REVIEW_BATCH_SIZE:-8}
   volumes:
     - app-state:/app/.cache
     - app-data:/app/data
     - app-wiki:/app/wiki
     - app-output:/app/output
 services:
+  semantic-operators:
+    image: ${CASEWEAVE_OPERATORS_IMAGE:-caseweave-semantic-operators:0.3.0}
+    build:
+      context: ../..
+      dockerfile: config/semantic-operators/Dockerfile
+    init: true
+    environment:
+      CASEWEAVE_OPERATORS_TOKEN: ${CASEWEAVE_OPERATORS_TOKEN:-}
+    volumes:
+      - app-state:/app/.cache
+    restart: on-failure:3
+    healthcheck:
+      test: [CMD, python, '-c', "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8013/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
   app:
     <<: *app
     ports: ['127.0.0.1:${RETRIEVAL_AGENT_WEB_PORT:-3080}:3080']
@@ -26,6 +45,7 @@ services:
       mysql: {condition: service_healthy}
       milvus: {condition: service_healthy}
       model-service: {condition: service_healthy}
+      semantic-operators: {condition: service_healthy}
     restart: on-failure:3
     stop_grace_period: 30s
     healthcheck:

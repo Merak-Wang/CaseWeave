@@ -111,6 +111,78 @@ class ScriptedExperts extends LlmAdapter {
 }
 
 describe('A3/A4/A6/A9 installed DSH expert execution', () => {
+  it.each([8, 16])('delivers and navigates all 20 expert candidates with review batch %i through actual DSH requests', async reviewBatchSize => {
+    const ctx = new Context(); let dispose: (() => Promise<void>) | undefined
+    const failures: unknown[] = [], expertWindows: string[][] = [], seen = new Set<string>()
+    const aliases = Array.from({ length: 20 }, (_, i) => `c${i + 1}`)
+    let expertCalls = 0, mainCalls = 0, historyReloaded = false
+    class BatchAdapter extends LlmAdapter {
+      override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        const text = options.messages.flatMap(m => strings(m.content)).join('\n')
+        const latest = text.slice(text.lastIndexOf('<ticket_knowledge_context>'))
+        const header = JSON.parse(/<ticket_knowledge_context>(.*?)<\/ticket_knowledge_context>/u.exec(latest)![1]!).knowledgeState
+        const visible = [...latest.matchAll(/<untrusted_ticket_candidate>(.*?)<\/untrusted_ticket_candidate>/gu)].map(m => JSON.parse(m[1]!).alias as string)
+        const expert = options.tools?.some(t => t.name === 'ticket_expert')
+        expect(header.evidenceState.reviewBatchSize).toBe(reviewBatchSize)
+        expect(visible.length).toBeLessThanOrEqual(reviewBatchSize)
+        let tool = expert ? 'ticket_expert' : 'ticket_decide', args: unknown
+        if (expert) {
+          if (++expertCalls > 6) throw new Error('expert review fixture loop')
+          expertWindows.push(visible)
+          if (expertCalls === 1) {
+            expect(visible).toEqual(aliases.slice(0, reviewBatchSize))
+            args = { action: 'search', query: '副卡', mode: 'keyword' }
+          } else {
+            visible.forEach(alias => seen.add(alias))
+            if (seen.size < 20) args = { action: 'inspect', next_window: true }
+            else if (!historyReloaded) { historyReloaded = true; args = { action: 'inspect', candidate_aliases: aliases.slice(0, reviewBatchSize), fields: [] } }
+            else {
+              expect(visible).toEqual(aliases.slice(0, reviewBatchSize))
+              args = { action: 'report', judgments: aliases.map(alias => ({ candidate_alias: alias, verdict: 'accept', evidence_aliases: [alias], reason: '固定测试摘要明确包含副卡业务。' })), semantic_gaps: [], next_action: '已逐条核查分配范围，交主 Agent 综合。' }
+            }
+          }
+        } else if (++mainCalls === 1) args = { state_id: header.stateId, judgments: [], semantic_gaps: [], action: { kind: 'delegate', assignments: [{ domain_id: 'general', goal: '核查固定业务范围', scope: '本页二十条工单', candidate_aliases: aliases }] } }
+        else if (header.experts.tasks.some((t: { status: string }) => ['pending', 'running'].includes(t.status))) {
+          tool = 'ticket_wait'; args = { task_ids: header.experts.tasks.map((t: { id: string }) => t.id) }
+        } else args = { state_id: header.stateId, judgments: [{ candidate_alias: 'c1', verdict: 'accept', evidence_aliases: ['c1'], reason: '主 Agent 收到的摘要明确包含副卡业务。' }], semantic_gaps: [], action: { kind: 'finish', reason: 'satisfied', explanation: '固定测试个案已核对。', coverage: { checked: ['本页工单'], remaining: [], nextAction: '已完成', nextActionValue: 'none' } } }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`batch-${options.sessionId}-${expertCalls}-${mainCalls}`), name: tool, arguments: JSON.stringify(args) } }
+        yield { type: 'usage', usage: { inputTokens: 500, outputTokens: 100 } }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      }
+    }
+    try {
+      await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime); await ctx.plugin(ToolRuntime)
+      await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter); await ctx.plugin(Subagents); await ctx.plugin(Spawn, { providerName: 'spawn' }); await ctx.plugin(Skills)
+      new Principal(ctx)
+      const records = aliases.map((_, i) => normalizeFixtureTicket({ ticketId: `batch-${i}`, displayId: `B-${i}`, tenantId: p.tenantId,
+        allowedSubjectIds: [], requiredAttributes: {}, sourceVersion: 'batch-v1', title: `副卡业务 ${i}`, summary: '来源描述副卡业务。',
+        conversationOrUpdates: [], resolutionSteps: [], errorCodes: [], piiRedactionStatus: 'not_applicable' }))
+      new Provider(ctx, new LocalTicketProvider(records, { defaultMode: 'keyword', ranker: {
+        profileVersion: 'batch-fixture', capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
+        rank: async (documents, query) => ({ hits: documents.map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1, channels: [] })),
+          execution: { requestedMode: query.mode, executedMode: query.mode, strategyVersion: 'batch-fixture', channels: [] },
+          scanned: documents.length, keywordEligible: documents.length, rankedHits: documents.length, warnings: [] }) } }))
+      const application = new RetrievalAgentService(ctx, { reviewBatchSize, maxContextTokens: 32000 })
+      await ctx.plugin({ name: 'batch-expert-scope', inject, apply(scope: Context) { new ExpertCoordinator(scope, application) } })
+      installRetrievalTools(ctx, application); installWorkingContext(ctx, application); installRetrievalRuntimeBudget(ctx, application)
+      ctx.on('tools/result', (_exec, result) => { if (result.isError) failures.push(result.content) }, { global: true })
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      ctx.llm.registerAdapter(['batch-fixture'], new BatchAdapter())
+      const handle = await ctx.agents.create({ sessionId: SessionId(`expert-batch-${reviewBatchSize}`), agentOptions: { provider: 'batch-fixture', model: 'scripted' } }); dispose = handle.dispose
+      await application.start(handle.agent, { target: 'ranked_cases', query: '副卡', mode: 'keyword' })
+      handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '继续核对副卡工单。' }] }))
+      await handle.agent.whenIdle()
+      const state = application.current(handle.agent)
+      expect(failures).toEqual([])
+      expect(state.termination, JSON.stringify({ stop: state.stopExplanation, windows: expertWindows })).toBe('top_k_accepted')
+      expect(state.expertTasks?.[0]?.finding?.judgments).toHaveLength(20)
+      expect(expertCalls).toBe(reviewBatchSize === 8 ? 5 : 4)
+      expect([...seen]).toEqual(aliases)
+      expect(state.expertTasks?.[0]?.context?.candidateRefs).toHaveLength(reviewBatchSize)
+      expect(foldRetrievalEvents(readRetrievalSessionEvents(handle.agent.session))).toEqual(state)
+    } finally { await dispose?.(); await ctx.fiber.dispose() }
+  }, 30000)
+
   it.each([false, 'always', 'reset'] as const)('bounds the public DSH context and repeated tool errors (invalid=%s)', async invalid => {
     const ctx = new Context(); let dispose: (() => Promise<void>) | undefined
     let calls = 0; let recovered = false
@@ -153,12 +225,12 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
       const state = application.current(handle.agent)
       if (invalid) {
         expect(calls, JSON.stringify(handle.agent.session.snapshotEvents().filter(e => e.type === 'turn/end'))).toBe(invalid === 'reset' ? 5 : 3)
-        expect(state.termination).toBe('budget_exhausted')
+        expect(state.termination).toBe('backend_error')
         expect(state.stopExplanation).toContain('工具调用死循环')
         expect(state.budget.consecutiveToolErrors).toBe(3)
         expect(state.budget.successfulToolCalls ?? 0).toBe(invalid === 'reset' ? 1 : 0)
         expect(state.selectedCandidateRefs).toEqual([])
-        expect(foldRetrievalEvents(readRetrievalSessionEvents(handle.agent.session))?.termination).toBe('budget_exhausted')
+        expect(foldRetrievalEvents(readRetrievalSessionEvents(handle.agent.session))?.termination).toBe('backend_error')
         return
       }
       expect(calls, JSON.stringify({surface:handle.agent.session.surface.nodes, events:handle.agent.session.snapshotEvents().filter(e => ['turn/end', 'system/message', 'user/message'].includes(e.type)).map(e => ({seq:e.seq, type:e.type, surfaceOp:e.surfaceOp, reason:e.type === 'turn/end' ? e.data.reason : undefined}))})).toBe(61)

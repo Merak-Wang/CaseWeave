@@ -45,7 +45,7 @@ function stringList(record: Readonly<Record<string, unknown>>, key: string): rea
 
 function redactionStatus(record: Readonly<Record<string, unknown>>, sourceKind: string): NormalizedTicketRecord['piiRedactionStatus'] {
   const value = record.pii_redaction_status ?? (sourceKind === 'real' ? 'redacted' : 'not_applicable')
-  if (value === 'not_applicable' || value === 'redacted' || value === 'unreviewed') return value
+  if (value === 'not_applicable' || value === 'redacted' || value === 'rules_applied' || value === 'unreviewed') return value
   throw new RetrievalError('INVALID_REQUEST', 'pii_redaction_status 必须是 not_applicable、redacted 或 unreviewed。')
 }
 
@@ -107,6 +107,7 @@ export function normalizePublicSnapshotTicket(
   const region = stringValue(payload, 'region')
   const tags = stringList(payload, 'tags')
   const additionalFields = [
+    displayField('source.redaction', '脱敏核验', payload.pii_redaction_status === 'rules_applied' ? '已执行脱敏规则；未逐条核验' : undefined, 'pii_redaction_status'),
     displayField('source.dataset', '数据集', sourceDataset, 'source_dataset'),
     displayField('source.kind', '来源类型', sourceKind, 'source_kind'),
     displayField('source.split', '数据分片', sourceSplit, 'source_split'),
@@ -120,7 +121,7 @@ export function normalizePublicSnapshotTicket(
     tenantId: access.tenantId,
     allowedSubjectIds: [...access.allowedSubjectIds],
     requiredAttributes: Object.fromEntries(Object.entries(access.requiredAttributes).map(([key, values]) => [key, [...values]])),
-    sourceVersion: `${sourceDataset}@${datasetVersion}/normalized-v1`,
+    sourceVersion: `${sourceDataset}@${datasetVersion}/${(payload.transformation as { schema_version?: string } | undefined)?.schema_version ?? 'normalized-v1'}`,
     ...(createdAt === undefined ? {} : { createdAt }),
     title,
     summary,

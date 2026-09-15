@@ -5,11 +5,16 @@ import type { RetrievalCandidateJudgment, RetrievalGap } from './retrieval-state
 export type TicketProjectionLevel = 'L0' | 'L1' | 'L2' | 'L3'
 export interface TicketContentOrigin {
   readonly kind: 'source' | 'generated' | 'unknown'
+  readonly verification?: 'unverified' | 'conflicting'
+  readonly requiredEvidenceFields?: readonly string[]
   readonly sourceFields?: readonly string[]
   readonly description?: string
 }
 export interface EvidencePosition { readonly candidateRef: TicketCandidateRef; readonly field: string; readonly part: number; readonly start: number }
 export interface ContextManifest {
+  readonly operator?: { readonly pythonManifestId: string; readonly operation: string;
+    readonly records: readonly import('./semantic-operators.js').OperatorRecord[]; readonly knowledgeIds: readonly string[];
+    readonly catalog?: RetrievalKnowledgeCatalog; readonly metrics?: Readonly<Record<string, unknown>> }
   readonly id: string
   readonly roleId: string
   readonly stateId: RetrievalStateId
@@ -63,7 +68,7 @@ export interface ExpertTask extends ExpertAssignment {
   readonly childSessionId?: string
   readonly failure?: string
   readonly finding?: ExpertFinding
-  readonly context?: { readonly candidateRefs: readonly TicketCandidateRef[]; readonly evidencePosition?: EvidencePosition;
+  readonly context?: { readonly candidateRefs: readonly TicketCandidateRef[]; readonly candidateWindowRefs?: readonly TicketCandidateRef[]; readonly evidencePosition?: EvidencePosition;
     readonly evidenceIds: readonly TicketEvidenceId[]; readonly evidenceWindowOffset: number }
 }
 export interface ExpertConflict {

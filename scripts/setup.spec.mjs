@@ -18,8 +18,8 @@ const quote = value => '"' + value.replaceAll('\\', '\\\\').replaceAll('"', '\\"
 
 function fixture({ configured = true, mode = '' } = {}) {
   const dir = mkdtempSync(join(parent, 'path with spaces-'))
-  for (const path of ['setup.sh', 'setup.ps1', 'setup.cmd', '.env.example', 'config/database', 'config/model-service', 'config/app']) {
-    cpSync(join(root, path), join(dir, path), { recursive: true })
+  for (const path of ['setup.sh', 'setup.ps1', 'setup.cmd', '.env.example', 'config/database', 'config/model-service', 'config/semantic-operators', 'config/app']) {
+    cpSync(join(root, path), join(dir, path), { recursive: true, filter: source => !source.split(/[\\/]/u).includes('node_modules') })
   }
   const env = { ...process.env }
   for (const name of Object.keys(env)) if (/^(?:COMPOSE_|RETRIEVAL_AGENT_)/u.test(name)) delete env[name]
@@ -69,6 +69,7 @@ test('first-run public wizard preserves special characters and configures all de
   const actual = f.config().split(/\r?\n/).find(line => line.startsWith('RETRIEVAL_AGENT_MAIN_MODEL_API_KEY='))?.split('=').slice(1).join('=')
   assert.equal(actual, sampleKey)
   assert.equal(f.calls().length, 8)
+  assert.ok(f.calls().some(call => call.includes('build') && call.includes('semantic-operators')))
 })
 
 test('index failure stops before app startup; rerun preserves configuration and never deletes volumes', () => {

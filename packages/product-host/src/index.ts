@@ -303,6 +303,10 @@ export async function readTicketDetailsForAgent(
   const principal = await retrievalAgent.principal(agent, 'detail_read', signal)
   const read = await new CandidateDetailService(provider, audit)
     .readDetails(principal, state, params.candidateRefs, params.fields, signal)
+  const latest = await (retrievalAgent.stateForTask?.(agent, params.retrievalId) ?? retrievalAgent.currentOrUndefined(agent))
+  if (!latest || latest.inputGeneration !== state.inputGeneration || latest.snapshot?.snapshotId !== state.snapshot?.snapshotId) {
+    throw new RetrievalError('INVALID_TRANSITION', '读取期间任务范围已变化，请重新打开原文。')
+  }
   await retrievalAgent.recordDetailRead(agent, read.receipt, read.result)
   return {
     details: read.result.details,

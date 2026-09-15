@@ -8,14 +8,18 @@
 
 采用“持久任务协调器 + DSH 主 Agent/领域专家 + 检索数据面 + 浏览器工作台”。协调器管理可恢复任务和确定性边界，DSH 管模型运行与专家上下文，MySQL/Milvus 承载实际查询。默认采用单机部署，持久任务队列由 MySQL 管理。
 
-完整容器部署包含 Node.js/DSH 应用、MySQL、Milvus 和 Python/FastAPI 模型服务。源码开发也支持宿主 Node.js 连接容器或宿主模型服务。模型权重只读加载，缓存单独持久化；退出宿主 Node.js 不停止 Docker 服务。部署规则见 [查询设计](design/RETRIEVAL.md#模型服务部署边界)，命令见 [开发与运行](DEVELOPMENT.md)。
+完整容器部署包含 Node.js/DSH 应用、MySQL、Milvus、Python/FastAPI 算子服务和模型服务。源码开发也支持宿主 Node.js 连接容器或宿主模型服务。模型权重只读加载，缓存单独持久化；退出宿主 Node.js 不停止 Docker 服务。部署规则见 [查询设计](design/RETRIEVAL.md#模型服务部署边界)，命令见 [开发与运行](DEVELOPMENT.md)。
 
 ```mermaid
 flowchart TD
   U[浏览器工作台] -->|查询、补充、反馈| API[产品 API 与任务协调器]
-  API --> Q[原句解析与条件编译]
-  Q --> K[MySQL 关键词全匹配枚举]
-  Q --> V[原始 Query Embedding 与 Milvus Top K]
+  API --> Q[Python 查询规划，经 DSH 调用模型]
+  API --> V[原始 Query Embedding 与 Milvus Top K]
+  Q --> K[MySQL 关键词 OR 全集枚举]
+  Q --> V2[语义改写与 Milvus 召回]
+  V2 --> S
+  S --> O[Python 语义过滤，经 DSH 调用模型]
+  O -->|核验引用与输入代次| S
   K --> S[权威任务状态与证据集合]
   V --> S
   S --> A[DSH 主 Agent]
@@ -31,13 +35,14 @@ flowchart TD
   L --> W
 ```
 
-首轮解析后两路实际并行；任一路产出即可更新过程视图，另一分支状态仍清楚可见。首次有用候选允许启动 Agent 评估，完整关键词枚举继续进入同一候选库。不要用“等最慢分支和所有页面结束”实现首屏，也不要因为开始 Agent 决策而截断关键词枚举。
+原句向量与查询规划实际并行；规划完成后执行关键词和语义改写，任一路产出即可更新过程视图，另一分支状态仍清楚可见。首次有用候选允许启动 Agent 评估，完整关键词枚举继续进入同一候选库。不要用“等最慢分支和所有页面结束”实现首屏，也不要因为开始 Agent 决策而截断关键词枚举。
 
 ## 2. 组件职责与技术选择
 
 | 组件 | 责任与输入/输出 | 技术起点与可替换边界 |
 | --- | --- | --- |
-| Query Understanding | 原句、字段能力、时间上下文 → 要求、布尔 AST、检索表达和歧义 | TypeScript 契约；规则优先处理确定结构，模型辅助；不锁死 spaCy 格式 |
+| Query Understanding | 原句、补充、字段目录、Wiki → 自然语言判据、宽召回表达、算子计划 | Python 一次结构化规划，TypeScript 保留契约和准入 |
+| Python 算子服务 | 授权记录 → 三态判断、排序或有来源的派生产物 | 常驻 FastAPI/WebSocket 或本地 stdio；模型经 DSH，数据库经 Host 回调 |
 | Retrieval Provider | 可信主体、查询计划 → 可验证来源的分页候选、片段、执行边界 | MySQL 编译/读取与 Milvus 适配；JSONL 是导入源及对照 Provider |
 | Python 模型服务 | 批量 embedding、可选 rerank、分析计算 → 带模型身份的产物 | 复用 FastAPI/PyTorch 常驻服务；不再每次传整库并重做排名 |
 | Task Coordinator / Controller | 命令、模型决策、工具结果 → 合法且持久的任务变化 | Node/TypeScript；并行 I/O、按任务短事务提交 |
@@ -77,7 +82,7 @@ flowchart TD
 
 | 对象 | 必须表达 |
 | --- | --- |
-| QueryPlan | 原文及修订、用户要求及出处、布尔条件、可执行过滤、关键词表达、原始/后续语义 query、未解决项、数据能力 |
+| SemanticQueryPlan | 原文、自然语言判据、关键词与语义改写、目标、算子步骤、实际模型请求和输入代次 |
 | RetrievalObservation | 分支/查询/操作身份、候选页、匹配片段、排序分数、游标、数据/索引版本、是否枚举完、部分失败 |
 | KnowledgeState | 要求、候选和判断索引、覆盖维度、证据/反证引用、反馈处置、在途动作、待答问题、运行状态 |
 | ExpertTask / Finding | 领域与 Wiki 版本、具体目标、已分配范围、策略、证据、分歧及建议；不携带权限提升 |

@@ -19,6 +19,7 @@ import { expect, it } from 'vitest'
 import { TicketDatabase, DatabaseTicketProvider, MilvusClient } from '@retrieval-agent/provider-database'
 import { ModelServiceClient } from '@retrieval-agent/model-service-client'
 import { SpacyQueryAnalyzer } from '@retrieval-agent/query-understanding'
+import { SemanticOperators } from './semantic-operators.js'
 import type { TicketRetrievalProvider, TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import * as piAi from '@retrieval-agent/dsh-compat/opencode-pi-ai'
 import { TaskHost, type TaskSnapshot } from '../../product-host/src/tasks.js'
@@ -103,6 +104,7 @@ it.skipIf(!enabled)('A3 real model: distinguishes completed operations and the r
     new Provider(ctx, provider)
     const analyzer = new SpacyQueryAnalyzer({ baseUrl: modelUrl })
     const application = new DurableRetrievalAgentService(ctx, {}, store)
+    if (process.env.RETRIEVAL_AGENT_BOUNDARY_OPERATORS === '1') new SemanticOperators(ctx, application)
     if (process.env.RETRIEVAL_AGENT_BOUNDARY_EXPERT === '1') await ctx.plugin({ name: 'boundary-expert-scope', inject,
       apply(scope: Context) { new ExpertCoordinator(scope, application) } })
     installAutomaticRetrievalStart(ctx, application, { analyzer }); installWorkingContext(ctx, application)
@@ -129,13 +131,14 @@ it.skipIf(!enabled)('A3 real model: distinguishes completed operations and the r
     host.start()
     const base = '是否属于“主副卡解绑仍受阻”的范围。仅确认这一范围：包含无法到厅导致解绑受阻；不纳入套餐或关系已解除后仅剩独立合账取消的诉求。请读取原始对话核实。'
     const sourceCases = [
+      { name: 'conflicting-summary-negative', query: '检查工单 ESFT-SUMMARY-TRAIN-000895 是否属于“宽带年费及扣费争议”。只确认原始对话确实涉及宽带年费或扣费争议的工单；如果摘要和对话冲突，以原始对话为准。请读取原始对话核实。', ids: [] },
       { name: 'completed-operation-negative', query: '检查工单 ESFT-SUMMARY-TRAIN-007111 ' + base, ids: [] },
       { name: 'blocked-operation-positive', query: '检查工单 ESFT-SUMMARY-TRAIN-024783 ' + base, ids: ['ESFT-SUMMARY-TRAIN-024783'] },
       { name: 'remaining-issue-positive', query: '检查工单 ESFT-SUMMARY-TRAIN-007111 是否属于“套餐解除后仍需取消合账”的范围。只确认这种后续合账诉求，读取原始对话核实。', ids: ['ESFT-SUMMARY-TRAIN-007111'] },
     ]
     const cases = process.env.RETRIEVAL_AGENT_BOUNDARY_CASE === 'broad-topics'
       ? [{ name: 'broad-topics', query: '查找副卡与跨域有关的工单', ids: undefined }]
-      : sourceCases
+      : process.env.RETRIEVAL_AGENT_BOUNDARY_CASE ? sourceCases.filter(c => c.name === process.env.RETRIEVAL_AGENT_BOUNDARY_CASE) : sourceCases
     for (const example of cases) {
       const startedAt = Date.now(), errorOffset = errors.length, id = randomUUID()
       const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operationId: id, kind: 'query', text: example.query }) })
@@ -156,14 +159,38 @@ it.skipIf(!enabled)('A3 real model: distinguishes completed operations and the r
       records.push(record)
       await writeFile(`${output}/${example.name}.json`, JSON.stringify(record, null, 2))
       await writeFile(`${output}/${example.name}-events.json`, JSON.stringify(agent.session.snapshotEvents(), null, 2))
-      expect.soft(agent.session.deriveMessages().filter(m => m.role === 'system').flatMap(m => m.content.map(b => b.type === 'text' ? b.text : '')).join('\n')).toContain('默认采用标题与摘要优先')
-      expect.soft(agent.session.deriveMessages().filter(m => m.role === 'system').flatMap(m => m.content.map(b => b.type === 'text' ? b.text : '')).join('\n')).toContain('用户已回答的口径持续有效')
+      if (application.operators) {
+        expect.soft(task?.state_json?.contextManifests?.some(m => m.measurement === 'dsh_request' && m.operator?.operation === 'query_plan')).toBe(true)
+        expect.soft(task?.state_json?.query.contract?.semanticPlan?.original).toBe(example.query)
+      } else {
+        expect.soft(agent.session.deriveMessages().filter(m => m.role === 'system').flatMap(m => m.content.map(b => b.type === 'text' ? b.text : '')).join('\n')).toContain('默认采用标题与摘要优先')
+        expect.soft(agent.session.deriveMessages().filter(m => m.role === 'system').flatMap(m => m.content.map(b => b.type === 'text' ? b.text : '')).join('\n')).toContain('用户已回答的口径持续有效')
+      }
       expect.soft(snapshot?.question, JSON.stringify(snapshot?.question)).toBeUndefined()
       expect.soft(snapshot?.failure).toBeNull()
       expect.soft(task?.state_json?.phase).toBe('stopped')
+      expect.soft(['top_k_accepted', 'no_result']).toContain(task?.state_json?.termination)
+      expect.soft(errors.slice(errorOffset)).toEqual([])
       if (example.ids) {
         expect.soft(actual, example.name).toEqual(example.ids)
         expect.soft(task?.state_json?.contextManifests?.some(m => m.measurement === 'dsh_request' && m.evidenceIds.length)).toBe(true)
+        if (actual.length && task?.state_json?.frozenEvidence) {
+          const submitted = await fetch(url + '/' + id + '/artifacts', { method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ operationId: randomUUID(), kind: 'jsonl', template: 'full', resultRevision: task.state_json.frozenEvidence.packId }) })
+          expect(submitted.status).toBe(202)
+          const artifactId = (await submitted.json() as { id: string }).id
+          let artifact = await host.deliveries!.store.read(artifactId)
+          const deadline = Date.now() + 30000
+          while (artifact?.status !== 'ready' && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 250)); artifact = await host.deliveries!.store.read(artifactId)
+          }
+          expect(artifact?.status).toBe('ready')
+          const downloaded = await fetch(url + '/' + id + '/artifacts/' + artifactId + '/content')
+          expect(downloaded.status).toBe(200)
+          const content = await downloaded.text()
+          await writeFile(`${output}/${example.name}-confirmed.jsonl`, content)
+          expect(content.trim().split('\n').map(line => JSON.parse(line).ticketId).sort()).toEqual(example.ids)
+        }
       } else expect.soft(actual.length, 'Broad topic task should return a useful confirmed set without clarification').toBeGreaterThan(0)
       if (task?.state_json?.phase !== 'stopped') await fetch(url + '/' + id, { method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ operationId: randomUUID(), kind: 'cancel' }) })

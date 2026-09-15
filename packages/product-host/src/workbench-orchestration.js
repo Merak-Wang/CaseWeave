@@ -24,7 +24,7 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
   const usedBy = reference => (current?.experts ?? []).filter(e => e.knowledge.some(k => k.reference === reference && k.used))
   function clock() {
     const elapsed = (current?.clock?.elapsedMs ?? 0) + (current?.clock?.running ? Math.max(0, Date.now() - Date.parse(current.updatedAt)) : 0)
-    $('elapsed').textContent = current?.clock ? '本轮 ' + Math.floor(elapsed / 60000) + ':' + String(Math.floor(elapsed / 1000) % 60).padStart(2, '0') : ''
+    $('elapsed').textContent = current?.clock?.unavailable ? '历史耗时未记录' : current?.clock ? '本轮 ' + Math.floor(elapsed / 60000) + ':' + String(Math.floor(elapsed / 1000) % 60).padStart(2, '0') : ''
     $('elapsed').title = '从本轮提交到暂停或完成的执行时间；补充后重新计时，历史轨迹保留'
   }
   let timer = setInterval(clock, 1000)
@@ -102,13 +102,15 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
     $('live-work').dataset.state = unavailable ? 'error' : disconnected ? 'offline' : busy ? 'running' : o?.terminal ? ['top_k_accepted', 'no_result'].includes(o.outcome) ? 'done' : 'stopped' : 'waiting'
     const working = o?.experts.filter(e => e.status === 'running') ?? []
     const last = s.conversation?.filter(c => c.role === 'assistant').at(-1)
-    const titles = { search: '正在从关键词与语义中寻找线索', review: '正在审阅标题与摘要，按需核实疑点', experts: working.length + ' 位领域专家正在独立核查', synthesis: '正在汇总发现，核对遗漏与分歧', finished: ['top_k_accepted', 'no_result'].includes(o?.outcome) ? '本轮检索已结束' : '本轮已停止，仍有未完成项' }
-    const title = unavailable ? '检索暂时无法继续' : disconnected ? o?.terminal ? '连接已断开，显示已保存结果' : '正在重连，后台检索仍在继续' : s.question && !working.length ? '有一处范围需要你补充' : titles[o?.stage] ?? '正在准备检索'
+    const titles = { planning: '正在理解当前要求，制定检索计划', coverage: '尚未找到候选，正在核对搜索范围与后续方向', search: '正在从关键词与语义中寻找线索', review: '正在审阅标题与摘要，按需核实疑点', experts: working.length + ' 位领域专家正在独立核查', synthesis: '正在汇总发现，核对遗漏与分歧', finished: ['top_k_accepted', 'no_result'].includes(o?.outcome) ? '本轮检索已结束' : '本轮已停止，仍有未完成项' }
+    const title = unavailable ? '检索暂时无法继续' : disconnected ? o?.terminal ? '连接已断开，显示已保存结果' : '正在重连，后台检索仍在继续' : s.question && !working.length ? '有一处范围需要你补充'
+      : !o?.terminal && o?.operation === 'sem_filter' ? '模型正在按当前业务要求核实已召回的工单' : !o?.terminal && o?.operation === 'sem_search' ? '正在执行本轮检索计划，补充候选' : titles[o?.stage] ?? '正在准备检索'
     revealText($('live-title'), title, wasInitialized)
     const note = $('live-note')
     const stoppedReason = o?.terminal && !['top_k_accepted', 'no_result'].includes(o.outcome) ? o.stopExplanation : undefined
-    note.hidden = disconnected || !(stoppedReason || busy && last)
-    if (stoppedReason || last) revealText(note, stoppedReason || last.text, wasInitialized)
+    const limitation = o?.blockers?.join('；')
+    note.hidden = disconnected || !(stoppedReason || limitation || busy && last)
+    if (stoppedReason || limitation || last) revealText(note, stoppedReason || limitation || last.text, wasInitialized)
     $('live-metrics').replaceChildren(...(o ? [['线索', o.counts.candidates], ['已读原文', o.counts.inspected], ['已确认', o.counts.confirmed]].map(([label, count]) => { const e = make('span'); e.append(make('strong', String(count)), make('small', label)); return e }) : []))
     const active = stages.findIndex(([key]) => key === o?.stage), done = o?.terminal && ['top_k_accepted', 'no_result'].includes(o.outcome)
     const railKey = [o?.stage, done, unavailable, o?.counts.experts, o?.counts.completedExperts, o?.counts.inspected, o?.fastQueryComplete, disconnected].join(':')

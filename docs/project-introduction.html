@@ -578,7 +578,7 @@
               <div class="demo-module"><span class="module-top">路径 A / 关键词</span><strong>副卡 OR 跨域</strong><p>枚举全部字面命中，分页呈现。</p></div>
               <div class="demo-module"><span class="module-top">路径 B / 向量</span><strong>原始 query → Top-K</strong><p>找到语义相近、表达不同的候选。</p></div>
             </div>
-            <p class="demo-principle" id="demo-principle">保留原始条件，不做首轮语义扩写；字面命中进入候选，不自动成为确认结果。</p>
+            <p class="demo-principle" id="demo-principle">原句向量与查询规划并行，关键词宽召回与语义改写补充候选；完整业务条件决定确认结果。</p>
           </div>
           <aside class="evidence" aria-label="虚构样例的证据侧栏">
             <div class="evidence-head"><strong id="evidence-heading">候选工单</strong><span id="evidence-caption">三条虚构样例</span></div>
@@ -705,7 +705,7 @@
         role: 'QUERY UNDERSTANDING → RETRIEVAL', title: '让两条检索路径同时出发。',
         explanation: '将普通主题“副卡和跨域”解析为“副卡 OR 跨域”，跨字段枚举任一主题的字面命中，同时对原始问题做向量召回。明确要求“两者同时出现”时才使用 AND；候选由 Agent 再按完整请求复核。',
         modules: [['路径 A / 关键词', '副卡 OR 跨域', '枚举全部字面命中，分页呈现。'], ['路径 B / 向量', '原始 query → Top-K', '找到语义相近、表达不同的候选。']],
-        principle: '保留原始条件，不做首轮语义扩写；字面命中进入候选，不自动成为确认结果。',
+        principle: '原句向量与查询规划并行，关键词宽召回与语义改写补充候选；完整业务条件决定确认结果。',
         evidenceTitle: '候选工单', evidenceCaption: '三条虚构样例',
         tickets: [{i: 0, status: '检索线索', text: '标题出现“副卡”，处理记录出现“跨域”。'}, {i: 1, status: '检索线索', text: '向量路径召回；需要进一步核对业务含义。'}, {i: 2, status: '检索线索', text: '语义近邻候选；相似度不等于符合要求。'}],
         footer: '进展先可见，候选与确认结果始终分开。'

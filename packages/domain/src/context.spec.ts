@@ -49,6 +49,23 @@ function stateWithFieldCatalog(): RetrievalState {
 }
 
 describe('EvidenceContextPolicy', () => {
+  it.each([8, 16, 32])('bounds explicit candidate windows at %i without changing rank or marking omitted candidates visible', maxCandidates => {
+    const candidates = Array.from({ length: 40 }, (_, i) => ({ ref: TicketCandidateRef(`batch-${i}`), title: `工单 ${i}`, summary: '已有来源摘要', l0: {} }))
+    const state = { ...stateWithFieldCatalog(), candidates, candidateHistory: candidates,
+      contextCandidateRefs: candidates.map(c => c.ref) } as unknown as RetrievalState
+    const selection = new EvidenceContextPolicy({ maxCandidates }).select(state, 24000)
+    expect(selection.includedCandidateRefs).toEqual(candidates.slice(0, maxCandidates).map(c => c.ref))
+    expect(selection.manifest?.candidateRefs).toEqual(selection.includedCandidateRefs)
+    expect(selection.excluded.filter(c => c.reason === 'not_selected')).toHaveLength(40 - maxCandidates)
+    expect(selection.estimatedTokens).toBeLessThanOrEqual(24000)
+    const tight = new EvidenceContextPolicy({ maxCandidates }).select({ ...state,
+      candidates: candidates.map(c => ({ ...c, summary: '需要完整保留的业务摘要。'.repeat(40) })) } as unknown as RetrievalState, 1800)
+    expect(tight.estimatedTokens).toBeLessThanOrEqual(1800)
+    expect(tight.includedCandidateRefs.length).toBeLessThan(maxCandidates)
+  })
+  it.each([0, -1, 1.5, 33, NaN, Infinity])('rejects invalid review width %s', maxCandidates => {
+    expect(() => new EvidenceContextPolicy({ maxCandidates })).toThrow(/maxCandidates/)
+  })
   it('keeps a short source dialogue and its late correction together when the token budget fits', () => {
     const base = stateWithFieldCatalog()
     const ref = TicketCandidateRef('dialogue-ticket')

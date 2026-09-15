@@ -143,6 +143,18 @@ def documents() -> list[dict[str, str]]:
     ]
 
 
+def test_read_features_reuses_prepared_vectors_without_embedding(tmp_path):
+    models = FakeModels()
+    backend = RetrievalRankingBackend(models, tmp_path)
+    assert backend.read_features(documents(), profile())['rows'] == []
+    backend.prepare(documents(), profile(), 10)
+    def forbidden(*args, **kwargs): raise AssertionError('Feature reads must never embed')
+    models.embed = forbidden
+    result = backend.read_features([documents()[1], {**documents()[2], 'contentHash': 'stale'}], profile())
+    assert [r['id'] for r in result['rows']] == ['semantic']
+    assert np.allclose(result['rows'][0]['vector'], backend.prepared.vectors[1])
+
+
 def checkpoint_documents() -> list[dict[str, str]]:
     return [
         {

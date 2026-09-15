@@ -11,7 +11,7 @@ export function createModelUI({ api, getTaskId }) {
   function label() {
     const value = data?.selected?.model ?? '选择模型'
     for (const id of ['model-selector', 'model-selector-task']) { $(id).querySelector('span').textContent = value; $(id).title = value + ' · 切换模型或管理供应商' }
-    $('model-scope').textContent = getTaskId() ? '选择将用于当前检索的后续步骤。正在生成的内容会继续完成。' : '为新检索选择模型，主 Agent 与领域专家沿用相同供应商。'
+    $('model-scope').textContent = data?.notice || (getTaskId() ? '选择将用于当前检索的后续步骤。正在生成的内容会继续完成。' : '为新检索选择模型，主 Agent 与领域专家沿用相同供应商。')
   }
   async function load() {
     const current = ++epoch

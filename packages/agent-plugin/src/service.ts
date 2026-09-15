@@ -15,6 +15,7 @@ import {
 } from '@retrieval-agent/contracts'
 import {
   EvidenceContextPolicy,
+  DEFAULT_REVIEW_BATCH_SIZE,
   RetrievalController,
   foldRetrievalEvents,
   type RetrievalControllerConfig,
@@ -24,6 +25,8 @@ import {
 } from '@retrieval-agent/domain'
 import { installDshSessionCompatibility, readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
 import { SessionRetrievalEventJournal } from './session-journal.js'
+import type { SemanticOperators } from './semantic-operators.js'
+import type { SemanticQueryPlan, ContextManifest, OperatorDecision } from '@retrieval-agent/contracts'
 
 interface ActiveRetrieval {
   readonly controller: RetrievalController
@@ -48,6 +51,7 @@ function stoppedReason(error: unknown): 'budget_exhausted' | 'capacity_exceeded'
 }
 
 export interface RetrievalAgentServiceConfig extends RetrievalControllerConfig {
+  readonly reviewBatchSize?: number
   readonly contextTokenBudget?: number
   readonly maxContextTokens?: number
 }
@@ -70,10 +74,14 @@ function latestRetrieval(agent: Agent): { readonly events: ReturnType<typeof rea
 
 /** Per-session product application; model calls only intents on this service. */
 export class RetrievalAgentService extends Service {
+  modelSelection?: (agent: Agent) => { provider: string; model: string } | undefined
+  operators?: SemanticOperators
   coordinator?: { prepare(agent: Agent, signal?: AbortSignal): Promise<void>; validateKnowledge?(agent: Agent): Promise<void>; runPending(agent: Agent, signal?: AbortSignal): Promise<void>; waitForExperts?(agent: Agent, taskIds: readonly string[], signal?: AbortSignal): Promise<void>; settlePending?(agent: Agent, signal?: AbortSignal): Promise<void>; cancelPending?(agent: Agent): void; isExpert(agent: Agent): boolean; knowledgeView?(state: RetrievalState, entryId?: string): Promise<import('./knowledge-view.js').KnowledgeView> }
   static inject = ['ticketRetrievalProvider', 'ticketPrincipalProvider']
   private readonly active = new WeakMap<Agent, ActiveRetrieval>()
   private readonly controllerConfig: RetrievalControllerConfig
+  readonly searchMaxScan: number
+  readonly reviewBatchSize: number
   readonly contextTokenBudget: number | undefined
   readonly maxContextTokens: number | undefined
 
@@ -81,8 +89,14 @@ export class RetrievalAgentService extends Service {
     super(ctx, 'retrievalAgent')
     installDshSessionCompatibility()
     this.controllerConfig = config
+    this.searchMaxScan = config.searchMaxScan ?? 50_000
+    this.reviewBatchSize = new EvidenceContextPolicy({ maxCandidates: config.reviewBatchSize ?? DEFAULT_REVIEW_BATCH_SIZE }).maxCandidates
     this.contextTokenBudget = config.contextTokenBudget
     this.maxContextTokens = config.maxContextTokens
+  }
+
+  createContextPolicy(role: 'main' | 'expert' = 'main'): EvidenceContextPolicy {
+    return new EvidenceContextPolicy({ role, maxCandidates: this.reviewBatchSize })
   }
 
   currentOrUndefined(agent: Agent): RetrievalState | undefined {
@@ -124,8 +138,8 @@ export class RetrievalAgentService extends Service {
     const controller = new RetrievalController(
       this.ctx.ticketRetrievalProvider,
       journal,
-      new EvidenceContextPolicy(),
-      { ...this.controllerConfig, onState: state => {
+      this.createContextPolicy(),
+      { ...this.controllerConfig, ...(this.operators ? { initialPlanner: (state: RetrievalState, signal?: AbortSignal) => this.operators!.plan(agent, state, signal) } : {}), onState: state => {
         if (entry) entry.state = state
         else { entry = { controller, journal, state, mutationTail: startBarrier }; this.active.set(agent, entry) }
       } },
@@ -152,6 +166,41 @@ export class RetrievalAgentService extends Service {
         return this.stopForReason(entry, state, reason, error instanceof RetrievalError ? error : undefined)
       }
     })
+  }
+
+  async acceptSemanticPlan(agent: Agent, plan: SemanticQueryPlan, manifests: readonly ContextManifest[], signal?: AbortSignal): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => {
+      const principal = await this.resolvePrincipal(agent, 'search', signal)
+      const current = await entry.controller.reauthorize(principal, state, signal)
+      if (current.phase === 'stopped') throw new RetrievalError('INVALID_TRANSITION', '当前任务不能接收查询计划。')
+      return entry.controller.acceptSemanticPlan(current, plan, manifests)
+    })
+  }
+  async acceptOperatorResults(agent: Agent, generation: number, decisions: readonly OperatorDecision[], signal?: AbortSignal): Promise<RetrievalState> {
+    await this.coordinator?.validateKnowledge?.(agent)
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => {
+      const principal = await this.resolvePrincipal(agent, 'evidence_read', signal)
+      const current = await entry.controller.reauthorize(principal, state, signal)
+      return entry.controller.acceptOperatorResults(current, generation, decisions)
+    })
+  }
+  async recordSemanticSearch(agent: Agent, key: string): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => entry.controller.recordSemanticSearch(state, key))
+  }
+  async recordOperatorActivity(agent: Agent, activity: NonNullable<RetrievalState['operatorActivity']>): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => entry.controller.recordOperatorActivity(state, activity))
+  }
+  async recordOperatorUsage(agent: Agent, generation: number, metrics: Readonly<Record<string, unknown>>): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => entry.controller.recordOperatorUsage(state, generation, metrics))
+  }
+  async recordOperatorArtifact(agent: Agent, artifact: import('@retrieval-agent/contracts').OperatorArtifact): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => entry.controller.recordOperatorArtifact(state, artifact))
   }
 
   async continueRanking(agent: Agent, signal?: AbortSignal): Promise<RetrievalState> {
@@ -308,7 +357,7 @@ export class RetrievalAgentService extends Service {
         ...(rejectionReason === undefined ? {} : { rejectionReason }),
         accepted,
       })
-      return accepted ? measured : entry.controller.freezeForInterruption(measured, 'budget_exhausted')
+      return accepted ? measured : entry.controller.freezeForInterruption(measured, 'capacity_exceeded')
     })
     return { accepted }
   }
@@ -353,7 +402,7 @@ export class RetrievalAgentService extends Service {
     const replayed = latestRetrieval(agent)
     if (replayed === undefined) throw new RetrievalError('INVALID_TRANSITION', '当前会话尚未开始检索。')
     const journal = new SessionRetrievalEventJournal(agent.session)
-    const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, new EvidenceContextPolicy(), {
+    const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, this.createContextPolicy(), {
       ...this.controllerConfig, onState: state => { const current = this.active.get(agent); if (current?.state.retrievalId === state.retrievalId) current.state = state },
     })
     const entry = { controller, journal, state: replayed.state, mutationTail: Promise.resolve() }

@@ -1,3 +1,4 @@
+import { QUERY_DDL, prepareAccess } from './query-store.js'
 import { createPool, type Pool, type RowDataPacket } from 'mysql2/promise'
 import { normalizeLiteral, type NormalizedTicketRecord, type QueryExpression, type QueryFieldCapability } from '@retrieval-agent/contracts'
 import { sha256, stableJson } from '@retrieval-agent/provider-local'
@@ -5,6 +6,7 @@ import { fieldCapabilities, grams, queryDocument } from './projection.js'
 import { compileSql, necessaryGrams } from './sql.js'
 
 const DDL = [
+  ...QUERY_DDL,
   `CREATE TABLE IF NOT EXISTS ra_provider_snapshot (id VARCHAR(191) PRIMARY KEY, dataset_id VARCHAR(191) NOT NULL, generation CHAR(64) NOT NULL, index_id CHAR(64) NULL, snapshot_json JSON NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS ra_generation (id CHAR(64) PRIMARY KEY, dataset_id VARCHAR(191) NOT NULL, source_watermark VARCHAR(255) NOT NULL, mapping_version VARCHAR(100) NOT NULL, status VARCHAR(20) NOT NULL, record_count INT NOT NULL, fields_json JSON NOT NULL, grams_ready BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3))`,
   `CREATE TABLE IF NOT EXISTS ra_ticket (generation CHAR(64) NOT NULL, ticket_id VARCHAR(191) NOT NULL, content_hash CHAR(64) NOT NULL, source_version VARCHAR(255) NOT NULL, record_json JSON NOT NULL, PRIMARY KEY(generation,ticket_id))`,
@@ -24,7 +26,29 @@ export interface IndexGeneration { id: string; generation: string; collection_na
 export interface EmbeddingIdentity { model: string; revision: string; dimensions: number; normalization: 'l2'; metric: 'COSINE'; chunkChars: number; chunkVersion: 'field-codepoints-v3' }
 export class TicketDatabase {
   readonly pool: Pool
-  constructor(url = 'mysql://root@127.0.0.1:13306/retrieval_agent') { this.pool = createPool({ uri: url, connectionLimit: 8, charset: 'utf8mb4_bin', timezone: 'Z' }) }
+  readonly #searchLocks: Pool
+  constructor(url = process.env.RETRIEVAL_AGENT_MYSQL_URL ?? 'mysql://root@127.0.0.1:13306/retrieval_agent') {
+    const options = { uri: url, connectionLimit: 8, charset: 'utf8mb4_bin', timezone: 'Z' }
+    this.pool = createPool(options)
+    // Lock holders must not consume the connections needed to execute the search itself.
+    this.#searchLocks = createPool(options)
+  }
+  async exclusiveSearch<T>(key: string, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const connection = await this.#searchLocks.getConnection(), name = `ra-search-${key.slice(0, 48)}`
+    let acquired = false
+    try {
+      while (!acquired) {
+        signal?.throwIfAborted()
+        const [rows] = await connection.query<RowDataPacket[]>('SELECT GET_LOCK(?,1) AS acquired', [name])
+        if (rows[0]?.acquired == null) throw new Error('Search serialization lock unavailable')
+        acquired = rows[0]?.acquired === 1
+      }
+      signal?.throwIfAborted()
+      return await work()
+    } finally {
+      try { if (acquired) await connection.query('SELECT RELEASE_LOCK(?)', [name]) } finally { connection.release() }
+    }
+  }
   async rows<T>(sql: string, params: unknown[] = []): Promise<T[]> {
     const [rows] = await this.pool.query<RowDataPacket[]>(sql, params); return rows as T[]
   }
@@ -33,8 +57,9 @@ export class TicketDatabase {
     const column = (await this.rows<{ DATA_TYPE: string }>('SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?', ['ra_field_value', 'text_value']))[0]
     // Upgrade an earlier local preview in place; never truncate source scalar values.
     if (column?.DATA_TYPE !== 'mediumtext') await this.pool.query('ALTER TABLE ra_field_value MODIFY text_value MEDIUMTEXT NULL')
+    await prepareAccess(this)
   }
-  async close(): Promise<void> { await this.pool.end() }
+  async close(): Promise<void> { await Promise.all([this.pool.end(), this.#searchLocks.end()]) }
   async generation(id: string): Promise<Generation> {
     const row = (await this.rows<Generation>('SELECT * FROM ra_generation WHERE id=? AND status=?', [id, 'ready']))[0]
     if (!row) throw new Error('Dataset generation is unavailable'); return row
@@ -80,6 +105,7 @@ export class TicketDatabase {
         onProgress?.(Math.min(offset + batch.length, records.length))
       }
       if (previous.size) await connection.query('INSERT IGNORE INTO ra_index_job(generation,ticket_id,operation,source_hash) VALUES ?', [[...previous].map(([ticket, hash]) => [id, ticket, 'delete', hash])])
+      await prepareAccess(this, id)
       await connection.query('UPDATE ra_generation SET status=? WHERE id=?', ['ready', id])
       return id
     } finally { await connection.query('SELECT RELEASE_LOCK(?)', [lock]); connection.release() }

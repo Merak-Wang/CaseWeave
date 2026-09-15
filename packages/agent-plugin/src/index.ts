@@ -11,6 +11,10 @@ import { MySqlTaskStore } from './task-store.js'
 import { ExpertCoordinator } from './experts.js'
 import { installWorkingContext } from './working-context.js'
 import { WikiLearningService } from './wiki-learning.js'
+import { SemanticOperators } from './semantic-operators.js'
+export * from './semantic-operators.js'
+export * from './python-operator-bridge.js'
+import { DEFAULT_REVIEW_BATCH_SIZE, MAX_REVIEW_BATCH_SIZE } from '@retrieval-agent/domain'
 export * from './wiki-learning.js'
 export * from './experts.js'
 export * from './working-context.js'
@@ -37,6 +41,7 @@ export interface Config extends RetrievalAgentServiceConfig {
   readonly queryAnalysisDeadlineMs?: number
   readonly wikiRoot?: string
   readonly wikiLearning?: boolean
+  readonly semanticOperatorsRoot?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -44,10 +49,11 @@ export const Config: z<Config> = z.object({
   mysqlUrl: z.string(),
   wikiRoot: z.string(),
   wikiLearning: z.boolean().default(true),
-  maxSearches: z.number().step(1).min(1).default(2_500),
+  semanticOperatorsRoot: z.string(),
   maxRepeatedToolErrors: z.number().step(1).min(1),
   searchTopK: z.number().step(1).min(1).max(50).default(20),
   searchMaxScan: z.number().step(1).min(1).default(50_000),
+  reviewBatchSize: z.number().step(1).min(1).max(MAX_REVIEW_BATCH_SIZE).default(DEFAULT_REVIEW_BATCH_SIZE),
   contextTokenBudget: z.number().step(1).min(1),
   maxContextTokens: z.number().step(1).min(1),
   queryAnalysisBaseUrl: z.string().default('http://127.0.0.1:8012'),
@@ -63,6 +69,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   if (store) ctx.effect(() => () => store.close())
   const application = store ? new DurableRetrievalAgentService(ctx, config, store) : new RetrievalAgentService(ctx, config)
   new ExpertCoordinator(ctx, application, config.wikiRoot)
+  new SemanticOperators(ctx, application, config.wikiRoot, config.semanticOperatorsRoot)
   if (application instanceof DurableRetrievalAgentService && config.wikiRoot && config.wikiLearning !== false) new WikiLearningService(ctx, application, config.wikiRoot)
   installAutomaticRetrievalStart(ctx, application, {
     analyzer: new SpacyQueryAnalyzer({

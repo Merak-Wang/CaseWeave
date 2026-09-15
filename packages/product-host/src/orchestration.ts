@@ -11,23 +11,32 @@ export function projectOrchestration(state: RetrievalState) {
   const running = tasks.filter(t => ['pending', 'running'].includes(t.status))
   const terminal = state.phase === 'stopped'
   const channelsRunning = state.searchProgress?.channels.some(c => c.status === 'running')
-  const stage = terminal ? 'finished' : channelsRunning || !state.lastPage ? 'search' : running.length ? 'experts' : tasks.length ? 'synthesis' : 'review'
+  const operation = state.operatorActivity?.inputGeneration === generation && state.operatorActivity.status === 'running' ? state.operatorActivity.operation : undefined
+  const stage = terminal ? 'finished' : channelsRunning || !state.lastPage ? 'search' : running.length ? 'experts' : tasks.length ? 'synthesis'
+    : state.query?.contract?.schemaVersion === 10 && state.query.contract.semanticPlan?.inputGeneration !== generation ? 'planning'
+    : operation === 'query_plan' ? 'planning' : !state.candidates.length ? 'coverage' : 'review'
+  const blockers = [...(state.query?.unresolvedConstraints ?? []), ...(state.gaps ?? []).filter(g => !['coverage', 'boundary'].includes(g.kind)
+    && ['open', 'unknown'].includes(g.status) && g.description).map(g => g.description!)]
   const roundStart = state.userFeedback?.at(-1)?.receivedAt ?? state.createdAt
-  const elapsed = Date.parse(state.executionClock?.waitingSince ?? state.updatedAt) - Date.parse(roundStart)
+  const elapsed = Date.parse(state.executionClock?.waitingSince ?? (terminal ? '' : state.updatedAt)) - Date.parse(roundStart)
   const expertOutputTokens = (state.expertTasks ?? []).reduce((total, t) => total + (t.outputTokens ?? 0), 0)
   const mainOutputTokens = state.budget?.totalOutputTokens ?? 0
+  const operatorUsage = state.budget?.operatorUsage
+  const operatorOutputTokens = Number(operatorUsage?.reported_completion_tokens ?? 0)
   return {
-    usage: { outputTokens: mainOutputTokens + expertOutputTokens, mainOutputTokens, expertOutputTokens,
-      modelRequests: (state.budget?.modelStepsUsed ?? 0) + (state.expertTasks ?? []).reduce((total, t) => total + (t.modelSteps ?? 0), 0),
+    usage: { outputTokens: mainOutputTokens + expertOutputTokens + operatorOutputTokens, mainOutputTokens, expertOutputTokens, operatorOutputTokens,
+      operatorUsage,
+      modelRequests: (state.budget?.modelStepsUsed ?? 0) + (state.expertTasks ?? []).reduce((total, t) => total + (t.modelSteps ?? 0), 0) + Number(operatorUsage?.llm_adapter_calls ?? 0),
       experts: (state.expertTasks ?? []).map(t => ({ id: t.id, title: domains.find(d => d.id === t.domainId)?.description ?? t.domainId,
         outputTokens: t.outputTokens ?? 0, inputGeneration: t.inputGeneration })),
     },
     context: state.budget?.context,
     coordinatorActivity: state.coordinatorActivity ?? 'working',
     clock: { elapsedMs: Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0,
+      ...(!Number.isFinite(elapsed) ? { unavailable: true } : {}),
       running: !terminal && !state.executionClock?.waitingSince },
     inputGeneration: generation, startedAt: state.createdAt, updatedAt: state.updatedAt, stage, terminal, fastQueryComplete: Boolean(state.lastPage),
-    outcome: state.termination, stopExplanation: state.stopExplanation, waitingForInput: state.termination === 'needs_clarification',
+    outcome: state.termination, stopExplanation: state.stopExplanation, blockers, operation, waitingForInput: state.termination === 'needs_clarification',
     counts: { candidates: state.candidates.length, inspected: inspected.size, confirmed: state.selectedCandidateRefs.length,
       experts: tasks.length, completedExperts: tasks.filter(t => t.status === 'completed').length },
     catalog: { status: state.knowledgeCatalog?.status ?? 'preparing', releaseId: state.knowledgeCatalog?.releaseId,

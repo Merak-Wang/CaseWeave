@@ -7,7 +7,7 @@ export interface CandidateWindow {
   view: CandidateView; version: string; offset: number; total: number; limit: number;
   items: readonly TicketCandidate[];
   readableCandidateRefs: readonly string[];
-  judgments: readonly { candidateRef: string; verdict: string; reason: string; evidenceRefs: readonly string[] }[];
+  judgments: readonly { candidateRef: string; verdict: string; reason: string; basis?: string; evidenceRefs: readonly string[] }[];
   nextCursor?: string;
 }
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -34,9 +34,8 @@ export function candidateWindow(state: RetrievalState, view: CandidateView = 'cu
   }
   const page = items.slice(offset, offset + limit)
   const refs = new Set(page.map(c => c.ref))
-  const current = new Set(state.candidates.map(c => c.ref))
   return { view, version, offset, total: items.length, limit, items: page,
-    readableCandidateRefs: page.filter(c => current.has(c.ref)).map(c => c.ref),
+    readableCandidateRefs: state.accessValidation === 'required' ? [] : page.map(c => c.ref),
     judgments: (state.judgments ?? []).filter(j => refs.has(j.candidateRef)),
     ...(offset + limit < items.length ? { nextCursor: Buffer.from(JSON.stringify({ version, offset: offset + limit })).toString('base64url') } : {}) }
 }

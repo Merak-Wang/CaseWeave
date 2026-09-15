@@ -2,8 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { createPool, type Pool, type PoolConnection, type RowDataPacket } from 'mysql2/promise'
 import { RetrievalError, makeRetrievalEvent, type RetrievalState, type RetrievalDomainEvent, type RetrievalEventType,
   type RetrievalEventDataMap, type RetrievalId, type TrustedPrincipalContext } from '@retrieval-agent/contracts'
-import { RetrievalController, migrateProjectionState, type RetrievalEventJournal, type RetrievalClarificationAnswer } from '@retrieval-agent/domain'
-import { ARTIFACT_DDL, externalizeArtifacts, hydrateArtifacts } from './artifact-store.js'
+import { RetrievalController, migrateProjectionState, recoverExecutionClock, type RetrievalEventJournal, type RetrievalClarificationAnswer } from '@retrieval-agent/domain'
+import { ARTIFACT_DDL, externalizeArtifacts, hydrateArtifacts, artifactIdentities } from './artifact-store.js'
 
 export type TaskCommand = { kind: 'query'; text: string }
   | { kind: 'supplement'; text: string; information: RetrievalClarificationAnswer }
@@ -76,23 +76,36 @@ export class MySqlTaskStore {
     try { await c.beginTransaction(); const result = await work(c); await c.commit(); return result }
     catch (error) { await c.rollback(); throw error } finally { c.release() }
   }
-  async read(id: string): Promise<TaskRecord | undefined> {
-    await this.ready; return this.hydrateTask((await this.rows<TaskRecord>('SELECT * FROM ra_task WHERE id=?', [id]))[0])
+  async read(id: string, previous?: TaskRecord): Promise<TaskRecord | undefined> {
+    await this.ready
+    const task = (await this.rows<TaskRecord>('SELECT * FROM ra_task WHERE id=?', [id]))[0]
+    // A caller may reuse its already validated immutable projection, but only after reading the authoritative revision.
+    if (task?.state_json && previous?.id === id && task.state_json.stateId === previous.state_json?.stateId) return { ...task, state_json: previous.state_json }
+    return this.hydrateTask(task)
   }
-  async forSession(id: string): Promise<TaskRecord | undefined> {
+  async forSession(id: string, previous?: TaskRecord): Promise<TaskRecord | undefined> {
     await this.ready
     // Sorting a complete JSON projection can exceed MySQL's sort buffer even for one large task.
     const task = (await this.rows<{ id: string }>('SELECT id FROM ra_task WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 1', [id]))[0]
-    return task ? this.read(task.id) : undefined
+    return task ? this.read(task.id, previous) : undefined
+  }
+  async sourceSnapshot(id: string): Promise<RetrievalState['snapshot']> {
+    await this.ready
+    return (await this.rows<{ snapshot: RetrievalState['snapshot'] }>("SELECT JSON_EXTRACT(state_json,'$.snapshot') AS snapshot FROM ra_task WHERE id=?", [id]))[0]?.snapshot
   }
   private async hydrateTask(task: TaskRecord | undefined, c: Pool | PoolConnection = this.pool): Promise<TaskRecord | undefined> {
     if (!task?.state_json) return task
-    return { ...task, state_json: migrateProjectionState(await hydrateArtifacts((sql, values) => c.query(sql, values), task.id, task.state_json) as RetrievalState) }
+    let state = migrateProjectionState(await hydrateArtifacts((sql, values) => c.query(sql, values), task.id, task.state_json) as RetrievalState)
+    if (state.phase === 'stopped' && !state.executionClock?.waitingSince) {
+      const stopped = (await this.rows<{ data_json: RetrievalDomainEvent }>("SELECT data_json FROM ra_task_event WHERE task_id=? AND kind='retrieval/stopped' ORDER BY seq DESC LIMIT 1", [task.id], c))[0]
+      state = recoverExecutionClock(state, stopped?.data_json.occurredAt)
+    }
+    return { ...task, state_json: state }
   }
   private async lock(c: PoolConnection, id: string): Promise<TaskRecord> {
     const task = (await this.rows<TaskRecord>('SELECT * FROM ra_task WHERE id=? FOR UPDATE', [id], c))[0]
     if (!task) throw new RetrievalError('INVALID_REQUEST', '任务不存在。')
-    return (await this.hydrateTask(task, c))!
+    return task
   }
   private async append(c: PoolConnection, task: TaskRecord, kind: string, data: unknown): Promise<void> {
     task.event_seq++
@@ -115,7 +128,12 @@ export class MySqlTaskStore {
     })
   }
   async submit(id: string, principal: TrustedPrincipalContext, operationId: string, command: Exclude<TaskCommand, { kind: 'query' }>): Promise<CommandReceipt> {
-    return this.transaction(async c => this.accept(c, await this.lock(c, id), principal, operationId, command))
+    return this.transaction(async c => {
+      const task = await this.lock(c, id)
+      if (task.owner_hash !== taskOwner(principal)) throw new RetrievalError('UNAUTHORIZED', '当前身份无权访问此任务。')
+      if (task.state_json) task.state_json = await artifactIdentities((sql, values) => c.query(sql, values), id, task.state_json) as RetrievalState
+      return this.accept(c, task, principal, operationId, command)
+    })
   }
   private async accept(c: PoolConnection, task: TaskRecord, principal: TrustedPrincipalContext, operationId: string, command: TaskCommand): Promise<CommandReceipt> {
     if (task.owner_hash !== taskOwner(principal)) throw new RetrievalError('UNAUTHORIZED', '当前身份无权访问此任务。')
@@ -140,7 +158,8 @@ export class MySqlTaskStore {
       && Boolean(command.information.filters?.length || command.information.removedFilterFields?.length)
     task.input_revision++; task.semantic_revision++; if (hard || command.kind === 'query') task.query_revision++
     task.failure = null
-    await this.append(c, task, 'command/accepted', { operationId, command })
+    await this.append(c, task, 'command/accepted', { operationId, command,
+      inputGeneration: (task.state_json?.inputGeneration ?? -1) + (command.kind === 'cancel' ? 0 : 1) })
     if (task.state_json && command.kind !== 'query') {
       const journal = new TaskJournal([], await this.domainEventCount(task.id, c))
       // These transitions only validate already bound identities and alter task data. No Provider I/O.

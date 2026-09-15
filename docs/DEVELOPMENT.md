@@ -1,5 +1,13 @@
 # 开发与运行
 
+## Python 算子服务
+
+完整 Compose 部署包含内部 `semantic-operators` FastAPI 服务。源码开发可直接使用默认常驻 stdio worker，也可先运行 `pnpm operators:serve --port 8013`，再向 Node 进程设置 `CASEWEAVE_OPERATORS_URL=http://127.0.0.1:8013`。健康检查为 `/health`，内部 WebSocket 为 `/v1/operators`；浏览器不直接调用算子。已有安装好的 Python 可通过 `CASEWEAVE_PYTHON` 指定，需安装 `python/semantic-operators` 的锁定依赖。
+
+`pnpm operators:test` 运行 Python 验收。uv 的 `--inexact` 保留已有模型依赖，不删除环境内其他包。算子不重新下载模型权重，embedding/rerank 继续复用既有模型服务。模型供应商和凭据仍配置在 DSH；共享服务令牌用 `CASEWEAVE_OPERATORS_TOKEN` 同时配置服务和 Node，避免放进 URL。算子设计与计量定义见 [Python 算子](design/OPERATORS.md)。
+
+默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。Provider 的 `readFeatures` 分页读取已有索引向量；本地模型服务使用 `/v1/ranking/features`，数据库 Provider 从当前 Milvus 索引读取分片向量。缺失或过期特征不触发建库，改走强判断。计算对照运行方法见 [算子 README](../python/semantic-operators/README.md)；结果默认写入本地 `.cache/algorithm-evaluation`，不作为业务质量验收。
+
 完整容器部署适合单机试用；源码入口供开发、集成与排障使用。产品概览见 [README](../README.md)，测试范围见 [评测与验收](EVALUATION_STRATEGY.md)。
 
 默认数据库工作台位于 `/retrieval`。MySQL 保存任务、命令、事件与结果版本，DSH 执行主 Agent 和领域专家。关闭浏览器不取消后台任务；再次连接时重新校验访问资格。
@@ -55,6 +63,8 @@ docker compose up -d --wait app
 工作台首页和任务追问输入框提供模型选择器，左下角“模型与供应商”打开管理面板。供应商目录、协议、模型发现、设置校验与凭据存储复用 DSH；支持 OpenAI 兼容地址、Responses、Anthropic 及 DSH 当前目录。Ollama 在容器中使用 host.docker.internal:11434/v1，未设密钥时自动使用其忽略的占位值。自定义模型应填实际服务的上下文容量。任务内切换影响后续步骤，正在生成的请求继续结束；新任务采用默认选择。OpenCode Go 按会话附加 x-opencode-session，已有其他 header 保留。密钥不会返回浏览器或写入 localStorage。
 
 .env 的模型配置只作为启动种子；相同配置的重启不会覆盖页面里保存的设置。修改环境中的模型种子可显式更新默认值。首次升级会建立种子指纹；后续设置沿 DSH 私有状态卷保存。
+
+恢复任务时会核对保存的模型是否仍在当前 Provider 配置中。已失效的选择改用当前有效默认模型并显示说明；没有有效默认值时要求在模型设置中选择后继续。主 Agent 与语义算子共用当前选择。模型请求失败保留可公开的错误代码和 HTTP 状态，提示检查模型、凭据、地址或供应商额度；不把失败结束显示为业务检索完成，也不把供应商响应正文传给页面。
 
 MySQL 数据文件位于 mysql-data 卷，Milvus/etcd 位于 milvus-data 卷。内存包括数据库页缓存、索引、Node 会话、PyTorch 和 embedding 权重。MySQL 默认页缓存从 1G 调为 256M，可用 RETRIEVAL_AGENT_MYSQL_BUFFER_POOL 调整；它不是数据库容量限制。Performance Schema 保持启用，语句摘要和长历史各保留 1000 项，减少单机试用中的诊断内存；调节依据见 [MySQL 官方变量说明](https://dev.mysql.com/doc/refman/8.0/en/performance-schema-system-variables.html)。MySQL/Milvus 设置 60 秒优雅退出窗口。GPU embedding 已按硬件使用 BF16/FP16，首版默认不加载 reranker。不同精度会改变向量，不能为了省内存直接换精度而沿用未经核对的索引。
 
@@ -134,6 +144,8 @@ pnpm exec vitest run packages/agent-plugin/src/durable-service.spec.ts tests/dat
 查询分析的真实 HTTP 边界验收使用 `node scripts/verify-query-analysis.mjs http://127.0.0.1:8012`（也可用 `RETRIEVAL_AGENT_MODEL_SERVICE_URL`）。它复用已运行的 spaCy 模型服务，检查含 emoji 的 UTF-16 来源位置、用户所在地与明确地域限制，以及重复地名的操作符归属；结果写入 `output/query-analysis/acceptance.json`。不调用主 LLM，也不代表 Agent 业务语义质量。
 
 ## 上下文与专家验收
+
+`RETRIEVAL_AGENT_REVIEW_BATCH_SIZE` 设置每个候选摘要工作窗的上限，接受 1–32 的整数，默认 8；Docker Compose 与本地 preset 均传递此值，对应插件配置 `reviewBatchSize`。主 Agent、专家、摘要翻窗与历史摘要重读使用同一设置；实际窗口还受 token 预算约束。原文读取的候选数上限和检索 Top-K 独立控制。调大批宽可能减少模型往返，也可能增加单次输入、延时或判断遗漏，需要在固定模型、查询、数据和 Wiki 下比较实际判断与交付；它不会自动确认批内工单。
 
 主 Agent 与领域专家的工作上下文默认上限为 **256K（262,144 tokens）**。若所选模型窗口或部署上限更小，扣除协议/输出余量后取较小值；显式 `contextTokenBudget` 仍为部署覆盖。工作视窗不填满配额：候选/原文仍按已有结构窗口选取，完整请求另由 DSH 请求测量与模型窗口校验。没有获取到模型窗口时，这只是工作配额，不宣称模型支持该容量。
 

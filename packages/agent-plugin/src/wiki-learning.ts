@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type GenerateOptions, type ToolSchema } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { RetrievalError, type RetrievalState } from '@retrieval-agent/contracts'
+import { RetrievalError, TicketCandidateRef, type RetrievalState } from '@retrieval-agent/contracts'
 import { estimateContextTokens } from '@retrieval-agent/domain'
 import type { DurableRetrievalAgentService } from './durable-service.js'
 import type { TaskRecord, TaskCommand, TaskJob } from './task-store.js'
@@ -101,15 +101,31 @@ export class WikiLearningService {
   async run(agent: Agent, job: TaskJob, signal: AbortSignal): Promise<void> {
     if (job.kind === 'unlearn') { await this.invalidate(job, signal); return }
     if (job.kind === 'source_check') {
-      const task = (await this.application.store.read(job.task_id))!
-      const original = task.state_json?.snapshot
+      const original = await this.application.store.sourceSnapshot(job.task_id)
       const principal = await this.application.principal(agent, 'snapshot_open', signal)
       // Open a freshly authorized source; expiry of an old task alone does not
       // prove that its source facts changed. No model call or business write.
       const current = await this.ctx.ticketRetrievalProvider.openSnapshot(principal, { signal })
-      if (!original || current.providerId !== original.providerId || current.sourceVersion !== original.sourceVersion) {
-        await this.invalidate(job, signal, true)
+      if (!original || current.providerId !== original.providerId) { await this.invalidate(job, signal, true); return }
+      if (current.sourceVersion === original.sourceVersion) return
+      const affected = new Set<string>()
+      for (const record of await this.application.store.learningRecords(job.task_id)) {
+        const input = record.details_json.input as LearningInput | undefined
+        const dependencies = record.details_json.entrySources as Record<string, string[]> | undefined
+        for (const id of record.details_json.entryIds as string[] ?? []) {
+          const refs = dependencies?.[id] ?? input?.sources.map(source => source.candidateRef) ?? []
+          if (!refs.length) { affected.add(id); continue }
+          try {
+            const result = await this.ctx.ticketRetrievalProvider.readEvidence(principal, { snapshotId: original.snapshotId,
+              candidateRefs: refs.map(TicketCandidateRef), fields: [], tokenBudget: 1 }, { signal })
+            if (result.rejectedCandidateRefs.length) affected.add(id)
+          } catch (error) {
+            if (!(error instanceof RetrievalError) || !['UNAUTHORIZED', 'SNAPSHOT_INVALID', 'SNAPSHOT_NOT_FOUND'].includes(error.code)) throw error
+            affected.add(id)
+          }
+        }
       }
+      if (affected.size) await this.invalidate(job, signal, true, affected)
       return
     }
     await this.application.authorizePresentation(agent, job.task_id as RetrievalState['retrievalId'], signal)
@@ -142,6 +158,7 @@ export class WikiLearningService {
         await this.application.store.commitLearning(job, input.resultRevision, 'skipped', { input, trace, reason: '本次复核未产生可发布的新经验。' }); return
       }
       const entries: WikiEntry[] = []
+      const entrySources: Record<string, string[]> = {}
       for (const proposal of proposals) {
         // The validator gets the original limited sources, not the reflector's reasoning or success claim.
         const verdict = await this.call(agent, job, `validate-${entries.length + 1}`, { input, proposal,
@@ -154,12 +171,14 @@ export class WikiLearningService {
         if (!v.supported || !same(v.sourceKeys, proposal.sourceKeys) || !same(v.contradictedKnowledgeIds, proposal.contradicts)) {
           await this.application.store.commitLearning(job, input.resultRevision, 'rejected', { input, trace, proposal, validation: v, reason: '增量未通过独立来源与适用边界校验，已保留原因。' }); return
         }
-        entries.push(proposalEntry(proposal, input))
+        const entry = proposalEntry(proposal, input)
+        entries.push(entry)
+        entrySources[entry.id] = proposal.sourceKeys.map(key => input.sources.find(source => source.key === key)!.candidateRef)
       }
       const ids = new Set(wiki.catalog().flatMap(d => d.knowledgeRefs))
       delta = { schemaVersion: 1, baseRelease: wiki.releaseId, domains: [{ id: 'general', title: '通用检索经验' }],
         changes: entries.map(entry => ({ operation: ids.has(entry.id) ? 'update' : 'add', id: entry.id, entry })) }
-      details = { input, trace, delta, entryIds: entries.map(e => e.id), reason: '来源与范围校验通过，自动发布检索经验。' }
+      details = { input, trace, delta, entrySources, entryIds: entries.map(e => e.id), reason: '来源与范围校验通过，自动发布检索经验。' }
       await this.application.store.commitLearning(job, input.resultRevision, 'validated', details)
     }
     // Recheck authorization after model I/O. The final short transaction holds input/result/lease fencing.
@@ -179,7 +198,7 @@ export class WikiLearningService {
     if (result.duplicate) await this.application.store.commitLearning(job, input.resultRevision, 'published', details, { releaseId: result.releaseId, commit: async () => {} })
   }
 
-  private async invalidate(job: TaskJob, signal: AbortSignal, sourceChanged = false): Promise<void> {
+  private async invalidate(job: TaskJob, signal: AbortSignal, sourceChanged = false, affected?: ReadonlySet<string>): Promise<void> {
     const records = await this.application.store.learningRecords(job.task_id)
     const wiki = await openWiki(this.root), currentIds = new Set(wiki.catalog().flatMap(d => d.knowledgeRefs))
     const ids = new Set<string>()
@@ -187,15 +206,17 @@ export class WikiLearningService {
       // A crash can commit current.json while SQL still says validated and has no release_id.
       // Its already-saved entry IDs must still be withdrawn when a new command supersedes the source.
       if (record.input_revision > job.input_revision || (!sourceChanged && record.input_revision === job.input_revision)) continue
-      for (const id of record.details_json.entryIds as string[] ?? []) if (currentIds.has(id)) ids.add(id)
+      for (const id of record.details_json.entryIds as string[] ?? []) if (currentIds.has(id) && (!affected || affected.has(id))) ids.add(id)
     }
     if (!ids.size) return
-    const details = { entryIds: [...ids], reason: sourceChanged
-      ? '权威来源版本发生变化，旧经验自动停用；需要基于新来源重新取证。'
+    const originalDetails = records.find(record => record.input_revision === job.input_revision)?.details_json ?? {}
+    const remaining = (originalDetails.entryIds as string[] ?? []).filter(id => !ids.has(id))
+    const details = { ...originalDetails, entryIds: remaining, invalidatedEntryIds: [...ids], reason: sourceChanged
+      ? '所引用的工单已变更、删除或撤权，受影响经验自动停用；其他经验保留。'
       : '来源任务收到新输入，旧经验退出后续路由，等待新的证据复核。' }
     await publishWiki(this.root, { schemaVersion: 1, baseRelease: wiki.releaseId, changes: [...ids].map(id => ({ id, operation: 'deactivate' })) },
       { signal, audit: { taskId: job.task_id, inputRevision: job.input_revision, ...details },
-        beforeCommit: (result, commit) => this.application.store.commitLearning(job, undefined, 'invalidated', details, { releaseId: result.releaseId, commit }) })
+        beforeCommit: (result, commit) => this.application.store.commitLearning(job, undefined, remaining.length ? 'published' : 'invalidated', details, { releaseId: result.releaseId, commit }) })
   }
 
   private async call(agent: Agent, job: TaskJob, stage: string, data: unknown, tool: ToolSchema, signal: AbortSignal, trace: ModelTrace[]): Promise<unknown> {

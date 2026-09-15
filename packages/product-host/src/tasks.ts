@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { RetrievalError, RetrievalId, type TicketCandidateNode, type TicketRetrievalProvider } from '@retrieval-agent/contracts'
 import { DurableRetrievalAgentService, MySqlTaskStore, compileTaskInformation, executeTaskJob, taskOwner, callReportModel, type TaskJob, type TaskCommand } from '@retrieval-agent/agent-plugin'
-import { projectTicketCandidateState, windowedNode, candidateWindow, candidateEvidence, type CandidateView } from '@retrieval-agent/product-api'
+import { projectTicketCandidateState, windowedNode, candidateWindow, candidateEvidence, CandidateDetailService, InMemoryDetailReadAuditSink, type CandidateView } from '@retrieval-agent/product-api'
 import { SpacyQueryAnalyzer, type TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
 import { TASK_WORKBENCH_HTML } from './workbench.js'
 import { TaskDeliveryHost, deliveryView, type DeliveryOptions } from './delivery.js'
@@ -134,10 +134,10 @@ export class TaskHost {
       void this.store.renew(job, this.options.leaseMs ?? 15000).then(valid => { if (!valid) abort.abort() }, () => abort.abort())
     }, Math.max(50, Math.floor((this.options.leaseMs ?? 15000) / 3)))
     try {
-      const task = (await this.store.read(job.task_id))!
+      const task = (await this.store.rows<{ session_id: string }>('SELECT session_id FROM ra_task WHERE id=?', [job.task_id]))[0]!
       const agent = await this.options.agentFor(task.session_id)
       const application = this.options.applicationFor(agent)
-      await application.mirror(agent)
+      if (job.kind !== 'source_check' && job.kind !== 'unlearn') await application.mirror(agent)
       await executeTaskJob(application, agent, job, this.options.analyzer, abort.signal)
       await this.store.settle(job)
     } catch (error) {
@@ -186,10 +186,15 @@ export class TaskHost {
     const learning = await this.store.learningStatus(id)
     const receipts = await this.store.rows<{ receipt_json: { operationId: string; inputRevision: number; eventSeq: number } }>(
       "SELECT receipt_json FROM ra_task_command WHERE task_id=? AND JSON_EXTRACT(receipt_json,'$.eventSeq')<=? ORDER BY JSON_EXTRACT(receipt_json,'$.eventSeq') DESC LIMIT 1", [id, task.event_seq])
-    const entries = await this.store.rows<{ seq: number; kind: string; data_json: any }>(
-      "SELECT seq,kind,data_json FROM ra_task_event WHERE task_id=? AND seq<=? AND kind IN ('command/accepted','retrieval/decision-submitted') ORDER BY seq DESC LIMIT 60", [id, task.event_seq])
-    const conversation: TaskSnapshot['conversation'] = entries.reverse().flatMap<TaskSnapshot['conversation'][number]>(e => {
+    // Bound user history by commands; long operator reviews must not evict the feedback they answer.
+    const commands = await this.store.rows<{ seq: number; kind: string; data_json: any }>(
+      "SELECT seq,kind,data_json FROM ra_task_event WHERE task_id=? AND seq<=? AND kind='command/accepted' ORDER BY seq DESC LIMIT 60", [id, task.event_seq])
+    const decisions = commands.length ? await this.store.rows<{ seq: number; kind: string; data_json: any }>(
+      "SELECT seq,kind,data_json FROM ra_task_event WHERE task_id=? AND seq>? AND seq<=? AND kind='retrieval/decision-submitted' ORDER BY seq", [id, commands.at(-1)!.seq, task.event_seq]) : []
+    const entries = [...commands, ...decisions].sort((a, b) => a.seq - b.seq)
+    const conversation: TaskSnapshot['conversation'] = entries.slice(-60).flatMap<TaskSnapshot['conversation'][number]>(e => {
       if (e.kind === 'command/accepted') return [{ seq: e.seq, role: 'user' as const, text: e.data_json.command.text ?? '取消本轮任务' }]
+      if (e.data_json.data.decision.judgments.some((j: { operatorManifestId?: string }) => j.operatorManifestId)) return []
       const a = e.data_json.data.decision.action
       const text = a.kind === 'clarify' ? a.question : a.kind === 'finish' ? a.explanation : a.kind === 'delegate' ? '已分派 ' + a.assignments.length + ' 项专项核查：' + a.assignments.map((item: { goal: string }) => item.goal).join('；')
         : a.kind === 'inspect' ? a.candidateRefs?.length ? '正在读取 ' + a.candidateRefs.length + ' 条工单的来源依据。' : '正在读取下一组来源依据。' : '正在补充搜索，核对可能遗漏的工单。'
@@ -201,8 +206,9 @@ export class TaskHost {
       ...(receipts[0] ? { receipt: receipts[0].receipt_json } : {}),
       feedback: entries.filter(e => e.kind === 'command/accepted' && e.data_json.command.kind === 'feedback').map(e => {
         const command = e.data_json.command
-        const reviewed = entries.filter(later => later.seq > e.seq && later.kind === 'retrieval/decision-submitted')
-          .flatMap(later => later.data_json.data.decision.judgments).find(j => j.candidateRef === command.candidateRef)
+        const reviewed = entries.filter(later => later.seq > e.seq && later.kind === 'retrieval/decision-submitted'
+          && (e.data_json.inputGeneration === undefined || later.data_json.data.inputGeneration === e.data_json.inputGeneration))
+          .flatMap(later => later.data_json.data.decision.judgments).findLast(j => j.candidateRef === command.candidateRef && j.verdict !== 'undetermined')
         return { seq: e.seq, candidateRef: command.candidateRef, text: command.text,
           status: reviewed ? 'reviewed' as const : 'received' as const,
           ...(reviewed ? { verdict: reviewed.verdict, reason: reviewed.reason } : {}) }
@@ -227,8 +233,10 @@ export class TaskHost {
           send(response, 202, await this.store.create(operationId, String(agent.session.id), principal, command.text, operationId))
         } else {
           if (command.kind === 'query') throw new RetrievalError('INVALID_REQUEST', '请通过新任务入口提交查询。')
-          const { principal } = await this.access(id)
-          const receipt = await this.store.submit(id, principal, operationId, command)
+          const { principal, application } = await this.access(id)
+          const admitted = !application.operators && (command.kind === 'supplement' || command.kind === 'answer')
+            ? { ...command, information: compileTaskInformation(command.text, true) } : command
+          const receipt = await this.store.submit(id, principal, operationId, admitted)
           this.#running.get(id)?.abort.abort()
           send(response, 202, receipt)
         }
@@ -246,7 +254,15 @@ export class TaskHost {
       if (request.method === 'GET' && id && parts[1] === 'evidence' && parts.length === 2) {
         const { agent, application } = await this.access(id)
         const state = await application.authorizePresentation(agent, RetrievalId(id))
-        send(response, 200, candidateEvidence(state, url.searchParams.get('candidateRef') ?? '')); return
+        const ref = url.searchParams.get('candidateRef') ?? '', view = candidateEvidence(state, ref)
+        const provider = this.options.providerFor?.(agent)
+        if (!provider) throw new RetrievalError('PROVIDER_UNAVAILABLE', '当前来源服务不可用。')
+        const principal = await application.principal(agent, 'detail_read')
+        await new CandidateDetailService(provider, new InMemoryDetailReadAuditSink()).readDetails(principal, state,
+          [ref as import('@retrieval-agent/contracts').TicketCandidateRef], [])
+        const latest = await application.authorizePresentation(agent, RetrievalId(id))
+        if (latest.inputGeneration !== state.inputGeneration || latest.accessValidation !== 'current') throw new RetrievalError('INVALID_TRANSITION', '任务已变化，请重新打开原文。')
+        send(response, 200, view); return
       }
       if (request.method === 'GET' && id && parts[1] === 'candidates' && parts.length === 2) {
         const { agent, application } = await this.access(id)
@@ -347,7 +363,7 @@ export async function installTaskHost(ctx: Context, config: { mysqlUrl?: string;
   await store.ready
   const restoring = new Map<string, Promise<Agent>>()
   const agentFor = async (id: string, create = false): Promise<Agent> => {
-    const live = ctx.agents.get(SessionId(id)); if (live) return live
+    const live = ctx.agents.get(SessionId(id)); if (live) { await models.bind(live); return live }
     let pending = restoring.get(id)
     if (!pending) {
       pending = (async () => {
@@ -356,7 +372,7 @@ export async function installTaskHost(ctx: Context, config: { mysqlUrl?: string;
         const handle = create && !saved
           ? await ctx.agents.create({ sessionId: SessionId(id), agentOptions, meta: { agentPreset: 'retrieval-agent', ...(config.workspacePath ? { cwd: config.workspacePath } : {}) }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'retrieval-agent') } })
           : await ctx.agents.resume({ resumeSessionId: SessionId(id), agentOptions, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'retrieval-agent') } })
-        models.bind(handle.agent)
+        await models.bind(handle.agent)
         return handle.agent
       })()
       restoring.set(id, pending)
@@ -367,6 +383,7 @@ export async function installTaskHost(ctx: Context, config: { mysqlUrl?: string;
   const applicationFor = (agent: Agent): DurableRetrievalAgentService => {
     const service = ctx.agentPresets.serviceFor(agent, 'retrievalAgent')
     if (!(service instanceof DurableRetrievalAgentService)) throw new RetrievalError('PROVIDER_UNAVAILABLE', '此任务未加载 MySQL 持久检索能力。')
+    service.modelSelection = active => models.current(active)
     return service
   }
   const host = new TaskHost(store, { agentFor, applicationFor,

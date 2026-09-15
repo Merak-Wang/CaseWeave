@@ -10,7 +10,7 @@ import {
   type TicketRetrievalProvider,
   type TrustedPrincipalContext,
 } from '@retrieval-agent/contracts'
-import { hostAuthorizedCandidates } from './candidate-selection.js'
+import { hostReadableCandidates } from './candidate-selection.js'
 
 export interface DetailReadAuditRecord {
   readonly auditId: string
@@ -74,7 +74,7 @@ export class CandidateDetailService {
     if (state.snapshot === undefined || state.snapshot.capabilities.detailRead !== true) {
       throw new RetrievalError('SNAPSHOT_INVALID', '当前检索快照不支持工单详情读取。')
     }
-    const candidates = hostAuthorizedCandidates(state, refs)
+    const candidates = hostReadableCandidates(state, refs)
     const selectedFields = [...new Set(fields)]
     if (candidates.length > this.#maxCandidates || selectedFields.length > this.#maxFields) {
       throw new RetrievalError('INVALID_REQUEST', '单次详情读取超过限制。')

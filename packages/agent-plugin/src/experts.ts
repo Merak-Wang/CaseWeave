@@ -7,9 +7,9 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-skill'
 import { defineTool, type InferValue } from '@deepseek-ai/dsh-tools'
-import { RetrievalError, type ExpertTask, type ExpertFinding, type TicketCandidateRef,
+import { RetrievalError, MAX_EVIDENCE_CANDIDATES_PER_READ, type ExpertTask, type ExpertFinding, type TicketCandidateRef,
   type RetrievalState, type TicketSearchPage, type TicketEvidenceResult, type EvidencePosition, type TicketEvidenceId } from '@retrieval-agent/contracts'
-import { EvidenceContextPolicy, applyQueryDelta, requireUserConstraints, estimateContextTokens } from '@retrieval-agent/domain'
+import { applyQueryDelta, requireUserConstraints, estimateContextTokens } from '@retrieval-agent/domain'
 import type { RetrievalAgentService } from './service.js'
 import { DECISION_PARAMETERS, activeRef, evidenceRefs, exclusionChecksFromArguments } from './assessment.js'
 import { openWiki, revokedKnowledge } from './wiki-store.js'
@@ -25,6 +25,7 @@ interface Wiki { releaseId: string | null; warning?: string; catalog(): { id: st
 const loadWiki = openWiki as (root: string, options?: { releaseId?: string }) => Promise<Wiki>
 const digest = (text: string): string => createHash('sha256').update(text).digest('hex')
 interface Branch { parent: Agent; task: ExpertTask; refs: TicketCandidateRef[]; wiki: WikiEntry[]; generation: number;
+  candidateWindowRefs?: readonly TicketCandidateRef[] | undefined;
   evidencePosition?: EvidencePosition | undefined; evidenceIds?: readonly TicketEvidenceId[] | undefined; evidenceWindowOffset?: number | undefined }
 interface ExpertBatch { generation: number; runs: Map<string, Promise<void>>; changed: Set<() => void>; abort: AbortController }
 const EXPERT_POLICY = '你是工单检索领域专家。只执行分配目标与 scope；原始用户要求优先。先依据已收到的 cN 标题、摘要和结构化字段判断相关性，足以判断就直接 report；不要把每个候选升级为原文核查。只有具体事实缺失、来源矛盾或用户要求核实处理过程时才定向读取最小字段，复用主 Agent 已共享的 cN/eN。不同业务操作不可因相似障碍混同；知识用于解释业务，不能替代工单证据或更改用户要求。report 集中提交本领域逐条判断、简短事实理由、实际 cN/eN 引用及剩余缺口，不重复粘贴原文。摘要是 L1，不能冒充已核实原文。无法判断时返回 undetermined 并说明缺什么；常见业务含义自行判断，question 仅供主 Agent 处理确实依赖用户独有信息的缺口，无问题时省略。不要投票或发布最终结果，不得调用其他工具或创建子专家。'
@@ -35,7 +36,7 @@ const EXPERT_PARAMETERS = {
         action: { type: 'string', required: true, enum: ['inspect', 'search', 'report'] },
         candidate_aliases: { type: 'array', items: { type: 'string' }, description: 'Required for inspect unless next_window=true. Use assigned or search-result cN aliases.' },
         fields: { type: 'array', items: { type: 'string' }, description: 'Only evidenceState.inspectFields are readable. fields=[] reloads L1; title is already in L1 and is not a source field.' },
-        next_window: { type: 'boolean', description: 'inspect only: show the next already-read evidence window for this branch; to fetch unread source use position from evidenceState.nextPosition.' },
+        next_window: { type: 'boolean', description: 'inspect only: show the next unseen candidate window, then already-read evidence for this branch; to fetch unread source use position from evidenceState.nextPosition.' },
         query: { type: 'string' }, mode: { type: 'string', enum: ['keyword', 'dense'] },
         operator: { type: 'string', enum: ['or', 'and'], description: 'keyword only: space-separated terms match any term by default; and requires every term.' },
         search_key: { type: 'string', description: 'Continue the stored search returned previously, using its exact key.' },
@@ -231,7 +232,10 @@ export class ExpertCoordinator {
   async validateKnowledge(agent: Agent): Promise<void> {
     if (!this.wikiRoot) return
     const state = this.application.current(agent)
-    const refs = state.expertTasks?.filter(t => t.inputGeneration === (state.inputGeneration ?? 0) && t.status !== 'failed').flatMap(t => t.knowledgeRefs) ?? []
+    const refs = [...new Set([
+      ...(state.expertTasks?.filter(t => t.inputGeneration === (state.inputGeneration ?? 0) && t.status !== 'failed').flatMap(t => t.knowledgeRefs) ?? []),
+      ...(state.contextManifests?.filter(m => m.operator && m.inputGeneration === (state.inputGeneration ?? 0)).flatMap(m => m.knowledgeRefs) ?? []),
+    ])]
     if (!refs.length) return
     const revoked = await revokedKnowledge(this.wikiRoot, refs)
     if (!revoked.length) return
@@ -263,15 +267,15 @@ export class ExpertCoordinator {
     await this.validateKnowledge(branch.parent)
     let state = this.current(branch)
     if (state.expertTasks?.find(t => t.id === branch.task.id)?.status === 'failed') throw new RetrievalError('INVALID_REQUEST', '专家知识已停用，需重新读取当前来源。')
-    const position = { candidateRefs: branch.refs, ...(branch.evidencePosition ? { evidencePosition: branch.evidencePosition } : {}),
+    const position = { candidateRefs: branch.refs, ...(branch.candidateWindowRefs ? { candidateWindowRefs: branch.candidateWindowRefs } : {}), ...(branch.evidencePosition ? { evidencePosition: branch.evidencePosition } : {}),
       evidenceIds: branch.evidenceIds ?? [], evidenceWindowOffset: branch.evidenceWindowOffset ?? 0 }
     if (JSON.stringify(state.expertTasks!.find(t => t.id === branch.task.id)!.context) !== JSON.stringify(position)) {
       state = await this.application.updateExpert(branch.parent, branch.generation, { kind: 'task', taskId: branch.task.id, patch: { context: position } })
     }
-    const policy = new EvidenceContextPolicy({ role: 'expert' })
+    const policy = this.application.createContextPolicy('expert')
     const prior = (state.contextManifests ?? []).filter(m => m.roleId === branch.task.id && m.inputGeneration === branch.generation)
     const { knowledgeCatalog: _catalog, ...roleBase } = state
-    const roleState: RetrievalState = { ...roleBase, contextCandidateRefs: branch.refs.slice(-8), expertTasks: [], expertConflicts: [],
+    const roleState: RetrievalState = { ...roleBase, contextCandidateRefs: branch.candidateWindowRefs ?? branch.refs, expertTasks: [], expertConflicts: [],
       judgments: [], evidenceReadPosition: branch.evidencePosition, evidenceWindowOffset: branch.evidenceWindowOffset ?? 0,
       progress: { ...state.progress, newEvidenceIds: branch.evidenceIds ?? [] },
       modelVisibleCandidateRefs: prior.flatMap(m => m.candidateRefs), modelVisibleEvidenceIds: prior.flatMap(m => m.evidenceIds) }
@@ -295,6 +299,7 @@ export class ExpertCoordinator {
     // Seed only assigned, already authorized source identities; the child's actual request still records visibility.
     const sharedEvidence = this.application.current(parent).promotedEvidence.filter(e => task.candidateRefs.includes(e.candidateRef)).map(e => e.evidenceId)
     const branch: Branch = { parent, task, refs: [...(task.context?.candidateRefs ?? task.candidateRefs)], wiki: [], generation: task.inputGeneration,
+      candidateWindowRefs: task.context?.candidateWindowRefs,
       evidencePosition: task.context?.evidencePosition, evidenceIds: task.context?.evidenceIds ?? sharedEvidence, evidenceWindowOffset: task.context?.evidenceWindowOffset }
     try {
       const subagents = this.ctx.get('subagents')
@@ -369,16 +374,28 @@ export class ExpertCoordinator {
     let extra: unknown
     if (args.action === 'inspect') {
       if (args.next_window) {
-        if (args.position || args.fields?.length || args.candidate_aliases?.length) throw new RetrievalError('INVALID_REQUEST', 'next_window 只能单独选择已读取证据视窗。')
-        branch.evidenceWindowOffset = (branch.evidenceWindowOffset ?? 0) + 12
+        if (args.position || args.fields?.length || args.candidate_aliases?.length) throw new RetrievalError('INVALID_REQUEST', 'next_window 只能单独选择候选摘要或已读取证据视窗。')
+        const actual = (state.contextManifests ?? []).filter(m => m.roleId === task.id && m.inputGeneration === branch.generation && m.measurement === 'dsh_request')
+        const visible = new Set(actual.flatMap(m => m.candidateRefs))
+        const unseen = branch.refs.filter(ref => state.candidates.some(c => c.ref === ref) && !visible.has(ref)).slice(0, this.application.reviewBatchSize)
+        if (unseen.length) { branch.candidateWindowRefs = unseen; branch.evidenceWindowOffset = 0 }
+        else {
+          const offset = this.application.createContextPolicy('expert').nextEvidenceWindowOffset({ ...state,
+            contextCandidateRefs: branch.candidateWindowRefs ?? branch.refs,
+            progress: { ...state.progress, newEvidenceIds: branch.evidenceIds ?? [] }, modelVisibleEvidenceIds: actual.flatMap(m => m.evidenceIds) })
+          if (offset < 0) throw new RetrievalError('INVALID_TRANSITION', '当前专家候选摘要与已取得证据已全部提供；如需更多候选请继续检索。')
+          branch.evidenceWindowOffset = offset
+        }
         return { state: await this.context(branch) }
       }
       const refs = aliases(args.candidate_aliases ?? [])
       const fields: string[] = args.fields ?? []
-      if (!refs.length || refs.length > 8) throw new RetrievalError('INVALID_REQUEST', '专家视窗需指定 1–8 个有效候选。')
+      const limit = fields.length ? MAX_EVIDENCE_CANDIDATES_PER_READ : this.application.reviewBatchSize
+      if (!refs.length || refs.length > limit) throw new RetrievalError('INVALID_REQUEST', `专家视窗需指定 1–${limit} 个有效候选。`)
       const allowed = state.snapshot.fieldCatalog.filter(f => ['L1', 'L2', 'L3'].includes(f.accessLevel) && f.valueKind !== 'raw_json').map(f => f.key)
       if (fields.some(field => !allowed.includes(field))) throw new RetrievalError('INVALID_REQUEST', `字段不可读；fields 只能从以下选择：${allowed.join(', ')}。title 已在 L1 概览中，fields=[] 可重读概览。`)
       branch.refs = refs
+      branch.candidateWindowRefs = undefined
       branch.evidenceWindowOffset = 0
       if (fields.length) {
         const request = { snapshotId: state.snapshot.snapshotId, candidateRefs: refs, fields, tokenBudget: 2400,
@@ -411,7 +428,7 @@ export class ExpertCoordinator {
         let flight = this.flights.get(key)
         if (!flight) {
           flight = (async () => {
-            const p = await this.ctx.ticketRetrievalProvider.search(principal, state.snapshot!.snapshotId, spec, { topK: 20, maxScan: 50000,
+            const p = await this.ctx.ticketRetrievalProvider.search(principal, state.snapshot!.snapshotId, spec, { topK: 20, maxScan: this.application.searchMaxScan,
               stage: previous ? 'next_page' : 'repair_search', signal: exec.signal, ...(previous?.page.nextCursor ? { cursor: previous.page.nextCursor } : {}) })
             await this.application.updateExpert(branch.parent, branch.generation, { kind: 'search', taskId: task.id, key, spec, page: p })
             return p
@@ -419,7 +436,9 @@ export class ExpertCoordinator {
         }
         try { page = await flight } finally { this.flights.delete(key) }
       }
-      branch.refs = page.candidates.slice(0, 8).map(c => c.ref)
+      branch.refs = page.candidates.map(c => c.ref)
+      branch.candidateWindowRefs = undefined
+      branch.evidenceWindowOffset = 0
       extra = { searchKey: key, returned: page.returned, nextPageAvailable: Boolean(page.nextCursor), resultPagesExhausted: page.boundary.resultPagesExhausted }
     }
     state = this.current(branch)

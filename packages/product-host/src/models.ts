@@ -15,10 +15,11 @@ const invalid = (message: string): never => { throw new RetrievalError('INVALID_
 /** The product configuration surface shares DSH's provider registry, validation and credential store. */
 export class WorkbenchModels {
   private readonly selections = new WeakMap<Agent, ModelSelectionRef>()
+  private readonly notices = new WeakMap<Agent, string>()
   constructor(readonly ctx: Context) {}
-  bind(agent: Agent): ModelSelectionRef {
+  async bind(agent: Agent): Promise<ModelSelectionRef> {
     let selection = this.selections.get(agent)
-    if (selection) return selection
+    if (selection) { await this.validateSelection(selection, agent); return selection }
     let saved: ModelSelection | undefined
     for (const e of agent.session.snapshotEvents()) {
       if (e.type !== 'user/message' || e.data.source.kind !== 'plugin' || e.data.source.plugin !== 'retrieval-agent-models' || e.data.source.form !== 'snapshot') continue
@@ -30,7 +31,20 @@ export class WorkbenchModels {
       ...(header.reasoningEffort ? { reasoningEffort: header.reasoningEffort } : {}) } : this.ctx.agentDefaultModel.currentSelection()), assembled: undefined }
     this.selections.set(agent, selection)
     installModelSelection(agent.ctx, selection)
+    await this.validateSelection(selection, agent)
     return selection
+  }
+  private async available(selection: ModelSelection | undefined): Promise<boolean> {
+    try { return Boolean(selection && (await this.ctx.llm.listModels(selection.provider)).some(m => m.id === selection.model)) }
+    catch { return false }
+  }
+  current(agent: Agent) { return this.selections.get(agent)?.current }
+  private async validateSelection(selection: ModelSelectionRef, agent: Agent) {
+    if (await this.available(selection.current)) return
+    const fallback = this.ctx.agentDefaultModel.currentSelection()
+    const old = selection.current
+    selection.current = await this.available(fallback) ? fallback : undefined
+    this.notices.set(agent, old ? `原模型 ${old.provider}/${old.model} 已不在可用配置中。${selection.current ? '后续步骤使用当前默认模型。' : '请在模型设置中选择可用模型后继续。'}` : '请先选择可用模型。')
   }
   private descriptor() {
     const descriptor = this.ctx.settings.describe().find(d => d.ns === NS)
@@ -49,7 +63,10 @@ export class WorkbenchModels {
           maxTokens: profile.models?.find(entry => entry.id === m.id)?.maxTokens, reasoningEfforts: info.reasoning?.efforts }
       })),
     })))
-    return { revision: descriptor.revision, selected: agent ? this.bind(agent).current : this.ctx.agentDefaultModel.currentSelection(), configured,
+    const selected = agent ? (await this.bind(agent)).current : this.ctx.agentDefaultModel.currentSelection()
+    const available = await this.available(selected)
+    return { revision: descriptor.revision, selected: available ? selected : undefined,
+      notice: agent ? this.notices.get(agent) : available ? undefined : '默认模型已不在当前配置中，请选择可用模型后再检索。', configured,
       providers: this.ctx.llm.listConfigurableProviders().map(p => ({ id: p.provider, name: p.displayName })),
       protocols: supportedProtocols() }
   }
@@ -98,6 +115,7 @@ export class WorkbenchModels {
       if (apiKey) await this.ctx.credentials.set(credentialRef(ref), apiKey)
       await this.ctx.settings.update(NS, { providers: { [provider]: profile } }, descriptor.revision)
     }
+    if (!(await this.available({ provider, model }))) invalid('该模型不在当前供应商配置中，请先保存有效模型 ID。')
     const info = await this.ctx.llm.resolveModelInfo(provider, model)
     const effort = v.reasoningEffort ? String(v.reasoningEffort) : undefined
     if (effort && !info.reasoning?.efforts.some(e => e.id === effort)) invalid('该模型不支持此推理档位。')
@@ -106,7 +124,8 @@ export class WorkbenchModels {
       agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent-models', form: 'snapshot',
         sections: [{ name: 'model-selection', text: JSON.stringify(selection) }] },
         content: [{ type: 'text', text: `后续检索步骤使用模型 ${provider}/${model}，继续遵循当前任务要求。` }] }), { surfaceOp: 'append' })
-      this.bind(agent).current = selection
+      ;(await this.bind(agent)).current = selection
+      this.notices.delete(agent)
     } else await this.ctx.agentDefaultModel.saveSelection(selection)
     return this.view(agent)
   }

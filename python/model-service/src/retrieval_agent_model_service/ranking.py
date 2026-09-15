@@ -418,6 +418,22 @@ class RetrievalRankingBackend:
                 "estimatedRemainingMs": eta,
             }
 
+    def read_features(self, documents, raw_profile):
+        """Read the prepared corpus by stable ID/hash; never embed a missing row."""
+        profile = _profile(raw_profile)
+        prepared = self.prepared
+        if prepared is None:
+            return {"embedding_id": "", "rows": []}
+        identity = self._verify_model_identity(profile, True)
+        if any(prepared.identity[k] != identity[k] for k in ("model", "revision", "dimensions")):
+            raise ServiceError(409, "INVALID_VECTOR", "Prepared feature identity differs.")
+        rows = []
+        for doc in documents:
+            found = prepared.rows.get(doc["id"])
+            if found and found[1] == doc["contentHash"]:
+                rows.append({"id": doc["id"], "vector": prepared.vectors[found[0]].tolist()})
+        return {"embedding_id": self._cache_key({**identity, "projectionVersion": DENSE_PROJECTION_VERSION}), "rows": rows}
+
     def _vectors(
         self,
         documents: list[dict[str, str]],

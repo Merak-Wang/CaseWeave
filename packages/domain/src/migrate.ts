@@ -1,5 +1,11 @@
 import { RetrievalError, type RetrievalState, type TicketCandidate, type TicketEvidenceSegment } from '@retrieval-agent/contracts'
 
+/** Recover a stopped clock from durable events. Read-only state updates are never execution end times. */
+export function recoverExecutionClock(state: RetrievalState, stoppedAt?: string): RetrievalState {
+  if (state.phase !== 'stopped' || state.executionClock?.waitingSince || !stoppedAt || !Number.isFinite(Date.parse(stoppedAt))) return state
+  return { ...state, executionClock: { totalWaitingMs: state.executionClock?.totalWaitingMs ?? 0, waitingSince: stoppedAt } }
+}
+
 /** Upgrade by field meaning and provenance. Legacy labels never establish full-detail or role visibility. */
 export function migrateProjectionState(state: RetrievalState): RetrievalState {
   if (state.projectionVersion === 2) return state

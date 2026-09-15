@@ -8,6 +8,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, it, expect } from 'vitest'
 import * as compatibility from '../../dsh-compat/src/opencode-pi-ai.js'
 import { WorkbenchModels } from './models.js'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { inject as hostInject } from './index.js'
 
 class Settings extends SettingsProvider {
@@ -54,6 +55,13 @@ describe('workbench settings through native DSH provider configuration', () => {
       if (!('selected' in after) || !after.selected) throw new Error('Saved model selection missing')
       expect(JSON.stringify(after)).not.toContain('fixture-secret')
       expect(after).toMatchObject({ selected: { provider: 'opencode-test', model: 'fixture' }, configured: [{ hasCredential: true }] })
+      const resumed = { ctx: ctx.extend(), session: { requestHeader: () => undefined, snapshotEvents: () => [{ type: 'user/message', data: { source: {
+        kind: 'plugin', plugin: 'retrieval-agent-models', form: 'snapshot', sections: [{ name: 'model-selection', text: JSON.stringify({ provider: 'opencode-test', model: 'removed-model' }) }],
+      } } }] } } as unknown as Agent
+      await models.bind(resumed)
+      expect(models.current(resumed)).toMatchObject({ provider: 'opencode-test', model: 'fixture' })
+      expect((await models.view(resumed)).notice).toContain('原模型')
+      await expect(models.update({ action: 'select', provider: 'opencode-test', model: 'removed-model' })).rejects.toThrow('不在当前')
       expect(JSON.stringify((ctx.settings as Settings).saved)).not.toContain('fixture-secret')
       await expect(models.update({ action: 'save', provider: 'opencode-test', model: 'changed', revision: before.revision })).rejects.toThrow('配置已更新')
       const request = { ...after.selected, sessionId: SessionId('model-settings-session'), messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text' as const, text: 'hello' }] })] }

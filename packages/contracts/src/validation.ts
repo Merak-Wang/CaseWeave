@@ -110,7 +110,7 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
         ? effectiveCountPolicy !== 'explicit' && request.requestedCount === undefined
         : effectiveCountPolicy === 'explicit' && contract.resultLimit === request.requestedCount
           && Number.isSafeInteger(contract.resultLimit) && contract.resultLimit >= 1)
-    if (![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
+    if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
       || contract.normalized !== (request.retrievalQuery ?? request.query).normalize('NFKC').trim().replace(/\s+/gu, ' ')
       || !resultPolicyValid || contract.resultPolicy !== expectedResultPolicy
       || !['telecom_ticket', 'general_ticket'].includes(contract.domain)
@@ -189,10 +189,11 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
       const commonInvalid = nlp.keywordTerms.length > 8
         || (contract.fastQuery?.schemaVersion === 1 && nlp.keywordTerms.length < 1)
         || JSON.stringify(nlp.keywordTerms) !== JSON.stringify(contract.fastQuery?.keyword?.terms ?? [])
-        || nlp.tokens.length > 64 || nlp.triples.length > 8
+        || nlp.triples.length > 8
       const legacyInvalid = nlp.schemaVersion === 1 && (
         contract.schemaVersion !== 4 || nlp.analyzerVersion.trim().length === 0 || nlp.analyzerVersion.length > 200
         || nlp.tokenization.trim().length === 0 || nlp.tokenization.length > 200
+        || nlp.tokens.length > 64
         || nlp.tokens.some(token => token.surface.trim().length === 0 || token.surface.length > 200
           || !['word', 'latin', 'number', 'relation', 'task', 'function'].includes(token.kind))
         || nlp.triples.some(triple => triple.subject !== 'ticket_collection'
@@ -202,12 +203,14 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
       const spacyInvalid = nlp.schemaVersion === 2 && (
         ![5, 6, 7, 8, 9].includes(contract.schemaVersion) || nlp.engine !== 'spacy'
         || [nlp.engineVersion, nlp.pipeline, nlp.pipelineVersion, nlp.lexiconVersion].some(value => value.trim().length === 0 || value.length > 200)
-        || nlp.tokens.some((token, index) => token.surface.trim().length === 0 || token.surface.length > 200
+        // spaCy 的完整 token/实体轨迹由非空原文片段组成；数量受原文及查询分析的 2000 字协议共同约束。
+        || nlp.tokens.length > Math.min(contract.original.length, 2_000)
+        || nlp.tokens.some(token => token.surface.trim().length === 0 || token.surface.length > 200
           || !Number.isSafeInteger(token.start) || !Number.isSafeInteger(token.end) || token.start < 0 || token.end <= token.start
           || token.end > contract.original.length || token.head < 0 || token.head >= nlp.tokens.length || !Number.isSafeInteger(token.head)
           || [token.pos, token.tag, token.dep].some(value => value.trim().length === 0 || value.length > 100)
-          || token.lemma.length > 200 || token.entityType.length > 100 || index > 63)
-        || nlp.entities.length > 32
+          || token.lemma.length > 200 || token.entityType.length > 100)
+        || nlp.entities.length > Math.min(contract.original.length, 2_000)
         || nlp.entities.some(entity => entity.surface.trim().length === 0 || entity.surface.length > 200
           || entity.label.trim().length === 0 || entity.label.length > 100
           || !Number.isSafeInteger(entity.start) || !Number.isSafeInteger(entity.end)

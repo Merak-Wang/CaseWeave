@@ -15,6 +15,8 @@ export interface EvidenceContextPolicyConfig {
   readonly maxEvidenceSegments?: number
   readonly estimateTokens?: (text: string) => number
 }
+export const DEFAULT_REVIEW_BATCH_SIZE = 8
+export const MAX_REVIEW_BATCH_SIZE = 32
 export function estimateContextTokens(text: string): number {
   const cjk = [...text].filter(character => /\p{Script=Han}/u.test(character)).length
   return Math.max(1, Math.ceil(cjk + (text.length - cjk) / 4))
@@ -50,14 +52,17 @@ function evidenceText(evidence: TicketEvidenceSegment, candidateAlias: string, e
 /** Deterministically selects a bounded, provenance-carrying model context. */
 export class EvidenceContextPolicy {
   readonly version: string
-  readonly #maxCandidates: number
+  readonly maxCandidates: number
   readonly #maxEvidenceSegments: number
   readonly #estimate: (text: string) => number
   readonly #expert: boolean
 
   constructor(config: EvidenceContextPolicyConfig = {}) {
     this.version = config.version ?? 'evidence-context-v5'
-    this.#maxCandidates = config.maxCandidates ?? 8
+    this.maxCandidates = config.maxCandidates ?? DEFAULT_REVIEW_BATCH_SIZE
+    if (!Number.isSafeInteger(this.maxCandidates) || this.maxCandidates < 1 || this.maxCandidates > MAX_REVIEW_BATCH_SIZE) {
+      throw new TypeError(`maxCandidates must be an integer between 1 and ${MAX_REVIEW_BATCH_SIZE}`)
+    }
     this.#maxEvidenceSegments = config.maxEvidenceSegments ?? 12
     this.#estimate = config.estimateTokens ?? estimateContextTokens
     this.#expert = config.role === 'expert'
@@ -67,7 +72,7 @@ export class EvidenceContextPolicy {
     const active = new Set(state.candidates.map(candidate => candidate.ref))
     const latest = new Set(state.progress.newEvidenceIds ?? [])
     const offset = state.candidateWindowOffset ?? 0
-    const window = new Set(state.candidates.slice(offset, offset + this.#maxCandidates).map(candidate => candidate.ref))
+    const window = new Set(state.candidates.slice(offset, offset + this.maxCandidates).map(candidate => candidate.ref))
     const priority = (item: TicketEvidenceSegment): number => latest.has(item.evidenceId) ? 0 : window.has(item.candidateRef) ? 1 : 2
     // Visibility writes must not reorder the selected window between selection and delivery.
     return state.promotedEvidence.filter(item => active.has(item.candidateRef)
@@ -98,6 +103,11 @@ export class EvidenceContextPolicy {
       userRequirements: state.query.contract?.userRequirements,
       retrievalLogic: state.query.contract?.logic,
       queryPlan: state.query.spec.queryPlan,
+      semanticPlan: state.query.contract?.semanticPlan,
+      operatorArtifacts: state.operatorArtifacts?.filter(a => a.inputGeneration === (state.inputGeneration ?? 0)).map(a => ({
+        id: a.id, operation: a.operation, inputCount: a.candidateRefs.length, eventCount: a.events.length,
+        status: 'derived_artifact_not_confirmation',
+      })),
       semanticExclusions: state.query.spec.queryPlan?.requirements.filter(r => r.polarity === 'exclude').map(r => ({
         requirement_id: r.id, source_text: r.span.text, instruction: 'Accept requires exclusion_checks: evaluate this entire condition against received evidence before deciding.' })),
       searchChannels: state.searchProgress?.channels,
@@ -169,7 +179,7 @@ export class EvidenceContextPolicy {
         wait: 'ticket_wait(task_ids) suspends until the first listed result. Do independent work first; do not poll or redelegate.',
         unassignedCandidateAliases: state.candidates.filter(c => !state.expertTasks?.some(t => t.inputGeneration === (state.inputGeneration ?? 0)
           && ['pending', 'running'].includes(t.status) && t.candidateRefs.includes(c.ref))
-          && !state.judgments?.some(j => j.candidateRef === c.ref && j.verdict !== 'undetermined')).slice(0, 8).map(c => alias(c.ref)) },
+          && !state.judgments?.some(j => j.candidateRef === c.ref && j.verdict !== 'undetermined')).slice(0, this.maxCandidates).map(c => alias(c.ref)) },
       priorWork: state.expertTasks?.filter(t => t.status === 'superseded' && t.finding).slice(-3).map(t => ({
         scope: t.scope, goal: t.goal, reuse: 'Historical scope; reuse sources to reassess affected judgments against the latest answer. Do not adopt the old finding ID or repeat its full search.',
         judgments: t.finding!.judgments.slice(0, 20).map(j => ({ candidateAlias: alias(j.candidateRef), verdict: j.verdict,
@@ -216,7 +226,7 @@ export class EvidenceContextPolicy {
           cumulativeCandidateCount: state.candidateHistory.length,
           rankOverlap: state.progress.rankOverlap,
           noProgressStreak: state.progress.noProgressStreak,
-          scores: lastSignals.slice(0, this.#maxCandidates).map(signal => ({
+          scores: lastSignals.slice(0, this.maxCandidates).map(signal => ({
             alias: aliases.get(signal.candidateRef),
             finalRank: signal.finalRank,
             fusedScore: signal.fusedScore,
@@ -224,6 +234,7 @@ export class EvidenceContextPolicy {
           })),
         },
         evidenceState: {
+          reviewBatchSize: this.maxCandidates,
           readingPolicy: 'Judge received titles/summaries with cN first. Raw text is optional and reserved for a named missing fact, conflict, or a user request for source/processing verification. Never inspect every keyword hit. Review bounded windows; persist each batch of judgments.',
           ...evidenceNavigation,
           activeCandidateCount: state.candidates.length,
@@ -259,7 +270,7 @@ export class EvidenceContextPolicy {
         history, experts,
         retrievalObservation: { stage: state.lastPage?.trace.stage,
           activeCandidateCount: state.candidates.length, cumulativeCandidateCount: state.candidateHistory.length },
-        evidenceState: { ...evidenceNavigation, evidenceWindow, gaps: state.gaps.map(gap => ({
+        evidenceState: { ...evidenceNavigation, evidenceWindow, reviewBatchSize: this.maxCandidates, gaps: state.gaps.map(gap => ({
           kind: gap.kind, status: gap.status, description: gap.description,
         })) },
         boundaryState: {
@@ -277,8 +288,11 @@ export class EvidenceContextPolicy {
     if (tokenBudget !== undefined && used > tokenBudget) throw new RetrievalError('CAPACITY_EXCEEDED', '任务上下文超出当前工作配额，无法完整保留检索要求与必要依据，本轮尚未完成。')
     rendered.push(wrapHeader(header))
     const offset = state.candidateWindowOffset ?? 0
+    const candidateWindow = new Set((state.contextCandidateRefs
+      ? state.candidates.filter(candidate => state.contextCandidateRefs!.includes(candidate.ref)).slice(0, this.maxCandidates)
+      : state.candidates.slice(offset, offset + this.maxCandidates)).map(candidate => candidate.ref))
     for (const [index, candidate] of state.candidates.entries()) {
-      if (state.contextCandidateRefs ? !state.contextCandidateRefs.includes(candidate.ref) : index < offset || index >= offset + this.#maxCandidates) {
+      if (!candidateWindow.has(candidate.ref)) {
         excluded.push({ ref: candidate.ref, reason: 'not_selected' })
         continue
       }

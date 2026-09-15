@@ -33,6 +33,8 @@ export interface TicketSearchOptions extends ProviderCallOptions {
   /** Persisted progress is bounded to a display window; channel enumeration lives in the Provider store. */
   readonly onProgress?: (progress: TicketSearchProgress) => Promise<void>
   readonly topK: number
+  /** Local in-memory scan capacity; database providers bound each materialized ID batch by this value.
+   * It is never a total match limit or a substitute for SQL predicate execution. */
   readonly maxScan: number
   readonly cursor?: string
   readonly stage: TicketSearchStage
@@ -70,6 +72,11 @@ export function isReadableTicketField(field: Pick<TicketFieldDescriptor, 'access
 /** Every data-bearing method receives the trusted principal again. */
 export interface TicketRetrievalProvider {
   readonly providerId: string
+  /** Read existing index features only. Missing vectors never trigger re-embedding. */
+  readFeatures?(principal: TrustedPrincipalContext,
+    request: { readonly snapshotId: TicketSnapshotId; readonly candidateRefs: readonly TicketCandidateRef[] },
+    options?: ProviderCallOptions): Promise<readonly { readonly ref: string; readonly version: string; readonly content_hash: string;
+      readonly embedding_id: string; readonly vectors: readonly (readonly number[])[] }[]>
   resolve(request: TicketRetrievalRequest): TicketRetrievalSpec
   openSnapshot(principal: TrustedPrincipalContext, options?: ProviderCallOptions): Promise<TicketSnapshot>
   search(

@@ -60,6 +60,7 @@ export interface QueryAnalysisParams {
  * 一次查询分析的完整响应。
  * keywords 是首轮关键词通道的唯一输入；空数组表示跳过关键词通道并保留原始 query 的向量首检。
  * tokens/entities/triples 是解释与重放证据，不允许 TypeScript 再发明关键词。
+ * candidates/tokens/entities 保留完整原文轨迹，每类数量不超过 query 的 UTF-16 长度（输入上限 2000）；keywords/triples 各最多 8 项。
  */
 export interface QueryAnalysisResponse {
   readonly protocolVersion: typeof QUERY_ANALYSIS_PROTOCOL_VERSION

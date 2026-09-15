@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { assertTicketRetrievalRequest } from '@retrieval-agent/contracts'
-import { buildFastTicketRequest, SpacyQueryAnalyzer } from '@retrieval-agent/query-understanding'
+import { buildFastTicketRequest, SpacyQueryAnalyzer, type QueryAnalysisResponse } from '@retrieval-agent/query-understanding'
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -45,7 +45,87 @@ function analysis(requestId: string, query: string, keyword: string, requestedCo
   }
 }
 
+function fullProvenance(requestId: string, query: string): QueryAnalysisResponse {
+  const tokens = Array.from(query, (text, start) => ({
+    text, start, end: start + 1, lemma: text, pos: 'NOUN', tag: 'NN', dep: 'ROOT',
+    head: query.length - 1, isStop: false, entityType: '',
+  }))
+  return {
+    ...(analysis(requestId, query, '网络') as unknown as QueryAnalysisResponse),
+    candidates: tokens.map(({ text, start, end }) => ({ text, start, end, source: 'pos', pos: ['NOUN'] })),
+    tokens,
+    entities: tokens.map(({ text, start, end }) => ({ text, start, end, label: 'MISC' })),
+  }
+}
+
 describe('query-analysis HTTP contract', () => {
+  it.each([80, 2_000])('keeps all %i source tokens, candidates, entities and tail dependency heads over HTTP', async length => {
+    const query = '网络'.repeat(length / 2)
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      return response(fullProvenance(request.requestId, request.query))
+    })
+    const result = await new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch }).analyze(query)
+    expect(result.tokens).toHaveLength(length)
+    expect(result.candidates).toHaveLength(length)
+    expect(result.entities).toHaveLength(length)
+    expect(result.tokens[0]?.head).toBe(length - 1)
+  })
+
+  it.each([80, 2_000])('preserves %i source items through fast-request assembly and the retrieval contract', async length => {
+    const query = '网络'.repeat(length / 2)
+    const request = await buildFastTicketRequest(query, {
+      analyzer: { analyze: async () => fullProvenance('fixture', query) },
+      now: new Date('2026-09-12T00:00:00.000Z'), timeZone: 'Asia/Shanghai',
+    })
+    expect(request.queryContract?.nlp?.tokens).toHaveLength(length)
+    expect(request.queryContract?.nlp).toMatchObject({ entities: expect.any(Array) })
+    expect(request.fastQuery?.keyword?.terms).toEqual(['网络'])
+    expect(() => assertTicketRetrievalRequest(request)).not.toThrow()
+  })
+
+  it.each(['candidates', 'tokens', 'entities'])('rejects %s counts larger than the source text', async field => {
+    const query = '网络'.repeat(40)
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      const value = { ...fullProvenance(request.requestId, request.query) } as unknown as Record<string, unknown[]>
+      value[field] = [...value[field]!, value[field]![0]]
+      return response(value)
+    })
+    await expect(new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch }).analyze(query))
+      .rejects.toMatchObject({ code: 'PROTOCOL_MISMATCH' })
+  })
+
+  it('still rejects an out-of-bounds dependency head in complete long provenance', async () => {
+    const query = '网络'.repeat(40)
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }
+      const value = fullProvenance(request.requestId, request.query)
+      return response({ ...value, tokens: value.tokens.map((token, index) => index === 79 ? { ...token, head: 80 } : token) })
+    })
+    await expect(new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch }).analyze(query))
+      .rejects.toMatchObject({ code: 'PROTOCOL_MISMATCH' })
+  })
+
+  it('retains the 64-token bound for legacy NLP v1 replay', () => {
+    const query = '网络'.repeat(40)
+    const fastQuery = { schemaVersion: 1, source: 'direct_user', rewriteApplied: false,
+      keyword: { terms: ['网络'], operator: 'and' }, vector: { text: query } } as const
+    const request = (count: number) => ({
+      target: 'ranked_cases', query, countPolicy: 'adaptive', requestedCount: 20, fastQuery,
+      queryContract: {
+        schemaVersion: 4, original: query, normalized: query, task: 'ranked_cases', resultPolicy: 'adaptive_top_k',
+        maxResults: 20, domain: 'telecom_ticket', language: 'zh', entities: [], constraints: [], ambiguities: [],
+        fastQuery, compilerVersion: 'legacy-fixture', nlp: {
+          schemaVersion: 1, analyzerVersion: 'legacy-fixture', tokenization: 'legacy-fixture', keywordTerms: ['网络'],
+          tokens: Array.from({ length: count }, () => ({ surface: '网络', kind: 'word' as const })), triples: [],
+        },
+      },
+    } as const)
+    expect(() => assertTicketRetrievalRequest(request(64))).not.toThrow()
+    expect(() => assertTicketRetrievalRequest(request(65))).toThrow(/NLP/u)
+  })
+
   it('does not dispatch an already-cancelled query to the analysis service', async () => {
     const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body)) as { requestId: string; query: string }

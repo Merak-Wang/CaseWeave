@@ -62,10 +62,6 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
     throw new RetrievalError('INVALID_REQUEST', 'Controller 不执行 baseline 检索阶段。')
   }
   if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '当前检索没有有效快照。')
-  // Model steps and wall-clock time stay observational; only the Provider page ceiling stops a task.
-  if (state.budget.searchesUsed >= state.budget.maxSearches) {
-    throw new RetrievalError('BUDGET_EXHAUSTED', '检索页数已达上限。')
-  }
   const updated = applyQueryDelta(state.query.spec, input.delta)
   requireUserConstraints(state, updated)
   const resolutions = deltaRequirementResolutions(input.delta)
@@ -153,7 +149,7 @@ export async function executeSearchTransition(input: SearchTransitionInput): Pro
     providerLatencyMs: (state.budget.providerLatencyMs ?? 0) + page.elapsedMs,
   }
   const candidateRefs = candidates.map(candidate => candidate.ref)
-  const searchOpen = budget.searchesUsed < budget.maxSearches
+  const searchOpen = true
   // 零候选但仍有待确认条件时，向用户澄清是唯一不依赖候选差异的合法出口。
   const clarificationOpen = candidateRefs.length >= 2
     || (candidates.length === 0 && unresolvedConstraints.length > 0)

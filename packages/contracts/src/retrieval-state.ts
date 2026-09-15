@@ -58,6 +58,9 @@ export interface RetrievalKnowledgeAssessment {
 
 /** A judgment is supported only by evidence actually delivered to this model. */
 export interface RetrievalCandidateJudgment {
+  readonly basis?: 'model' | 'reused_model' | 'proxy' | 'unresolved'
+  readonly operatorInference?: import('./semantic-operators.js').OperatorDecision['inference']
+  readonly operatorManifestId?: string
   readonly exclusionChecks?: readonly {
     readonly requirementId: string
     readonly sourceText: string
@@ -122,11 +125,12 @@ export interface ContextCompressionStats {
     readonly thresholdTokens: number; readonly limit: number; readonly at: string }
 }
 export interface RetrievalBudgetState {
+  readonly operatorUsage?: Readonly<Record<string, unknown>>
   /** Latest full request usage, independent of the lifetime token totals. */
   readonly context?: { readonly estimatedInputTokens: number; readonly measuredInputTokens?: number;
     readonly limit?: number; readonly reservedTokens: number; readonly compactionCount: number; readonly compression?: ContextCompressionStats }
-  /** Cross-action Provider page ceiling. */
-  readonly maxSearches: number
+  /** Legacy persisted ceiling, retained only to read old Sessions. Never controls execution. */
+  readonly maxSearches?: number
   readonly maxConsecutiveToolErrors?: number
   readonly maxRepeatedToolErrors?: number
   readonly repeatedToolFailure?: { readonly signature: string; readonly count: number }
@@ -239,6 +243,9 @@ export interface TicketResultCollection {
 
 /** Complete domain state, reconstructable from versioned events. */
 export interface RetrievalState {
+  readonly operatorActivity?: { readonly operation: string; readonly status: 'running' | 'completed' | 'failed'; readonly at: string; readonly inputGeneration: number }
+  readonly operatorArtifacts?: readonly import('./semantic-operators.js').OperatorArtifact[]
+  readonly semanticSearchKeys?: readonly string[]
   readonly projectionVersion?: 2
   /** Increments for every accepted user update, including semantic feedback. */
   readonly inputGeneration?: number

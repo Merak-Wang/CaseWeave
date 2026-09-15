@@ -8,11 +8,12 @@ import {
 import { allowedAction, validateCandidateRefs } from './state-guards.js'
 import { expertConflictResolution, expertNeedsMainReview } from './experts.js'
 import { validateExclusionChecks } from './exclusion-checks.js'
+import { requiredEvidenceFields } from './evidence-requirements.js'
 
-export function validateVisibleEvidence(state: RetrievalState, refs: readonly string[]): void {
-  const actual = state.contextManifests?.filter(m => m.roleId === 'main' && m.measurement === 'dsh_request') ?? []
+export function validateVisibleEvidence(state: RetrievalState, refs: readonly string[], roleId = 'main'): void {
+  const actual = state.contextManifests?.filter(m => m.roleId === roleId && m.measurement === 'dsh_request') ?? []
   const visible = new Set<string>(actual.length ? actual.filter(m => m.inputGeneration === (state.inputGeneration ?? 0))
-    .flatMap(m => [...m.candidateRefs, ...m.evidenceIds]) : [...(state.modelVisibleCandidateRefs ?? []), ...(state.modelVisibleEvidenceIds ?? [])])
+    .flatMap(m => [...m.candidateRefs, ...m.evidenceIds]) : roleId === 'main' ? [...(state.modelVisibleCandidateRefs ?? []), ...(state.modelVisibleEvidenceIds ?? [])] : [])
   const current = new Set<string>([...state.candidates.map(candidate => candidate.ref),
     ...state.promotedEvidence.filter(evidence => state.candidates.some(candidate => candidate.ref === evidence.candidateRef))
       .map(evidence => evidence.evidenceId)])
@@ -32,7 +33,7 @@ export function validateVisibleEvidence(state: RetrievalState, refs: readonly st
   }
 }
 
-export function admitDecision(state: RetrievalState, decision: RetrievalDecision): Partial<RetrievalState> {
+export function admitDecision(state: RetrievalState, decision: RetrievalDecision, roleId = 'main', sourceInference = false): Partial<RetrievalState> {
   if (decision.stateId !== state.stateId && !(state.measurementStateIds ?? []).includes(decision.stateId)) {
     throw new RetrievalError('INVALID_TRANSITION', '状态版本已变化，请基于最新知识状态重新提交。')
   }
@@ -40,6 +41,12 @@ export function admitDecision(state: RetrievalState, decision: RetrievalDecision
   if (state.accessValidation === 'required') throw new RetrievalError('UNAUTHORIZED', '历史状态必须重新授权后才能判断或呈现。')
   const incoming = new Set<string>()
   const judgments = new Map((state.judgments ?? []).map(judgment => [judgment.candidateRef, judgment]))
+  // A corrected strong verdict reopens regional predictions, including when
+  // the correction comes from the main Agent or an adopted expert finding.
+  if (!sourceInference && decision.judgments.some(j => judgments.has(j.candidateRef)
+    && judgments.get(j.candidateRef)!.verdict !== j.verdict)) {
+    for (const [ref, j] of judgments) if (j.basis === 'proxy') judgments.delete(ref)
+  }
   for (const judgment of decision.judgments) {
     validateCandidateRefs(state, [judgment.candidateRef])
     if (incoming.has(judgment.candidateRef)) throw new RetrievalError('INVALID_REQUEST', '同一次判断中候选重复。')
@@ -60,12 +67,17 @@ export function admitDecision(state: RetrievalState, decision: RetrievalDecision
         throw new RetrievalError('INVALID_REQUEST', `采纳关系必须引用当前专家的同条结论及证据。${alias} 的 ${judgment.adoptedFindingId}：${item
           ? `原 verdict=${item.verdict}，仅可引用 ${refs!.join(', ')}` : '没有当前同条结论'}。若主 Agent 依据自己收到的证据另作判断或增加引用，请省略 adopted_finding_id；仍需满足证据与分歧校验。`)
       }
-    } else validateVisibleEvidence(state, [judgment.candidateRef, ...judgment.evidenceRefs])
+    } else if (!sourceInference) validateVisibleEvidence(state, [judgment.candidateRef, ...judgment.evidenceRefs], roleId)
     if (!judgment.evidenceRefs.some(ref => ref === judgment.candidateRef
       || state.promotedEvidence.some(evidence => evidence.evidenceId === ref && evidence.candidateRef === judgment.candidateRef))) {
       throw new RetrievalError('INVALID_REQUEST', '候选判断缺少属于该候选的证据。')
     }
     validateExclusionChecks(state, judgment)
+    const candidate = state.candidates.find(c => c.ref === judgment.candidateRef)!
+    if (judgment.verdict !== 'undetermined' && requiredEvidenceFields(state, candidate).some(field => !judgment.evidenceRefs.some(ref =>
+      state.promotedEvidence.some(e => e.evidenceId === ref && e.candidateRef === candidate.ref && e.field === field && e.origin?.kind === 'source')))) {
+      throw new RetrievalError('INVALID_REQUEST', '此判断需要引用已读取的指定原文；摘要不能替代原文或覆盖已知来源冲突。')
+    }
     judgments.set(judgment.candidateRef, { ...judgment, evidenceRefs: [...new Set(judgment.evidenceRefs)] })
   }
   const modelGaps: RetrievalGap[] = decision.gaps.map(gap => {
@@ -130,7 +142,11 @@ export function finishReason(state: RetrievalState, action: Extract<RetrievalDec
     return 'partial'
   }
   if (action.reason === 'no_result') {
-    if (accepted > 0 || pending > 0 || !exhausted || blocked) throw new RetrievalError('INVALID_TRANSITION', `无结果需要当前查询页已用尽、候选全部判定且没有未解决条件。${blocking.join('；')}`)
+    const semanticScopeReviewed = state.query.contract?.schemaVersion === 10 && state.task.countPolicy !== 'exhaustive'
+      && coverage !== undefined && (state.excludedCandidateRefs.length > 0 || state.candidates.length === 0)
+    if (accepted > 0 || blocked || (!semanticScopeReviewed && (pending > 0 || !exhausted))) {
+      throw new RetrievalError('INVALID_TRANSITION', `无结果需要已核实的任务范围、覆盖依据且没有未解决条件；全集任务还需完整枚举和判定。${blocking.join('；')}`)
+    }
     return 'no_result'
   }
   if (accepted === 0 || blocked || !countMet || !scopeMet) {

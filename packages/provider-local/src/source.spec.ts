@@ -12,6 +12,19 @@ const PRINCIPAL: TrustedPrincipalContext = {
 }
 
 describe('source-native public snapshot adapter', () => {
+  it('marks a known source-row summary conflict without changing the raw dialogue', async () => {
+    const dialogue = [{ speaker: 'customer', text: '我要查手机网络问题。' }]
+    const record = normalizePublicSnapshotTicket({ ticket_id: 'ESFT-CONFLICT', source_dataset: 'deepseek-ai/ESFT', source_version: 'v1',
+      title: '宽带包年', summary: '宽带包年费用', pii_redaction_status: 'rules_applied', raw_dialogue: dialogue,
+      transformation: { schema_version: 'retrieval-agent.esft-summary.v2', source_row_sha256: 'd7425406886a93fa80892af8c8cb58f721f25df164be608550f057e5b5ef15db' } })
+    const provider = new LocalTicketProvider([record], { now: () => new Date('2026-08-27T01:00:00.000Z'), ranker: testHybridRanker() })
+    const snapshot = await provider.openSnapshot(PRINCIPAL)
+    const page = await provider.search(PRINCIPAL, snapshot.snapshotId, provider.resolve({ query: '宽带', target: 'ranked_cases' }), { topK: 5, maxScan: 10, stage: 'initial_hybrid' })
+    expect(page.candidates[0]?.summaryOrigin).toMatchObject({ verification: 'conflicting', requiredEvidenceFields: ['source.raw_dialogue'] })
+    expect(record.rawSource?.payload.raw_dialogue).toEqual(dialogue)
+    expect(record.piiRedactionStatus).toBe('rules_applied')
+    expect(page.candidates[0]?.l0.additionalFields).toContainEqual(expect.objectContaining({ key: 'source.redaction', value: '已执行脱敏规则；未逐条核验' }))
+  })
   it('keeps upstream summaries at L1 and reads the full controlled dialogue without exposing raw metadata', async () => {
     const record = normalizePublicSnapshotTicket({ ticket_id: 'ESFT-PROJECTION', source_dataset: 'deepseek-ai/ESFT', source_version: 'v1',
       title: '副卡办理', summary: '用户要求办理副卡。', problem_description: '客户只说要办理。', pii_redaction_status: 'redacted',

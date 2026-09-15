@@ -7,13 +7,14 @@ import type {
   TicketRetrievalRequest,
 } from '@retrieval-agent/contracts'
 import type { RetrievalClarificationAnswer } from '@retrieval-agent/domain'
-import { buildFastTicketRequest, compileUserConditions, compileUserResultPolicy } from '@retrieval-agent/query-understanding'
+import { buildFastTicketRequest, buildSemanticTicketRequest, compileUserConditions, compileUserResultPolicy } from '@retrieval-agent/query-understanding'
 import type { TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
 
 const PLUGIN_NAME = 'retrieval-agent'
 const SNAPSHOT_SECTION = 'retrieval-agent:state'
 
 export interface AutomaticRetrievalApplication {
+  readonly operators?: import('./semantic-operators.js').SemanticOperators
   readonly coordinator?: { isExpert(agent: Agent): boolean }
   receiveUserInput?(agent: Agent, text: string, operationId: string): Promise<void>
   driveAllowed?(agent: Agent): boolean
@@ -141,6 +142,7 @@ export function installAutomaticRetrievalStart(
       ? {
           accepted: true, answer: query,
           ...(() => {
+            if (application.operators) return {}
             const conditions = compileUserConditions(query, [], new Date(), Intl.DateTimeFormat().resolvedOptions().timeZone)
             const result = compileUserResultPolicy(query)
             return { filters: conditions.filters, requirements: conditions.userRequirements, ambiguities: conditions.ambiguities,
@@ -153,7 +155,7 @@ export function installAutomaticRetrievalStart(
     const restartAfterExpiry = async (expired: RetrievalState): Promise<RetrievalState> => {
       const original = expired.query.original.trim()
       const merged = original.length > 0 && `${original}\n\n${query}`.length <= 2_000 ? `${original}\n\n${query}` : query
-      return await application.start(agent, await buildFastTicketRequest(merged, {
+      return await application.start(agent, application.operators ? buildSemanticTicketRequest(merged) : await buildFastTicketRequest(merged, {
         analyzer: config.analyzer,
         signal,
         ...(expired.query.confirmedConstraints.length === 0 ? {} : { inheritedFilters: expired.query.confirmedConstraints }),
@@ -172,9 +174,13 @@ export function installAutomaticRetrievalStart(
     } else {
       state = current !== undefined && current.termination === 'snapshot_invalid' && !newTask
         ? await restartAfterExpiry(current)
-        : await application.start(agent, await buildFastTicketRequest(query, { analyzer: config.analyzer, signal }), signal)
+        : await application.start(agent, application.operators ? buildSemanticTicketRequest(query) : await buildFastTicketRequest(query, { analyzer: config.analyzer, signal }), signal)
     }
     if (signal.aborted) return { kind: 'enter', messages: [] }
+    if (application.operators && state.phase !== 'stopped') {
+      state = await application.operators.searchPlanned(agent, signal)
+      state = await application.operators.filter(agent, undefined, signal)
+    }
 
     if (state.phase === 'stopped' && ['permission_blocked', 'snapshot_invalid', 'backend_error'].includes(state.termination)) {
       persistAcceptedMessages(agent, tail, turn)

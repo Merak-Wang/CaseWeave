@@ -6,7 +6,8 @@ import {
   type RetrievalState,
 } from '@retrieval-agent/contracts'
 import { applyRetrievalStatePatch } from './patch.js'
-import { migrateLegacyRetrievalState, migrateProjectionState } from './migrate.js'
+import { migrateLegacyRetrievalState, migrateProjectionState, recoverExecutionClock } from './migrate.js'
+export { recoverExecutionClock } from './migrate.js'
 export { applyRetrievalStatePatch, createRetrievalStatePatch } from './patch.js'
 export { migrateProjectionState } from './migrate.js'
 
@@ -26,6 +27,7 @@ export function foldRetrievalEvents(events: readonly RetrievalDomainEvent[], exp
   let state: RetrievalState | undefined
   let stateSchemaVersion: number | undefined
   let expectedSequence = 0
+  let stoppedAt: string | undefined
   const eventIds = new Set<string>()
   for (const event of events) {
     if (!SUPPORTED_RETRIEVAL_EVENT_SCHEMA_VERSIONS.includes(event.schemaVersion)) {
@@ -38,6 +40,8 @@ export function foldRetrievalEvents(events: readonly RetrievalDomainEvent[], exp
     }
     if (eventIds.has(event.eventId)) throw new RetrievalError('PROTOCOL_MISMATCH', '检索事件身份重复。')
     eventIds.add(event.eventId)
+    if (event.type === 'retrieval/stopped') stoppedAt = event.occurredAt
+    if (event.type === 'retrieval/user-feedback-received' || event.type === 'retrieval/clarification-answered') stoppedAt = undefined
     if (event.type === 'retrieval/state-recorded') {
       const next = event.data.state
       validateState(next, event, state)
@@ -61,5 +65,5 @@ export function foldRetrievalEvents(events: readonly RetrievalDomainEvent[], exp
   }
   if (state === undefined) return undefined
   if ((stateSchemaVersion ?? 0) < 12) state = migrateLegacyRetrievalState(state)
-  return stateSchemaVersion === 13 ? state : migrateProjectionState(state)
+  return recoverExecutionClock(stateSchemaVersion === 13 ? state : migrateProjectionState(state), stoppedAt)
 }

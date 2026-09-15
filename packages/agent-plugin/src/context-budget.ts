@@ -127,7 +127,7 @@ export function installRetrievalRuntimeBudget(
   }, { global: true })
 
   ctx.on('tools/result', (exec, result) => {
-    if (exec.agent === undefined || !exec.name.startsWith('ticket_')) return
+    if (exec.agent === undefined || (!exec.name.startsWith('ticket_') && !exec.name.startsWith('sem_'))) return
     if (application.coordinator?.isExpert(exec.agent)) return
     if (!result.isError) return
     const agent = exec.agent

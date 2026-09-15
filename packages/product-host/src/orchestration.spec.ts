@@ -13,6 +13,13 @@ const state = () => ({ inputGeneration: 2, phase: 'assessed', termination: 'acti
 } as unknown as RetrievalState)
 
 describe('public orchestration facts', () => {
+  it('shows planning and missing-field limits for an empty current generation instead of candidate review', () => {
+    const empty = { ...state(), expertTasks: [], candidates: [], query: { unresolvedConstraints: ['来源没有日期字段'], contract: { schemaVersion: 10 } } } as unknown as RetrievalState
+    expect(projectOrchestration(empty)).toMatchObject({ stage: 'planning', blockers: ['来源没有日期字段'] })
+    const planned = { ...empty, query: { ...empty.query, contract: { ...empty.query.contract!, semanticPlan: { inputGeneration: 2 } } } } as RetrievalState
+    expect(projectOrchestration(planned).stage).toBe('coverage')
+    expect(projectOrchestration({ ...planned, phase: 'stopped', updatedAt: '2099-01-01T00:00:00Z' }).clock).toMatchObject({ unavailable: true, running: false })
+  })
   it('counts only output usage and retains prior expert rounds in the task total', () => {
     const original = state()
     const measured = { ...original, budget: { totalOutputTokens: 100, totalMeasuredInputTokens: 9000, modelStepsUsed: 3, maxSearches: 2500, searchesUsed: 1, wallClockElapsedMs: 10 },

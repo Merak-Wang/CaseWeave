@@ -59,6 +59,7 @@ const HEADERS = [
   'type', 'category', 'product', 'component', 'region', 'status', 'priority', 'created_at',
   'source_version', 'evidence_level', 'judgment', 'judgment_reason', 'evidence_ids', 'evidence_readers',
   'result_revision', 'candidate_ref', 'content_hash', 'judgment_evidence_refs', 'query_conditions', 'stopping_reason',
+  'redaction_review', 'judgment_basis',
 ] as const
 
 /** Trusted-host application service; every detail/export operation re-enters the Provider. */
@@ -164,12 +165,15 @@ export class CandidateExportService {
           confirmed.get(c.ref)!.evidenceLevel, 'confirmed', judgment?.reason ?? '', JSON.stringify(evidence.map(e => e.evidenceId)),
           JSON.stringify(Object.fromEntries(evidence.map(e => [e.evidenceId, e.readers ?? ['unknown']]))), result.resultRevision, c.ref, c.contentHash,
           JSON.stringify(judgment?.evidenceRefs ?? []), JSON.stringify(state.query.confirmedConstraints), result.stoppingReason,
+          d.l0.additionalFields?.find(f => f.key === 'source.redaction')?.value ?? '',
+          judgment?.basis ?? 'model',
           ...(options.template === 'full' ? [JSON.stringify(d.fields), JSON.stringify(d.unavailableFields)] : [])]
         rowCount++
         await emit(options.format === 'csv' ? row.map(csvCell).join(',') + '\r\n' : JSON.stringify({
           schemaVersion: 1, ticketId: d.displayId, candidateRef: c.ref, title: d.title, summary: d.summary, summaryOrigin: c.summaryOrigin,
           l0: d.l0, fields: d.fields, unavailableFields: d.unavailableFields, sourceVersion: d.sourceVersion, contentHash: c.contentHash,
-          resultRevision: result.resultRevision, judgment: { verdict: 'accept', reason: judgment?.reason ?? '', evidenceRefs: judgment?.evidenceRefs ?? [] },
+          resultRevision: result.resultRevision, judgment: { verdict: 'accept', reason: judgment?.reason ?? '', basis: judgment?.basis ?? 'model',
+            inference: judgment?.operatorInference ?? null, evidenceRefs: judgment?.evidenceRefs ?? [] },
           evidence: evidence.map(e => ({ evidenceId: e.evidenceId, field: e.field, start: e.start, end: e.end, text: e.text, origin: e.origin, spanHash: e.spanHash })),
           scope: { query: state.query.original, conditions: state.query.confirmedConstraints, snapshot: state.snapshot.shortId, stoppingReason: result.stoppingReason },
         }) + '\n')

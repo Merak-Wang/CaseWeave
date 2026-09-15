@@ -27,3 +27,14 @@ export function hostAuthorizedCandidates(
   }
   return unique.map(ref => candidates.get(ref)!)
 }
+
+/** Reading historical evidence is separate from present result/export eligibility. Provider reauthorizes every read. */
+export function hostReadableCandidates(state: RetrievalState, refs: readonly TicketCandidateRef[]): TicketCandidate[] {
+  if (state.accessValidation === 'required' || ['permission_blocked', 'snapshot_invalid'].includes(state.termination)) {
+    throw new RetrievalError('UNAUTHORIZED', '当前历史证据访问资格失效。')
+  }
+  const candidates = new Map([...state.candidateHistory, ...state.candidates].map(c => [c.ref, c]))
+  const unique = [...new Set(refs)]
+  if (!unique.length || unique.some(ref => !candidates.has(ref))) throw new RetrievalError('CANDIDATE_NOT_FOUND', '工单不属于此任务的检索历史。')
+  return unique.map(ref => candidates.get(ref)!)
+}

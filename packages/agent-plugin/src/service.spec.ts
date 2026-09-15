@@ -36,6 +36,7 @@ import { installRetrievalRuntimeBudget } from './context-budget.js'
 import { installAutomaticRetrievalStart } from './pre-step.js'
 import { RetrievalAgentService } from './service.js'
 import { installRetrievalTools } from './tools.js'
+import { Config } from './index.js'
 
 const SIGNAL = new AbortController().signal
 
@@ -283,6 +284,25 @@ class FirstRequestAnswerAdapter extends LlmAdapter {
 }
 
 describe('RetrievalAgentService Cordis binding', () => {
+  it('validates the shared review width at the plugin configuration and service factory', async () => {
+    expect(Config({}).reviewBatchSize).toBe(8)
+    for (const reviewBatchSize of [1, 8, 16, 32]) {
+      const ctx = new Context()
+      try {
+        const application = new RetrievalAgentService(ctx, Config({ reviewBatchSize }))
+        expect(application.reviewBatchSize).toBe(reviewBatchSize)
+        expect(application.createContextPolicy().maxCandidates).toBe(reviewBatchSize)
+        expect(application.createContextPolicy('expert').maxCandidates).toBe(reviewBatchSize)
+      } finally { await ctx.fiber.dispose() }
+    }
+    for (const reviewBatchSize of [0, -1, 1.5, 33, NaN, Infinity]) {
+      expect(() => Config({ reviewBatchSize })).toThrow()
+      const ctx = new Context()
+      try { expect(() => new RetrievalAgentService(ctx, { reviewBatchSize })).toThrow(/maxCandidates/) }
+      finally { await ctx.fiber.dispose() }
+    }
+  })
+
   it('keeps a working state larger than 8K under the requested 256K ceiling and respects smaller model windows', async () => {
     const ctx = new Context()
     try {
@@ -475,9 +495,9 @@ describe('RetrievalAgentService Cordis binding', () => {
       })).resolves.toMatchObject({ accepted: false })
 
       expect(ctx.retrievalAgent.current(agent)).toMatchObject({
-        phase: 'stopped', termination: 'budget_exhausted',
+        phase: 'stopped', termination: 'capacity_exceeded',
         budget: { modelStepsUsed: 1, totalInputTokens: 14_674, serializationBytes: 80_685 },
-        frozenEvidence: { stoppingReason: 'budget_exhausted' },
+        frozenEvidence: { stoppingReason: 'capacity_exceeded' },
       })
       expect(createTicketResultCollection(ctx.retrievalAgent.current(agent))).not.toHaveProperty('undeterminedCandidates')
       expect(ctx.retrievalAgent.current(agent).candidates.length).toBeGreaterThan(0)

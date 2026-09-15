@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["python/evals", "python/model-service"]
+members = ["python/evals", "python/model-service", "python/semantic-operators"]
 
 [tool.uv]
 package = false
