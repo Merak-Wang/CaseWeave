@@ -304,7 +304,7 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
   override async recordToolCall(agent: Agent, input: Parameters<RetrievalAgentService['recordToolCall']>[1]): Promise<RetrievalState> {
     return this.observe(agent, () => this.execute(agent, async (c, s) => c.recordToolCall(s, input), { semantic: false }))
   }
-  override async principal(agent: Agent, operation: 'detail_read' | 'export' | 'snapshot_open', signal?: AbortSignal) { return this.resolve(agent, operation, signal) }
+  override async principal(agent: Agent, operation: 'detail_read' | 'evidence_read' | 'export' | 'snapshot_open', signal?: AbortSignal) { return this.resolve(agent, operation, signal) }
   override async recordDetailRead(agent: Agent, receipt: CandidateDetailReadReceipt, result: TicketDetailResult): Promise<RetrievalState> {
     const before = await this.store.read(receipt.retrievalId)
     // Two tabs can finish independent Provider reads together. Rebase only the local

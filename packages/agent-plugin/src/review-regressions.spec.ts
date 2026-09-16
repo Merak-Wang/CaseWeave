@@ -136,7 +136,7 @@ it('O1 executes new plan keywords after the user changes the business scope', as
   } finally { await f.close() }
 }, 60000)
 
-it('O4 reads the requested dialogue through the public tool before confirming and replaying', async () => {
+it('O4 fetches required dialogue before the first filter request and replays the confirmation', async () => {
   const f = await fixture({ sourceRequired: true, readSource: true })
   try {
     await f.input('查找宽带停机案例，必须核实原始对话')
@@ -144,6 +144,7 @@ it('O4 reads the requested dialogue through the public tool before confirming an
     expect(f.errors).toEqual([])
     expect(s.termination).toBe('top_k_accepted')
     expect(s.selectedCandidateRefs).toHaveLength(1)
+    expect(f.requests.filter(r => r.system?.includes('当前操作：sem_filter'))).toHaveLength(1)
     expect(s.contextManifests?.some(m => m.operator?.operation === 'sem_filter' && m.evidenceIds.length)).toBe(true)
     expect(createTicketResultCollection(s).evidence.some(e => e.field === 'conversationOrUpdates')).toBe(true)
   } finally { await f.close() }
@@ -218,6 +219,7 @@ it('O4 require_source cannot be fulfilled by an unread source-authored summary',
     console.log('O4', JSON.stringify({ confirmed: s.selectedCandidateRefs.length, evidence: s.promotedEvidence.length, phase: s.phase, errors: f.errors }))
     expect(s.promotedEvidence).toHaveLength(0)
     expect(s.selectedCandidateRefs).toHaveLength(0)
+    expect(f.requests.filter(r => r.system?.includes('当前操作：sem_filter'))).toHaveLength(0)
   } finally { await f.close() }
 }, 60000)
 

@@ -28,21 +28,21 @@ export function updateCandidateRanking(input: CandidateRankingInputParams) {
   }
   const observations = [...input.previousObservations, next]
   const scores = new Map<TicketCandidateRef, number>()
-  for (const observation of observations.slice(input.observationStart ?? 0)) {
+  for (const observation of observations.slice(input.observationStart)) {
     const weight = observation.stage === 'repair_search' ? 1.25 : 1
     for (const item of observation.ranking) {
-      if (!history.some(candidate => candidate.ref === item.ref)) continue
+      if (!seen.has(item.ref)) continue
       scores.set(item.ref, (scores.get(item.ref) ?? 0) + weight / (60 + item.rank))
     }
   }
   const firstSeen = new Map(history.map((candidate, index) => [candidate.ref, index]))
-  // History is provenance, never evidence of current hard-condition eligibility.
-  const eligible = new Map((input.resetEligibility ? [] : input.previousActive ?? input.previousHistory)
+  // 历史只记录来源。修订条件后，只有重新召回的候选才能恢复当前资格。
+  const eligible = new Map((input.resetEligibility ? [] : input.previousActive)
     .map(candidate => [candidate.ref, candidate]))
   for (const candidate of input.page) eligible.set(candidate.ref, candidate)
   const active = [...eligible.values()]
     .sort((left, right) => (scores.get(right.ref) ?? 0) - (scores.get(left.ref) ?? 0)
-      || (firstSeen.get(left.ref) ?? 0) - (firstSeen.get(right.ref) ?? 0))
+      || firstSeen.get(left.ref)! - firstSeen.get(right.ref)!)
     .map((candidate, index) => ({ ...candidate, rank: index + 1 }))
   return { version: 'candidate-ranking-v1' as const, history, observations, active }
 }

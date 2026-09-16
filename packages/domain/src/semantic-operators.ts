@@ -1,58 +1,85 @@
 import { RetrievalError, type OperatorRecord, type OperatorDecision, type RetrievalState, type TicketCandidate,
-  type TicketCandidateRef, type SemanticQueryPlan } from '@retrieval-agent/contracts'
-import { admitDecision } from './decision.js'
-import { requiredEvidenceFields } from './evidence-requirements.js'
+  type TicketCandidateRef, type TicketEvidenceSegment, type SemanticQueryPlan } from '@retrieval-agent/contracts'
+import { mergeCandidateJudgments } from './decision.js'
+import { operatorRequiredFields, requiredEvidenceFields } from './evidence-requirements.js'
 export { operatorRequiredFields } from './evidence-requirements.js'
 
-/** The exact authorized material available for a row; added evidence never changes an older passage. */
-export function operatorRecord(state: RetrievalState, candidate: TicketCandidate): OperatorRecord {
+/** 构造本条工单已授权的材料；新证据追加片段，不覆盖旧片段。 */
+export function operatorRecord(state: RetrievalState, candidate: TicketCandidate, evidence = state.promotedEvidence): OperatorRecord {
   const origin = (field: string) => state.snapshot?.fieldCatalog.find(f => f.key === field)?.capability?.origin ?? 'unknown'
   const passages: OperatorRecord['passages'][number][] = [
     { id: 'displayId', field: 'displayId', text: candidate.displayId, start: 0, origin: 'source' },
     { id: 'title', field: 'title', text: candidate.title, start: 0, origin: origin('title') },
     { id: 'summary', field: 'summary', text: candidate.summary, start: 0, origin: candidate.summaryOrigin?.kind ?? 'unknown' },
   ]
-  for (const [field, value] of Object.entries(candidate.l0 ?? {})) if (value !== null && value !== undefined) {
+  for (const [field, value] of Object.entries(candidate.l0)) if (value !== null && value !== undefined) {
     passages.push({ id: `l0:${field}`, field, text: typeof value === 'string' ? value : JSON.stringify(value), start: 0, origin: origin(field) })
   }
-  for (const e of state.promotedEvidence) if (e.candidateRef === candidate.ref) passages.push({ id: e.evidenceId, field: e.field,
+  for (const e of evidence) if (e.candidateRef === candidate.ref) passages.push({ id: e.evidenceId, field: e.field,
     text: e.text, start: e.start, origin: e.origin?.kind ?? 'unknown' })
   return { ref: candidate.ref, version: candidate.sourceVersion, content_hash: candidate.contentHash, passages,
     attributes: { summary_origin: candidate.summaryOrigin ?? { kind: 'unknown' },
       required_evidence_fields: candidate.summaryOrigin?.verification === 'conflicting' ? candidate.summaryOrigin.requiredEvidenceFields ?? [] : [] } }
 }
 
-export function validateOperatorRecord(state: RetrievalState, row: OperatorRecord): TicketCandidate {
-  const candidate = state.candidates.find(c => c.ref === row.ref)
-  if (!candidate || row.version !== candidate.sourceVersion || row.content_hash !== candidate.contentHash) throw new RetrievalError('INVALID_REQUEST', '算子记录不属于当前来源版本。')
-  const current = operatorRecord(state, candidate)
-  if (!Array.isArray(row.passages) || new Set(row.passages.map(p => p.id)).size !== row.passages.length
-    || row.passages.some(p => !current.passages.some(actual => actual.id === p.id && actual.field === p.field && actual.text === p.text && actual.start === p.start && actual.origin === p.origin))) {
-    throw new RetrievalError('INVALID_REQUEST', '算子收到的片段与当前授权证据不一致。')
+/** 批量构造和核验共用一次证据分组，避免每条工单重新扫描全部正文。 */
+export function operatorRecords(state: RetrievalState, candidates: readonly TicketCandidate[]): OperatorRecord[] {
+  if (!candidates.length) return []
+  const evidence = new Map<TicketCandidateRef, TicketEvidenceSegment[]>()
+  for (const item of state.promotedEvidence) {
+    const rows = evidence.get(item.candidateRef) ?? []
+    rows.push(item); evidence.set(item.candidateRef, rows)
   }
-  return candidate
+  return candidates.map(c => operatorRecord(state, c, evidence.get(c.ref) ?? []))
+}
+
+export function validateOperatorRecords(state: RetrievalState, rows: readonly OperatorRecord[]): void {
+  const candidates = new Map(state.candidates.map(c => [c.ref, c]))
+  const current = operatorRecords(state, rows.map(row => {
+    const candidate = candidates.get(row.ref as TicketCandidateRef)
+    if (!candidate || row.version !== candidate.sourceVersion || row.content_hash !== candidate.contentHash) throw new RetrievalError('INVALID_REQUEST', '算子记录不属于当前来源版本。')
+    return candidate
+  }))
+  rows.forEach((row, i) => {
+    const passages = new Map(current[i]!.passages.map(p => [p.id, p]))
+    if (!Array.isArray(row.passages) || new Set(row.passages.map(p => p.id)).size !== row.passages.length
+      || row.passages.some(p => {
+        const actual = passages.get(p.id)
+        return !actual || actual.field !== p.field || actual.text !== p.text || actual.start !== p.start || actual.origin !== p.origin
+      })) throw new RetrievalError('INVALID_REQUEST', '算子收到的片段与当前授权证据不一致。')
+  })
 }
 
 export function admitOperatorDecisions(state: RetrievalState, generation: number, decisions: readonly OperatorDecision[]): Partial<RetrievalState> {
   if (generation !== (state.inputGeneration ?? 0)) throw new RetrievalError('INVALID_TRANSITION', '算子结果属于旧输入代次。')
-  let current = state
+  if (state.phase === 'stopped' || state.phase === 'awaiting_clarification') throw new RetrievalError('INVALID_TRANSITION', '当前任务不能接收判断。')
+  const candidates = new Map(state.candidates.map(c => [c.ref, c]))
+  const requestedManifests = new Set(decisions.flatMap(d => d.manifest_id ? [d.manifest_id] : []))
+  const manifests = new Map((state.contextManifests ?? []).filter(m => m.operator?.operation === 'sem_filter'
+    && requestedManifests.has(m.operator.pythonManifestId) && m.measurement === 'dsh_request'
+    && m.inputGeneration === generation).map(m => [m.operator!.pythonManifestId, m]))
+  const manifestRows = new Map([...manifests].map(([id, m]) => [id, new Map(m.operator!.records.map(r => [r.ref, r]))]))
+  const fallbackRows = new Map(operatorRecords(state, decisions.filter(d => d.basis === 'proxy' || d.basis === 'unresolved')
+    .flatMap(d => { const c = candidates.get(d.ref as TicketCandidateRef); return c ? [c] : [] })).map(r => [r.ref, r]))
+  const evidence = new Map<string, TicketEvidenceSegment>(state.promotedEvidence.map(e => [e.evidenceId, e]))
+  const planFields = operatorRequiredFields(state.query.contract?.semanticPlan)
+  const judgments: import('@retrieval-agent/contracts').RetrievalCandidateJudgment[] = []
   const seen = new Set<string>()
   for (const d of decisions) {
     const proxy = d.basis === 'proxy', inference = d.inference
-    // Only the trusted Python result channel supplies inference. These are
-    // numerical check results, never a fabricated per-record model receipt.
+    // 代理推断来自可信 Python 结果通道，携带数值检验结果，不伪造逐条模型回执。
     if (seen.has(d.ref) || !['model', 'reused_model', 'unresolved', 'proxy'].includes(d.basis)
       || (proxy && (!inference || inference.algorithm !== 'cluster' || !inference.inferred || inference.phase !== 'check'
         || inference.error_upper !== 0 || inference.tolerance !== 0 || !(inference.alpha > 0 && inference.alpha <= .005)
         || inference.proposed !== Number(d.label === 'accept') || d.manifest_id !== null))) throw new RetrievalError('INVALID_REQUEST', '算子结果重复或是未经准入的代理推断。')
     seen.add(d.ref)
-    const manifest = state.contextManifests?.find(m => m.operator?.pythonManifestId === d.manifest_id && m.operator.operation === 'sem_filter'
-      && m.measurement === 'dsh_request' && m.roleId.startsWith('operator:') && m.inputGeneration === generation)
-    const candidateSource = proxy ? state.candidates.find(c => c.ref === d.ref) : undefined
-    const row = proxy && candidateSource ? operatorRecord(state, candidateSource) : manifest?.operator?.records.find(r => r.ref === d.ref)
-    if (!row || (!proxy && (!manifest || d.knowledge_ids.some(id => !manifest.operator!.knowledgeIds.includes(id))
+    const missing = d.basis === 'unresolved' && d.label === 'undetermined' && !d.manifest_id && !d.citations.length && !d.knowledge_ids.length
+    const manifest = d.manifest_id ? manifests.get(d.manifest_id) : undefined
+    const candidate = candidates.get(d.ref as TicketCandidateRef)
+    const row = proxy || missing ? fallbackRows.get(d.ref) : manifestRows.get(d.manifest_id!)?.get(d.ref)
+    if (!row || (!proxy && !missing && (!manifest || d.knowledge_ids.some(id => !manifest.operator!.knowledgeIds.includes(id))
       || (manifest.releaseId && manifest.releaseId !== state.knowledgeCatalog?.releaseId)))) throw new RetrievalError('INVALID_REQUEST', '算子缺少当前实际模型请求或引用了未送达知识。')
-    const candidate = validateOperatorRecord(state, row)
+    if (!candidate || candidate.sourceVersion !== row.version || candidate.contentHash !== row.content_hash) throw new RetrievalError('INVALID_REQUEST', '算子记录不属于当前来源版本。')
     if (!d.reason.trim() || d.reason.length > 1000 || !['accept', 'exclude', 'undetermined'].includes(d.label)
       || (d.label !== 'undetermined' && (d.basis === 'unresolved' || !d.citations.length))) throw new RetrievalError('INVALID_REQUEST', '算子确定判断缺少依据或理由无效。')
     const evidenceRefs: string[] = []
@@ -63,22 +90,20 @@ export function admitOperatorDecisions(state: RetrievalState, generation: number
         || !Number.isSafeInteger(citation.start) || !Number.isSafeInteger(citation.end)
         || citation.start < p.start || citation.end > p.start + p.text.length || citation.end - citation.start !== citation.quote.length
         || p.text.slice(citation.start - p.start, citation.end - p.start) !== citation.quote) throw new RetrievalError('INVALID_REQUEST', '算子引文不属于本条实际送达片段。')
-      evidenceRefs.push(state.promotedEvidence.some(e => e.evidenceId === p.id && e.candidateRef === row.ref) ? p.id : candidate.ref)
+      evidenceRefs.push(evidence.get(p.id)?.candidateRef === row.ref ? p.id : candidate.ref)
     }
-    if (d.label !== 'undetermined' && requiredEvidenceFields(state, candidate).some(field =>
-      !d.citations.some(c => c.field === field && c.origin === 'source' && state.promotedEvidence.some(e =>
-        e.candidateRef === candidate.ref && e.evidenceId === c.passage_id && e.field === field)))) {
+    if (d.label !== 'undetermined' && requiredEvidenceFields(state, candidate, planFields).some(field =>
+      !d.citations.some(c => {
+        const e = evidence.get(c.passage_id)
+        return c.field === field && c.origin === 'source' && e?.candidateRef === candidate.ref && e.field === field
+      }))) {
       throw new RetrievalError('INVALID_REQUEST', '判断缺少当前要求的、实际送达模型的原文引用；请定向读取后重新复核。')
     }
-    const judgment = { candidateRef: candidate.ref as TicketCandidateRef, verdict: d.label, reason: d.reason,
+    judgments.push({ candidateRef: candidate.ref, verdict: d.label, reason: d.reason,
       evidenceRefs: [...new Set(evidenceRefs.length ? evidenceRefs : [candidate.ref])], basis: d.basis,
-      ...(proxy ? { operatorInference: inference } : { operatorManifestId: manifest!.id }) }
-    // Operator visibility is scoped to its own request, never faked as the main Agent.
-    current = { ...current, ...admitDecision(current, { stateId: current.stateId, judgments: [judgment],
-      gaps: current.gaps.filter(g => g.evaluator === 'model'), action: { kind: 'inspect', fields: [] } }, manifest?.roleId ?? 'operator:proxy', proxy) }
+      ...(proxy ? { operatorInference: inference } : manifest ? { operatorManifestId: manifest.id } : {}) })
   }
-  return { judgments: current.judgments ?? [], selectedCandidateRefs: current.selectedCandidateRefs,
-    excludedCandidateRefs: current.excludedCandidateRefs, expertConflicts: current.expertConflicts ?? [] }
+  return mergeCandidateJudgments(state, judgments)
 }
 
 export function semanticPlanPatch(state: RetrievalState, plan: SemanticQueryPlan): Partial<RetrievalState> {

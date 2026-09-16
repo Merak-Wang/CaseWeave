@@ -30,10 +30,6 @@
       "types": "./lib/agent.d.ts",
       "default": "./lib/agent.js"
     },
-    "./streamcluster-provider": {
-      "types": "./lib/streamcluster-provider.d.ts",
-      "default": "./lib/streamcluster-provider.js"
-    },
     "./principal": {
       "types": "./lib/principal.d.ts",
       "default": "./lib/principal.js"
@@ -63,7 +59,6 @@
     "@retrieval-agent/model-service-client": "workspace:*",
     "@retrieval-agent/provider-local": "workspace:*",
     "@retrieval-agent/provider-database": "workspace:*",
-    "@retrieval-agent/provider-streamcluster": "workspace:*",
     "@retrieval-agent/product-api": "workspace:*",
     "@retrieval-agent/product-host": "workspace:*",
     "@retrieval-agent/query-understanding": "workspace:*",

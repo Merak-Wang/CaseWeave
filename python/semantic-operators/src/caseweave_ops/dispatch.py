@@ -37,11 +37,11 @@ async def invoke_rows(op: str, runtime: Runtime, source: AsyncIterable[Record], 
         scorer = None
         if feedback is not None:
             scorer = MultiViewScorer(p["queries"], p["embedding_id"], p.get("keywords", []), feedback)
-        # The default path performs sampling, prediction and independent checks.
+        # Auto streams strict judgments; explicit cluster preserves the comparison.
         async for result in sem_filter(runtime, source, instruction, batch_size=p.get("batch_size", 8),
-                algorithm=p.get("algorithm", "cluster"), options=p.get("options"),
-                **({"host_labels": p.get("host_labels")} if not reference else {}),
-                scorer=scorer, feedback=feedback, require_source=p.get("require_source", True),
+                algorithm=p.get("algorithm", "auto"), options=p.get("options"),
+                **({"scorer": scorer} if reference else {"host_labels": p.get("host_labels")}),
+                feedback=feedback, require_source=p.get("require_source", True),
                 required_fields=tuple(fields),
                 replay_saved=p.get("replay_saved", False),
                 stop_after_accepted=p.get("example_count")):

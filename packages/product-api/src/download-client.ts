@@ -1,46 +1,17 @@
+import { ProductApiClientError, isRecord, postProductApi } from './http-client.js'
 import type { CandidateExportReceipt } from '@retrieval-agent/contracts'
 import {
   EXPORT_CANDIDATES_ENDPOINT,
-  type ExportCandidatesErrorResponse,
   type ExportCandidatesResponse,
 } from './protocol.js'
 
-export class ExportCandidatesClientError extends Error {
-  readonly code: string
-  readonly retryable: boolean
-  readonly status: number | undefined
-
-  constructor(
-    code: string,
-    message: string,
-    retryable: boolean,
-    status?: number,
-    options: { readonly cause?: unknown } = {},
-  ) {
-    super(message, options.cause === undefined ? undefined : { cause: options.cause })
-    this.name = 'ExportCandidatesClientError'
-    this.code = code
-    this.retryable = retryable
-    this.status = status
-  }
-}
+export class ExportCandidatesClientError extends ProductApiClientError {}
 
 export interface ExportCandidatesFailure {
   readonly code: string
   readonly message: string
   readonly action: string
   readonly retryable: boolean
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function isExportError(value: unknown): value is ExportCandidatesErrorResponse {
-  return isRecord(value)
-    && typeof value.code === 'string'
-    && typeof value.message === 'string'
-    && typeof value.retryable === 'boolean'
 }
 
 function isExportResponse(value: unknown): value is ExportCandidatesResponse {
@@ -92,46 +63,9 @@ export async function exportCandidates(
   retrievalId: string,
   resultRevision: string,
 ): Promise<CandidateExportReceipt> {
-  let response: Response
-  try {
-    response = await fetch(EXPORT_CANDIDATES_ENDPOINT, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId, retrievalId, resultRevision }),
-    })
-  } catch (cause) {
-    throw new ExportCandidatesClientError(
-      'NETWORK_UNAVAILABLE',
-      '无法连接导出服务。',
-      true,
-      undefined,
-      { cause },
-    )
-  }
-  let payload: unknown
-  try {
-    payload = await response.json()
-  } catch (cause) {
-    throw new ExportCandidatesClientError(
-      'INVALID_RESPONSE',
-      `导出服务返回了无法解析的响应（HTTP ${response.status}）。`,
-      response.status >= 500,
-      response.status,
-      { cause },
-    )
-  }
-  if (!response.ok) {
-    if (isExportError(payload)) {
-      throw new ExportCandidatesClientError(payload.code, payload.message, payload.retryable, response.status)
-    }
-    throw new ExportCandidatesClientError(
-      `HTTP_${response.status}`,
-      `导出请求失败（HTTP ${response.status}）。`,
-      response.status >= 500,
-      response.status,
-    )
-  }
+  const { payload, status } = await postProductApi<ExportCandidatesResponse>(
+    EXPORT_CANDIDATES_ENDPOINT, { sessionId, retrievalId, resultRevision }, '导出', ExportCandidatesClientError,
+  )
   if (!isExportResponse(payload) || payload.receipt.retrievalId !== retrievalId
     || payload.receipt.resultRevision !== resultRevision || !Number.isSafeInteger(payload.receipt.rowCount)
     || payload.receipt.rowCount < 1 || !/^[a-f0-9]{64}$/u.test(payload.receipt.contentSha256)) {
@@ -139,7 +73,7 @@ export async function exportCandidates(
       'INVALID_RESPONSE',
       '导出服务返回的数据格式无效。',
       false,
-      response.status,
+      status,
     )
   }
   const bytes = new TextEncoder().encode(payload.contentUtf8)

@@ -179,13 +179,6 @@ function parseJsonl(
   return result
 }
 
-export function parsePublicSnapshotJsonl(
-  text: string,
-  access: PublicSnapshotAccessOverlay = DEVELOPMENT_ADMIN_ACCESS,
-): NormalizedTicketRecord[] {
-  return parseJsonl(text, value => normalizePublicSnapshotTicket(value, access), '公开快照')
-}
-
 /** Parse either the legacy fixture envelope or a source-native public row. */
 export function parseTicketDatasetJsonl(
   text: string,

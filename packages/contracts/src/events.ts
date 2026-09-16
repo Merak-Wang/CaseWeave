@@ -1,4 +1,4 @@
-import type { RetrievalId, TicketCandidateRef, TicketEvidenceId } from './brand.js'
+import type { RetrievalId, TicketCandidateRef } from './brand.js'
 import type {
   TicketEvidenceSegment,
   LegacyRawDetail,
@@ -151,13 +151,4 @@ export function makeRetrievalEvent<T extends RetrievalEventType>(input: {
     type: input.type,
     data: input.data,
   } as RetrievalDomainEvent<T>
-}
-
-export function evidenceIdentitySet(events: readonly RetrievalDomainEvent[]): ReadonlySet<TicketEvidenceId> {
-  const result = new Set<TicketEvidenceId>()
-  for (const event of events) {
-    if (event.type !== 'retrieval/evidence-promoted') continue
-    for (const evidence of event.data.evidence) result.add(evidence.evidenceId)
-  }
-  return result
 }

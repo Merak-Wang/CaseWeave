@@ -404,12 +404,12 @@ export async function installTaskHost(ctx: Context, config: { mysqlUrl?: string;
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/retrieval/workbench-client.js', handler: (_request, response) => {
     response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' }); response.end(workbenchClient)
   } }))
-  // Also repair mirrors with no remaining computation after a commit/push crash.
+  // 已提交任务的 Session 镜像可独立补写；同步失败要留在服务日志中，不能静默消失。
   const mirrors = setInterval(() => { void (async () => {
     for (const id of await store.pendingSessions()) {
       const agent = await agentFor(id); await applicationFor(agent).mirror(agent)
     }
-  })().catch(() => {}) }, 2000)
+  })().catch(error => ctx.logger.warn('retrieval session mirror failed', error)) }, 2000)
   host.start()
   ctx.effect(() => async () => { clearInterval(mirrors); await host.close(); await store.close() })
 }

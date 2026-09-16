@@ -1,3 +1,4 @@
+import { packageManager } from './package-manager.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -21,15 +22,7 @@ async function collectRuntimePackage(name) {
 }
 await collectRuntimePackage('@retrieval-agent/bundle')
 const releaseEntries = contract.packages.filter(p => runtimePackages.has(p.name))
-const fallbackPnpmCli = process.platform === 'win32' && process.env.APPDATA !== undefined
-  ? join(process.env.APPDATA, 'npm', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
-  : undefined
-const pnpmCli = process.env.npm_execpath?.endsWith('.cjs') === true
-  ? process.env.npm_execpath
-  : fallbackPnpmCli !== undefined && existsSync(fallbackPnpmCli) ? fallbackPnpmCli : undefined
-const packageManager = pnpmCli !== undefined
-  ? { command: process.execPath, prefix: [pnpmCli] }
-  : { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', prefix: [] }
+const manager = packageManager()
 const pinnedDshVersion = '0.1.5-rc.2'
 const tempRoot = mkdtempSync(join(tmpdir(), 'retrieval-agent-clean-install-'))
 const browserReview = process.env.RETRIEVAL_AGENT_BROWSER_REVIEW === '1'
@@ -76,7 +69,7 @@ function run(command, args, options = {}) {
 }
 
 function pnpm(args, cwd) {
-  return run(packageManager.command, [...packageManager.prefix, ...args], { cwd })
+  return run(manager.command, [...manager.prefix, ...args], { cwd })
 }
 
 function fileSpec(path) {

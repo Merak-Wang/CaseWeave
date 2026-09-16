@@ -8,7 +8,7 @@ import { createUserMessage, type GenerateOptions, type TokenUsage } from '@deeps
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { RetrievalError, type ContextManifest, type OperatorDecision, type OperatorRecord,
   type RetrievalState, type SemanticQueryPlan, type TicketCandidateRef } from '@retrieval-agent/contracts'
-import { estimateContextTokens, operatorRecord, operatorRequiredFields, validateOperatorRecord } from '@retrieval-agent/domain'
+import { estimateContextTokens, operatorRecords, operatorRequiredFields, validateOperatorRecords } from '@retrieval-agent/domain'
 import { PythonOperatorBridge, type PythonOperatorRun } from './python-operator-bridge.js'
 import type { RetrievalAgentService } from './service.js'
 import { inputContextTokens } from './context-recovery.js'
@@ -24,7 +24,20 @@ const object = (value: unknown): Record<string, unknown> => {
   return value as Record<string, unknown>
 }
 
-/** Python owns semantics. This adapter only transports authorized data, DSH requests and admitted results. */
+// 按工单和片段各归并一次；聚合树中的重复来源不会引发反复全表过滤。
+function mergeOperatorRecords(rows: readonly OperatorRecord[]): OperatorRecord[] {
+  const records = new Map<string, OperatorRecord>()
+  const passages = new Map<string, Map<string, OperatorRecord['passages'][number]>>()
+  for (const row of rows) {
+    records.set(row.ref, row)
+    const grouped = passages.get(row.ref) ?? new Map()
+    for (const passage of row.passages) grouped.set(passage.id, passage)
+    passages.set(row.ref, grouped)
+  }
+  return [...records.values()].map(row => ({ ...row, passages: [...passages.get(row.ref)!.values()] }))
+}
+
+/** Python 执行语义算法；此适配器连接授权数据、DSH 模型请求与结果准入。 */
 export class SemanticOperators {
   readonly bridge: PythonOperatorBridge
   private readonly requests = new AsyncLocalStorage<ModelScope>()
@@ -50,10 +63,9 @@ export class SemanticOperators {
     const data = object(JSON.parse(user.at(-1)!))
     const collect = (v: unknown): OperatorRecord[] => Array.isArray(v) ? v.flatMap(collect) : v && typeof v === 'object'
       ? 'ref' in v && 'version' in v && 'content_hash' in v && 'passages' in v ? [v as OperatorRecord] : Object.values(v).flatMap(collect) : []
-    const supplied = collect(data)
-    for (const row of supplied) validateOperatorRecord(scope.state, row)
-    const rows = [...new Map(supplied.map(r => [r.ref, { ...r, passages: [...new Map(supplied.filter(s => s.ref === r.ref).flatMap(s => s.passages).map(p => [p.id, p])).values()] }])).values()]
-    const evidence = scope.state.promotedEvidence.filter(e => rows.some(r => r.passages.some(p => p.id === e.evidenceId)))
+    const rows = mergeOperatorRecords(collect(data))
+    const passageIds = new Set(rows.flatMap(r => r.passages.map(p => p.id)))
+    const evidence = scope.state.promotedEvidence.filter(e => passageIds.has(e.evidenceId))
     const serialized = JSON.stringify({ system: options.system, tools: options.tools, messages: options.messages })
     const tokens = estimateContextTokens(serialized)
     const knowledgeIds = scope.knowledge.entries.map(e => String(e.id))
@@ -100,11 +112,11 @@ export class SemanticOperators {
           if (source.origin === 'derived_summary') {
             const prior = await this.receipt(scope.state, String(source.source_manifest_id))
             if (prior.aggregateReceipt?.text !== source.text) throw new RetrievalError('PROTOCOL_MISMATCH', '聚合摘要与原始请求的输出来源不一致。')
-            for (const row of prior.aggregateReceipt.records) validateOperatorRecord(scope.state, row)
+            validateOperatorRecords(scope.state, prior.aggregateReceipt.records)
           } else {
             if (!Array.isArray(rows) || rows.length !== 1 || rows[0]!.passages.length !== 1 || rows[0]!.passages[0]!.text !== source.text
               || rows[0]!.passages[0]!.origin !== source.origin) throw new RetrievalError('PROTOCOL_MISMATCH', '聚合叶子文本与送达片段不一致。')
-            rows.forEach(row => validateOperatorRecord(scope.state, row))
+            validateOperatorRecords(scope.state, rows)
           }
         }
       }
@@ -133,8 +145,7 @@ export class SemanticOperators {
           if (source.records) rows.push(...source.records)
           else rows.push(...(await this.receipt(scope.state, source.source_manifest_id!)).aggregateReceipt.records)
         }
-        aggregateReceipt = { text: result.status === 'ok' ? result.text : '', records: [...new Map(rows.map(r => [r.ref,
-          { ...r, passages: [...new Map(rows.filter(s => s.ref === r.ref).flatMap(s => s.passages).map(p => [p.id, p])).values()] }])).values()] }
+        aggregateReceipt = { text: result.status === 'ok' ? result.text : '', records: mergeOperatorRecords(rows) }
       }
       return { payload, usage: usage ? { prompt_tokens: inputContextTokens(usage), completion_tokens: usage.outputTokens,
         cached_prompt_tokens: usage.cacheReadTokens ?? null } : {} }
@@ -155,7 +166,12 @@ export class SemanticOperators {
     return saved
   }
   private async modelCallback(agent: Agent, state: RetrievalState, knowledge: PythonOperatorRun['knowledge'], manifests: ContextManifest[], method: string, payload: unknown, signal?: AbortSignal) {
-    if (method === 'llm.generate') return this.model(agent, { state, knowledge, manifests, input: payload as ModelRequest }, signal)
+    if (method === 'llm.generate') {
+      const fresh: ContextManifest[] = []
+      const result = await this.model(agent, { state, knowledge, manifests: fresh, input: payload as ModelRequest }, signal)
+      manifests.push(...fresh)
+      return result
+    }
     if (method !== 'llm.reuse') throw new RetrievalError('INVALID_REQUEST', '未授权的模型回调。')
     const reuse = object(payload), input = reuse.request as ModelRequest, saved = await this.receipt(state, input.manifest_id)
     const config = this.config(agent)
@@ -166,7 +182,7 @@ export class SemanticOperators {
       throw new RetrievalError('PROTOCOL_MISMATCH', '缓存响应与本次实际请求不一致。')
     }
     for (const m of saved.manifests as ContextManifest[]) {
-      m.operator?.records.forEach(row => validateOperatorRecord(state, row))
+      if (m.operator) validateOperatorRecords(state, m.operator.records)
       if (!manifests.some(n => n.id === m.id)) manifests.push(m)
     }
     return { payload: saved.payload }
@@ -198,15 +214,9 @@ export class SemanticOperators {
       plan = { ...object(event.value), schemaVersion: 1, inputGeneration: state.inputGeneration ?? 0 } as unknown as SemanticQueryPlan
     }, signal)
     if (!plan) throw new RetrievalError('PROTOCOL_MISMATCH', '查询规划缺少结果。')
-    // Cached plans retain the original host receipt; a missing receipt requires a fresh model request.
-    for (const m of state.contextManifests ?? []) if (m.operator?.pythonManifestId === plan.manifest_id && !manifests.some(n => n.id === m.id)) manifests.push(m)
-    if (!manifests.length) {
-      if (!/^[a-f0-9-]{36}$/u.test(plan.manifest_id)) throw new RetrievalError('PROTOCOL_MISMATCH', '缓存模型请求身份无效。')
-      const saved = JSON.parse(await readFile(resolve(this.root, '.cache/semantic-operators/requests', `${plan.manifest_id}.json`), 'utf8'))
-      if (JSON.stringify(saved.taskScope) !== JSON.stringify([state.retrievalId, state.inputGeneration ?? 0, state.snapshot?.snapshotId, state.principalBindingHash])
-        || saved.failure) throw new RetrievalError('INVALID_TRANSITION', '缓存查询计划缺少同范围的已完成模型请求。')
-      manifests.push(...saved.manifests)
-    }
+    // 新调用和缓存命中都经 modelCallback 返回回执，不另开绕过该入口的恢复分支。
+    const manifestId = plan.manifest_id
+    if (!manifests.some(m => m.operator?.pythonManifestId === manifestId)) throw new RetrievalError('PROTOCOL_MISMATCH', '查询计划缺少实际模型请求。')
     return { plan, manifests: manifests.map(m => m.operator ? { ...m, operator: { ...m.operator, metrics } } : m) }
   }
   async ensurePlan(agent: Agent, signal?: AbortSignal): Promise<RetrievalState> {
@@ -245,62 +255,93 @@ export class SemanticOperators {
     await this.application.coordinator?.prepare(agent, signal)
     const state = await this.ensurePlan(agent, signal), generation = state.inputGeneration ?? 0
     const plan = state.query.contract!.semanticPlan!, knowledge = await this.knowledge(state)
-    const candidates = refs ? refs.map(ref => {
-      const c = state.candidates.find(c => c.ref === ref)
+    const requiredFields = operatorRequiredFields(plan)
+    const byRef = new Map(state.candidates.map(c => [c.ref, c]))
+    const known = new Set((state.judgments ?? []).filter(j => j.basis !== 'proxy' && j.verdict !== 'undetermined').map(j => j.candidateRef))
+    const candidates = (refs ? refs.map(ref => {
+      const c = byRef.get(ref)
       if (!c) throw new RetrievalError('CANDIDATE_NOT_FOUND', '算子输入不属于当前候选。')
       return c
-    }) : state.candidates
-    // The whole chosen candidate set is the algorithm's region. Only I/O and
-    // model packing are paged; no review-window truncation of that population.
+    }) : state.candidates).filter(c => !known.has(c.ref))
+    if (!candidates.length || (!refs && plan.goal.mode === 'examples' && state.selectedCandidateRefs.length >= plan.goal.count!)) return state
+    const batchSize = Math.min(this.application.reviewBatchSize, 8)
     const manifests: ContextManifest[] = []
-    const strongFeedback = (s: RetrievalState) => (s.judgments ?? []).filter(j => j.basis !== 'proxy'
-      && !manifests.some(m => m.id === j.operatorManifestId)).map(j => [j.candidateRef, j.verdict, j.evidenceRefs, j.operatorManifestId])
-    const feedbackVersion = hash(strongFeedback(state))
+    const feedbackValue = (j: NonNullable<RetrievalState['judgments']>[number]) => JSON.stringify([j.verdict, j.evidenceRefs, j.operatorManifestId])
+    const feedback = new Map((state.judgments ?? []).filter(j => j.basis !== 'proxy').map(j => [j.candidateRef, feedbackValue(j)]))
+    let checkedJudgments = state.judgments
     const current = async () => {
       signal?.throwIfAborted(); await this.application.loadTask(agent)
       const now = this.application.current(agent)
       if ((now.inputGeneration ?? 0) !== generation || now.retrievalId !== state.retrievalId || now.snapshot?.snapshotId !== state.snapshot?.snapshotId
         || now.principalBindingHash !== state.principalBindingHash || now.phase === 'stopped') throw new RetrievalError('INVALID_TRANSITION', '算子任务已变化，旧输出已拒收。')
-      if (hash(strongFeedback(now)) !== feedbackVersion) throw new RetrievalError('INVALID_TRANSITION', '强判断已更正，需使用当前反馈重新推断。')
+      if (now.judgments !== checkedJudgments) {
+        const strong = (now.judgments ?? []).filter(j => j.basis !== 'proxy')
+        if (strong.length !== feedback.size || strong.some(j => feedback.get(j.candidateRef) !== feedbackValue(j))) throw new RetrievalError('INVALID_TRANSITION', '强判断已更正，需使用当前反馈重新推断。')
+        checkedJudgments = now.judgments
+      }
       return now
+    }
+    let pending: OperatorDecision[] = []
+    const flush = async () => {
+      if (!pending.length) return
+      await current()
+      const result = await this.application.acceptOperatorResults(agent, generation, pending, signal)
+      const submitted = new Set(pending.map(d => d.ref))
+      for (const j of result.judgments ?? []) if (submitted.has(j.candidateRef) && j.basis !== 'proxy') feedback.set(j.candidateRef, feedbackValue(j))
+      pending = []
     }
     const metrics = await this.run(agent, this.runInput(agent, state, knowledge, 'sem_filter', JSON.stringify({ original: state.query.original,
       instruction: plan.instruction, user_feedback: state.userFeedback ?? [], rule: '原始请求和已确认补充优先，检索改写不是业务要求。' }),
-      { batch_size: Math.min(this.application.reviewBatchSize, 8), require_source: plan.steps.some(s => s.op === 'sem_filter' && s.params.require_source === true),
-        required_fields: operatorRequiredFields(plan), replay_saved: true,
+      { batch_size: batchSize, require_source: plan.steps.some(s => s.op === 'sem_filter' && s.params.require_source === true),
+        required_fields: requiredFields, replay_saved: true,
         host_labels: Object.fromEntries((state.judgments ?? []).filter(j => j.basis !== 'proxy').map(j =>
           [j.candidateRef, j.verdict === 'accept' ? 1 : j.verdict === 'exclude' ? 0 : -1])),
-        ...(!refs && plan.goal.mode === 'examples' ? { example_count: plan.goal.count } : {}) }),
+        ...(!refs && plan.goal.mode === 'examples' ? { example_count: plan.goal.count! - state.selectedCandidateRefs.length } : {}) }),
     async (method, payload) => {
-      const now = await current()
+      await flush()
+      let now = await current()
       if (method === 'rows.read') {
         const p = object(payload)
         if (p.handle !== 'current-candidates' || (p.cursor !== null && !/^\d+$/u.test(String(p.cursor)))) throw new RetrievalError('INVALID_REQUEST', '算子集合句柄或游标无效。')
-        const offset = p.cursor === null ? 0 : Number(p.cursor), size = Math.min(Number(p.page_size) || 128, 128)
+        const offset = p.cursor === null ? 0 : Number(p.cursor), size = batchSize
         const batch = candidates.slice(offset, offset + size)
-        const principal = await this.application.principal(agent, 'detail_read', signal)
-        const features = await this.ctx.ticketRetrievalProvider.readFeatures?.(principal,
-          { snapshotId: state.snapshot!.snapshotId, candidateRefs: batch.map(c => c.ref) }, signal ? { signal } : {}) ?? []
-        const page = batch.map(c => {
-          const row = operatorRecord(now, c), feature = features.find(f => f.ref === c.ref)
-          if (feature && (feature.content_hash !== c.contentHash || feature.version !== c.sourceVersion)) throw new RetrievalError('INVALID_TRANSITION', '已有向量不属于当前工单版本。')
-          return { ...row, ...(feature ? { vectors: feature.vectors, embedding_id: feature.embedding_id } : {}) }
-        })
-        page.forEach(row => validateOperatorRecord(now, row))
-        return { rows: page, next_cursor: offset + size < candidates.length ? String(offset + size) : null }
+        const reads = new Map<string, { fields: string[]; refs: TicketCandidateRef[] }>()
+        const rows = operatorRecords(now, batch)
+        for (const [i, c] of batch.entries()) {
+          const row = rows[i]!
+          const fields = [...new Set([...requiredFields, ...(row.attributes!.required_evidence_fields as string[])])]
+            .filter(f => !row.passages.some(p => p.field === f && p.origin === 'source' && p.text)
+              && now.snapshot!.fieldCatalog.some(field => field.key === f))
+          if (!fields.length) continue
+          const key = fields.sort().join('\n'), read = reads.get(key) ?? { fields, refs: [] }
+          read.refs.push(c.ref); reads.set(key, read)
+        }
+        if (reads.size) {
+          const principal = await this.application.principal(agent, 'evidence_read', signal)
+          for (const { fields, refs } of reads.values()) {
+            const result = await this.ctx.ticketRetrievalProvider.readEvidence(principal,
+              { snapshotId: state.snapshot!.snapshotId, candidateRefs: refs, fields, tokenBudget: 8000 }, signal ? { signal } : {})
+            if (result.evidence.length || result.rejectedCandidateRefs.length) now = await this.application.updateExpert(agent, generation, { kind: 'evidence', result })
+          }
+        }
+        return { rows: reads.size ? operatorRecords(now, batch) : rows, next_cursor: offset + size < candidates.length ? String(offset + size) : null }
       }
       if (method === 'llm.generate' || method === 'llm.reuse') {
+        const start = manifests.length
         const result = await this.modelCallback(agent, now, knowledge, manifests, method, payload, signal)
-        for (const m of manifests) await this.application.updateExpert(agent, generation, { kind: 'manifest', manifest: m })
+        for (const m of manifests.slice(start)) {
+          await this.application.updateExpert(agent, generation, { kind: 'manifest', manifest: m })
+        }
         return result
       }
       throw new RetrievalError('INVALID_REQUEST', '算子资源回调未授权。')
     }, async value => {
-      await current()
       const event = object(value)
       if (event.type !== 'decision') throw new RetrievalError('PROTOCOL_MISMATCH', '过滤算子返回了无效事件。')
-      await this.application.acceptOperatorResults(agent, generation, [event.value as OperatorDecision], signal)
+      pending.push(event.value as OperatorDecision)
+      if (pending.length >= batchSize) await flush()
     }, signal)
+    await flush()
     await this.application.recordOperatorUsage(agent, generation, metrics)
     return this.application.current(agent)
   }
@@ -336,12 +377,12 @@ export class SemanticOperators {
         : this.application.current(agent).lastPage?.nextCursor === p.cursor ? await this.application.continueRanking(agent, signal)
           : (() => { throw new RetrievalError('INVALID_TRANSITION', '搜索游标已失效。') })()
       if (found.phase === 'stopped') throw new RetrievalError('PROVIDER_UNAVAILABLE', found.stopExplanation ?? '搜索未完成。')
-      return { hits: (found.lastPage?.candidates ?? []).map(c => ({ record: operatorRecord(found, c), score: null })),
+      return { hits: operatorRecords(found, found.lastPage?.candidates ?? []).map(record => ({ record, score: null })),
         next_cursor: keyword ? found.lastPage?.nextCursor ?? null : null }
     }, async value => {
       const event = object(value)
       if (event.type !== 'candidate') throw new RetrievalError('PROTOCOL_MISMATCH', '搜索算子返回了无效事件。')
-      validateOperatorRecord(this.application.current(agent), event.record as OperatorRecord)
+      validateOperatorRecords(this.application.current(agent), [event.record as OperatorRecord])
     }, signal)
     return this.application.current(agent)
   }
@@ -351,11 +392,12 @@ export class SemanticOperators {
     await this.application.ensureModelAccess(agent, signal)
     const state = await this.ensurePlan(agent, signal), generation = state.inputGeneration ?? 0, knowledge = await this.knowledge(state)
     if (!refs.length || new Set(refs).size !== refs.length || !instruction.trim()) throw new RetrievalError('INVALID_REQUEST', '算子需要非空、去重的当前候选和指令。')
-    const rows = refs.map(ref => {
-      const candidate = state.candidates.find(c => c.ref === ref)
+    const candidates = new Map(state.candidates.map(c => [c.ref, c]))
+    const rows = operatorRecords(state, refs.map(ref => {
+      const candidate = candidates.get(ref)
       if (!candidate) throw new RetrievalError('CANDIDATE_NOT_FOUND', '算子引用不属于当前候选。')
-      return operatorRecord(state, candidate)
-    })
+      return candidate
+    }))
     const paired = (pairs ?? []).map(([left, right]) => {
       const l = rows.find(r => r.ref === left), r = rows.find(r => r.ref === right)
       if (!l || !r) throw new RetrievalError('INVALID_REQUEST', '连接候选对必须属于本次授权输入。')
@@ -363,11 +405,17 @@ export class SemanticOperators {
     })
     if (operation === 'sem_join' && !paired.length && typeof params.blocking_field !== 'string') throw new RetrievalError('INVALID_REQUEST', '语义连接需要明确候选对或 blocking_field。')
     const manifests: ContextManifest[] = [], events: unknown[] = []
+    let checkedCandidates = state.candidates, checkedEvidence = state.promotedEvidence
     const current = async () => {
       signal?.throwIfAborted(); await this.application.loadTask(agent)
       const now = this.application.current(agent)
       if ((now.inputGeneration ?? 0) !== generation || now.retrievalId !== state.retrievalId || now.phase === 'stopped') throw new RetrievalError('INVALID_TRANSITION', '算子输入已过期。')
-      rows.forEach(row => validateOperatorRecord(now, row)); return now
+      // 计量、活动和回执更新不改变来源；仅在实际候选或正文变化后重新核验输入。
+      if (now.candidates !== checkedCandidates || now.promotedEvidence !== checkedEvidence) {
+        validateOperatorRecords(now, rows)
+        checkedCandidates = now.candidates; checkedEvidence = now.promotedEvidence
+      }
+      return now
     }
     const metrics = await this.run(agent, this.runInput(agent, state, knowledge, operation,
       JSON.stringify({ original: state.query.original, predicate: state.query.contract!.semanticPlan!.instruction,
@@ -379,8 +427,9 @@ export class SemanticOperators {
         const offset = p.cursor === null ? 0 : Number(p.cursor), source = method === 'rows.read' ? rows : paired, size = this.application.reviewBatchSize
         return { [method === 'rows.read' ? 'rows' : 'pairs']: source.slice(offset, offset + size), next_cursor: offset + size < source.length ? String(offset + size) : null }
       }
+      const start = manifests.length
       const reply = await this.modelCallback(agent, now, knowledge, manifests, method, payload, signal)
-      for (const m of manifests) await this.application.updateExpert(agent, generation, { kind: 'manifest', manifest: m })
+      for (const m of manifests.slice(start)) await this.application.updateExpert(agent, generation, { kind: 'manifest', manifest: m })
       return reply
     }, async value => {
       await current()

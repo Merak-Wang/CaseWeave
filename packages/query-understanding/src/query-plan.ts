@@ -6,9 +6,6 @@ export function hasDisjunction(expression: QueryExpression): boolean {
   return expression.kind === 'or' || expression.kind === 'and' && expression.children.some(hasDisjunction)
     || expression.kind === 'not' && hasDisjunction(expression.child)
 }
-export interface QueryPlanParser {
-  parse(input: { readonly query: string; readonly now: Date; readonly timeZone: string; readonly fields: readonly QueryFieldCapability[] }, signal?: AbortSignal): Promise<QueryPlan>
-}
 const FALSE: QueryExpression = { kind: 'constant', value: false }
 export const DEFAULT_QUERY_FIELDS: readonly QueryFieldCapability[] = [
   ...['displayId', 'region', 'status', 'product', 'component', 'type', 'category', 'priority', 'language', 'createdAt', 'updatedAt', 'resolvedAt', 'errorCodes'].map(key => ({

@@ -6,8 +6,6 @@ import type {
   TicketQueryEntity,
   TicketQueryLogic,
   TicketRetrievalRequest,
-  QueryPlan,
-  QueryFieldCapability,
 } from '@retrieval-agent/contracts'
 import {
   QUERY_ANALYSIS_PROTOCOL_VERSION,
@@ -16,7 +14,6 @@ import {
 } from './protocol.js'
 import { compileUserConditions, explicitUserCount } from './conditions.js'
 import { compileQueryPlan, hasDisjunction } from './query-plan.js'
-import type { QueryPlanParser } from './query-plan.js'
 export * from './query-plan.js'
 
 export * from './protocol.js'
@@ -407,23 +404,4 @@ export async function buildFastTicketRequest(
   }
 }
 
-/** New parser port accepts no engine-specific token, POS or dependency vocabulary. */
-export async function buildPlannedTicketRequest(query: string, parser: QueryPlanParser, options: {
-  readonly now: Date; readonly timeZone: string; readonly fields: readonly QueryFieldCapability[]; readonly signal?: AbortSignal
-}): Promise<TicketRetrievalRequest> {
-  const plan: QueryPlan = await parser.parse({ query, now: options.now, timeZone: options.timeZone, fields: options.fields }, options.signal)
-  const result = compileUserResultPolicy(query); const countPolicy = result?.countPolicy ?? 'adaptive'; const target = taskTarget(query)
-  const terms = [...new Set(plan.requirements.filter(r => r.kind === 'keyword').map(r => r.span.text))].slice(0, 8)
-  const fastQuery: TicketFastQueryPlan = { schemaVersion: 2, source: 'direct_user', rewriteApplied: false,
-    ...(terms.length ? { keyword: { terms, operator: hasDisjunction(plan.keyword) ? 'or' as const : 'and' as const } } : {}), vector: { text: query } }
-  const ambiguities = plan.requirements.filter(r => r.status === 'unresolved').map(r => ({ kind: 'constraint' as const, text: `${r.span.text}：${r.interpretation}` }))
-  const contract: TicketQueryContract = { schemaVersion: 9, queryPlan: plan, original: query, normalized: query.normalize('NFKC').trim(), task: target,
-    resultPolicy: countPolicy === 'explicit' ? 'explicit_top_k' : countPolicy === 'exhaustive' ? 'exhaustive_current_snapshot' : 'adaptive_top_k',
-    ...(result?.requestedCount ? { resultLimit: result.requestedCount } : {}), domain: 'telecom_ticket', language: /\p{Script=Han}/u.test(query) ? 'zh' : 'en',
-    entities: keywordEntities(terms), constraints: [], userRequirements: plan.requirements.filter(r => r.kind === 'hard').map(r => ({ text: r.span.text,
-      status: r.status === 'compiled' ? 'compiled' as const : 'unresolved' as const, filters: [], ...(r.status === 'compiled' ? {} : { reason: r.interpretation }) })),
-    ambiguities, fastQuery, compilerVersion: plan.parserVersion }
-  return { target, query, retrievalQuery: contract.normalized, countPolicy, ...(result?.requestedCount ? { requestedCount: result.requestedCount } : {}),
-    filters: [], ambiguities, fastQuery, queryContract: contract }
-}
 export { buildSemanticTicketRequest } from './semantic-request.js'

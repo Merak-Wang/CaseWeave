@@ -32,9 +32,6 @@ importers:
       '@retrieval-agent/provider-local':
         specifier: workspace:*
         version: link:packages/provider-local
-      '@retrieval-agent/provider-streamcluster':
-        specifier: workspace:*
-        version: link:packages/provider-streamcluster
       '@retrieval-agent/query-understanding':
         specifier: workspace:*
         version: link:packages/query-understanding
@@ -171,9 +168,6 @@ importers:
       '@retrieval-agent/provider-local':
         specifier: workspace:*
         version: link:../provider-local
-      '@retrieval-agent/provider-streamcluster':
-        specifier: workspace:*
-        version: link:../provider-streamcluster
       '@retrieval-agent/query-understanding':
         specifier: workspace:*
         version: link:../query-understanding
@@ -334,12 +328,6 @@ importers:
       '@retrieval-agent/model-service-client':
         specifier: workspace:*
         version: link:../model-service-client
-
-  packages/provider-streamcluster:
-    dependencies:
-      '@retrieval-agent/contracts':
-        specifier: workspace:*
-        version: link:../contracts
 
   packages/query-understanding:
     dependencies:

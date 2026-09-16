@@ -50,21 +50,24 @@ class Bridge:
             # 成功、失败或取消都移除挂起项，防止长任务累计无效 Future。
             self.pending.pop(ident, None)
 
-    async def row_source(self, job: str, handle: str, scope: Scope, page_size=128):
+    async def pages(self, job: str, method: str, scope: Scope, payload: dict):
         cursor = None
         visited = set()
-        # 按宿主游标逐页拉取，不把完整来源一次性搬入 Python 内存。
+        # 行、检索命中和连接对共用逐页读取；游标回环只在这个传输边界检查。
         while True:
             await scope.check()
-            page = await self.exchange(job, "rows.read", {"handle": handle, "cursor": cursor, "page_size": page_size})
-            for row in page["rows"]:
-                yield Record.from_dict(row)
+            page = await self.exchange(job, method, {**payload, "cursor": cursor})
+            yield page
             next_cursor = page.get("next_cursor")
             if next_cursor is None: break
-            # 游标必须单调前进；停滞或回环会被视为 Provider 协议错误。
-            if next_cursor == cursor or next_cursor in visited: raise ValueError("Provider cursor made no progress")
+            if next_cursor in visited: raise ValueError("Provider cursor made no progress")
             visited.add(next_cursor)
             cursor = next_cursor
+
+    async def row_source(self, job: str, handle: str, scope: Scope, page_size=128):
+        async for page in self.pages(job, "rows.read", scope, {"handle": handle, "page_size": page_size}):
+            for row in page["rows"]:
+                yield Record.from_dict(row)
 
     async def execute(self, value: dict[str, Any], scope: Scope):
         job = value["job"]
@@ -88,19 +91,9 @@ class Bridge:
             elif op == "sem_search":
                 class HostSearch:
                     async def _pages(self, kind, args):
-                        cursor = None
-                        visited = set()
-                        # 搜索通道同样逐页回调，并拒绝重复游标造成无限循环。
-                        while True:
-                            await scope.check()
-                            p = await bridge.exchange(job, "search."+kind, {**args, "cursor": cursor})
+                        async for p in bridge.pages(job, "search."+kind, scope, args):
                             for row in p["hits"]:
                                 yield Hit(Record.from_dict(row["record"]), kind, row.get("score"))
-                            next_cursor = p.get("next_cursor")
-                            if next_cursor is None: break
-                            if next_cursor == cursor or next_cursor in visited: raise ValueError("Search cursor made no progress")
-                            visited.add(next_cursor)
-                            cursor = next_cursor
                     def semantic(self, vectors, embedding_id, k):
                         return self._pages("vector", {"vectors": vectors, "embedding_id": embedding_id, "k": k})
                     def lexical(self, keywords): return self._pages("keyword", {"keywords": keywords})
@@ -109,18 +102,8 @@ class Bridge:
                     self.send({"type": "result", "job": job, "value": {"type": "candidate", "record": hit.record.model_payload(), "channel": hit.channel, "score": hit.score}})
             elif op == "sem_join":
                 async def pairs():
-                    cursor = None
-                    visited = set()
-                    # 连接候选对由宿主分页面提供，Python 不掌握也不扩大全局数据权限。
-                    while True:
-                        await scope.check()
-                        page = await self.exchange(job, "pairs.read", {"handle": value["source_handle"], "cursor": cursor})
+                    async for page in self.pages(job, "pairs.read", scope, {"handle": value["source_handle"]}):
                         for pair in page["pairs"]: yield Record.from_dict(pair["left"]), Record.from_dict(pair["right"])
-                        next_cursor = page.get("next_cursor")
-                        if next_cursor is None: break
-                        if next_cursor == cursor or next_cursor in visited: raise ValueError("Pair cursor made no progress")
-                        visited.add(next_cursor)
-                        cursor = next_cursor
                 async def blocked():
                     field = params["blocking_field"]
                     def keys(row): return [p.text.strip().casefold() for p in row.passages if p.field == field and p.text.strip()]

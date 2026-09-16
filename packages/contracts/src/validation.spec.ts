@@ -22,7 +22,17 @@ describe('ticket filter runtime validation', () => {
 })
 
 describe('ticket result-count validation', () => {
-  it('rejects a result limit on an exhaustive legacy contract', () => {
+  it('rejects retired query contracts at the new-request boundary', () => {
+    expect(() => assertTicketRetrievalRequest({
+      target: 'ranked_cases', query: '主卡', countPolicy: 'explicit', requestedCount: 5,
+      queryContract: {
+        schemaVersion: 1, original: '主卡', normalized: '主卡', task: 'ranked_cases',
+        resultPolicy: 'explicit_top_k', maxResults: 5, domain: 'telecom_ticket', language: 'zh',
+        entities: [], constraints: [], ambiguities: [], compilerVersion: 'retired-v1',
+      },
+    })).toThrow(/Query Contract/u)
+  })
+  it('rejects a result limit on an exhaustive current contract', () => {
     expect(() => assertTicketRetrievalRequest({
       target: 'cohort_collection',
       query: '主卡工单',
@@ -34,12 +44,13 @@ describe('ticket result-count validation', () => {
         vector: { text: '主卡工单' },
       },
       queryContract: {
-        schemaVersion: 5,
+        schemaVersion: 8,
+        userRequirements: [],
         original: '主卡工单',
         normalized: '主卡工单',
         task: 'cohort_collection',
         resultPolicy: 'exhaustive_current_snapshot',
-        maxResults: 20,
+        resultLimit: 20,
         domain: 'telecom_ticket',
         language: 'zh',
         entities: [],
@@ -50,7 +61,7 @@ describe('ticket result-count validation', () => {
     })).toThrow(/Query Contract/u)
   })
 
-  it('accepts exhaustive v7 only when every user-level result limit is absent', () => {
+  it('accepts exhaustive v8 only when every user-level result limit is absent', () => {
     expect(() => assertTicketRetrievalRequest({
       target: 'ranked_cases',
       query: '主卡工单',
@@ -63,7 +74,7 @@ describe('ticket result-count validation', () => {
         vector: { text: '主卡工单' },
       },
       queryContract: {
-        schemaVersion: 7,
+        schemaVersion: 8, userRequirements: [],
         original: '主卡工单',
         normalized: '主卡工单',
         task: 'ranked_cases',
@@ -79,18 +90,7 @@ describe('ticket result-count validation', () => {
           keyword: { terms: ['主卡工单'], operator: 'and' },
           vector: { text: '主卡工单' },
         },
-        nlp: {
-          schemaVersion: 2,
-          engine: 'spacy',
-          engineVersion: 'test',
-          pipeline: 'test',
-          pipelineVersion: 'test',
-          lexiconVersion: 'test',
-          keywordTerms: ['主卡工单'],
-          tokens: [{ surface: '主卡工单', start: 0, end: 4, lemma: '', pos: 'NOUN', tag: 'NN', dep: 'ROOT', head: 0, isStop: false, entityType: '' }],
-          entities: [],
-          triples: [],
-        },
+
         ambiguities: [],
         compilerVersion: 'current-test',
       },
@@ -101,24 +101,18 @@ describe('ticket result-count validation', () => {
     expect(() => assertTicketRetrievalRequest({
       target: 'cohort_collection', query: '列出主卡工单', countPolicy: 'adaptive',
       queryContract: {
-        schemaVersion: 7, original: '列出主卡工单', normalized: '列出主卡工单', task: 'cohort_collection',
+        schemaVersion: 8, userRequirements: [], original: '列出主卡工单', normalized: '列出主卡工单', task: 'cohort_collection',
         resultPolicy: 'adaptive_top_k', domain: 'telecom_ticket', language: 'zh', entities: [], constraints: [],
-        nlp: {
-          schemaVersion: 2, engine: 'spacy', engineVersion: 'test', pipeline: 'test', pipelineVersion: 'test',
-          lexiconVersion: 'test', keywordTerms: [], tokens: [], entities: [], triples: [],
-        },
+
         ambiguities: [], compilerVersion: 'current-test',
       },
     })).not.toThrow()
     expect(() => assertTicketRetrievalRequest({
       target: 'ranked_cases', query: '查找所有主卡工单', countPolicy: 'exhaustive',
       queryContract: {
-        schemaVersion: 7, original: '查找所有主卡工单', normalized: '查找所有主卡工单', task: 'ranked_cases',
+        schemaVersion: 8, userRequirements: [], original: '查找所有主卡工单', normalized: '查找所有主卡工单', task: 'ranked_cases',
         resultPolicy: 'exhaustive_current_snapshot', domain: 'telecom_ticket', language: 'zh', entities: [], constraints: [],
-        nlp: {
-          schemaVersion: 2, engine: 'spacy', engineVersion: 'test', pipeline: 'test', pipelineVersion: 'test',
-          lexiconVersion: 'test', keywordTerms: [], tokens: [], entities: [], triples: [],
-        },
+
         ambiguities: [], compilerVersion: 'current-test',
       },
     })).not.toThrow()

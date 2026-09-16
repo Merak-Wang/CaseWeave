@@ -1,33 +1,11 @@
+import { ProductApiClientError, isRecord, postProductApi } from './http-client.js'
 import type { TicketCandidateRef, TicketDetail, TicketEvidenceField } from '@retrieval-agent/contracts'
 import {
   READ_TICKET_DETAIL_ENDPOINT,
-  type ReadTicketDetailErrorResponse,
   type ReadTicketDetailResponse,
 } from './protocol.js'
 
-export class TicketDetailClientError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly retryable: boolean,
-    readonly status?: number,
-    options: { readonly cause?: unknown } = {},
-  ) {
-    super(message, options.cause === undefined ? undefined : { cause: options.cause })
-    this.name = 'TicketDetailClientError'
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function isErrorResponse(value: unknown): value is ReadTicketDetailErrorResponse {
-  return isRecord(value)
-    && typeof value.code === 'string'
-    && typeof value.message === 'string'
-    && typeof value.retryable === 'boolean'
-}
+export class TicketDetailClientError extends ProductApiClientError {}
 
 function isDetailResponse(value: unknown): value is ReadTicketDetailResponse {
   return isRecord(value)
@@ -43,46 +21,15 @@ export async function readTicketDetail(
   candidateRef: TicketCandidateRef,
   fields: readonly TicketEvidenceField[],
 ): Promise<TicketDetail> {
-  let response: Response
-  try {
-    response = await fetch(READ_TICKET_DETAIL_ENDPOINT, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId, retrievalId, candidateRefs: [candidateRef], fields }),
-    })
-  } catch (cause) {
-    throw new TicketDetailClientError('NETWORK_UNAVAILABLE', '无法连接工单详情服务。', true, undefined, { cause })
-  }
-  let payload: unknown
-  try {
-    payload = await response.json()
-  } catch (cause) {
-    throw new TicketDetailClientError(
-      'INVALID_RESPONSE',
-      `工单详情服务返回了无法解析的响应（HTTP ${response.status}）。`,
-      response.status >= 500,
-      response.status,
-      { cause },
-    )
-  }
-  if (!response.ok) {
-    if (isErrorResponse(payload)) {
-      throw new TicketDetailClientError(payload.code, payload.message, payload.retryable, response.status)
-    }
-    throw new TicketDetailClientError(
-      `HTTP_${response.status}`,
-      `工单详情请求失败（HTTP ${response.status}）。`,
-      response.status >= 500,
-      response.status,
-    )
-  }
+  const { payload, status } = await postProductApi<ReadTicketDetailResponse>(
+    READ_TICKET_DETAIL_ENDPOINT, { sessionId, retrievalId, candidateRefs: [candidateRef], fields }, '工单详情', TicketDetailClientError,
+  )
   if (!isDetailResponse(payload)) {
-    throw new TicketDetailClientError('INVALID_RESPONSE', '工单详情服务返回的数据格式无效。', false, response.status)
+    throw new TicketDetailClientError('INVALID_RESPONSE', '工单详情服务返回的数据格式无效。', false, status)
   }
   const detail = payload.details.find(item => item.candidateRef === candidateRef)
   if (detail === undefined || payload.rejectedCandidateRefs.length > 0) {
-    throw new TicketDetailClientError('UNAUTHORIZED', '当前工单详情不可访问，请重新检索。', false, response.status)
+    throw new TicketDetailClientError('UNAUTHORIZED', '当前工单详情不可访问，请重新检索。', false, status)
   }
   return detail
 }

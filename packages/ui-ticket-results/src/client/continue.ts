@@ -1,33 +1,11 @@
+import { ProductApiClientError, isRecord, postProductApi } from '@retrieval-agent/product-api/http-client'
 import type { RetrievalId } from '@retrieval-agent/contracts'
 import {
   CONTINUE_RETRIEVAL_ENDPOINT,
-  type ContinueRetrievalErrorResponse,
   type ContinueRetrievalResponse,
 } from '@retrieval-agent/product-api/protocol'
 
-export class ContinueRetrievalClientError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly retryable: boolean,
-    readonly status?: number,
-    options: { readonly cause?: unknown } = {},
-  ) {
-    super(message, options.cause === undefined ? undefined : { cause: options.cause })
-    this.name = 'ContinueRetrievalClientError'
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function isErrorResponse(value: unknown): value is ContinueRetrievalErrorResponse {
-  return isRecord(value)
-    && typeof value.code === 'string'
-    && typeof value.message === 'string'
-    && typeof value.retryable === 'boolean'
-}
+export class ContinueRetrievalClientError extends ProductApiClientError {}
 
 function isContinueResponse(value: unknown): value is ContinueRetrievalResponse {
   return isRecord(value)
@@ -40,36 +18,11 @@ export async function continueRetrieval(
   sessionId: string,
   retrievalId: RetrievalId,
 ): Promise<ContinueRetrievalResponse> {
-  let response: Response
-  try {
-    response = await fetch(CONTINUE_RETRIEVAL_ENDPOINT, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId, retrievalId }),
-    })
-  } catch (cause) {
-    throw new ContinueRetrievalClientError('NETWORK_UNAVAILABLE', '无法连接继续检索服务。', true, undefined, { cause })
-  }
-  let payload: unknown
-  try {
-    payload = await response.json()
-  } catch (cause) {
-    throw new ContinueRetrievalClientError(
-      'INVALID_RESPONSE', `继续检索服务返回了无法解析的响应（HTTP ${response.status}）。`,
-      response.status >= 500, response.status, { cause },
-    )
-  }
-  if (!response.ok) {
-    if (isErrorResponse(payload)) {
-      throw new ContinueRetrievalClientError(payload.code, payload.message, payload.retryable, response.status)
-    }
-    throw new ContinueRetrievalClientError(
-      `HTTP_${response.status}`, `继续检索请求失败（HTTP ${response.status}）。`, response.status >= 500, response.status,
-    )
-  }
+  const { payload, status } = await postProductApi<ContinueRetrievalResponse>(
+    CONTINUE_RETRIEVAL_ENDPOINT, { sessionId, retrievalId }, '继续检索', ContinueRetrievalClientError,
+  )
   if (!isContinueResponse(payload) || payload.retrievalId !== retrievalId) {
-    throw new ContinueRetrievalClientError('INVALID_RESPONSE', '继续检索服务返回的数据格式无效。', false, response.status)
+    throw new ContinueRetrievalClientError('INVALID_RESPONSE', '继续检索服务返回的数据格式无效。', false, status)
   }
   return payload
 }

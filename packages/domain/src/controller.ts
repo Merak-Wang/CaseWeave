@@ -40,7 +40,7 @@ import { modelRequestBudget, modelResponseBudget, toolCallBudget } from './runti
 import { advanceRetrievalState, recordMeasuredBudget, recordRetrievalState, retrievalStateId } from './state-transition.js'
 import { planExperts, findingPatch, type ExpertUpdate } from './experts.js'
 import { updateCandidateRanking } from './policy.js'
-import { admitOperatorDecisions, semanticPlanPatch, validateOperatorRecord, validateOperatorArtifact } from './semantic-operators.js'
+import { admitOperatorDecisions, semanticPlanPatch, validateOperatorRecords, validateOperatorArtifact } from './semantic-operators.js'
 import type { SemanticQueryPlan, ContextManifest, OperatorDecision } from '@retrieval-agent/contracts'
 
 function frozenCandidate(candidate: TicketCandidate, evidence: readonly TicketEvidenceSegment[]): FrozenEvidencePack['candidates'][number] {
@@ -779,11 +779,11 @@ export class RetrievalController {
       }
       case 'manifest': {
         const m = update.manifest
+        if (state.contextManifests?.some(item => item.id === m.id)) return state
         if (m.inputGeneration !== generation || (m.roleId !== 'main' && !(m.roleId.startsWith('operator:') && m.operator) && !state.expertTasks?.some(t => t.id === m.roleId))
           || m.candidateRefs.some(ref => !state.candidates.some(c => c.ref === ref))
           || m.evidenceIds.some(id => !state.promotedEvidence.some(e => e.evidenceId === id))) throw new RetrievalError('INVALID_REQUEST', '专家上下文引用越界。')
-        for (const row of m.operator?.records ?? []) validateOperatorRecord(state, row)
-        if (state.contextManifests?.some(item => item.id === m.id)) return state
+        if (m.operator) validateOperatorRecords(state, m.operator.records)
         return this.#record(state, { contextManifests: [...(state.contextManifests ?? []), m],
           measurementStateIds: [...(state.measurementStateIds ?? []), state.stateId] })
       }

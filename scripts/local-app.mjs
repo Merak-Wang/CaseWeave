@@ -1,3 +1,4 @@
+import { packageManager } from './package-manager.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -30,17 +31,6 @@ export function normalizedRerankerFlag(value) {
   return enabled(value) ? 'true' : 'false'
 }
 
-function packageManager() {
-  const fallbackPnpmCli = process.platform === 'win32' && process.env.APPDATA !== undefined
-    ? join(process.env.APPDATA, 'npm', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
-    : undefined
-  const pnpmCli = process.env.npm_execpath?.endsWith('.cjs') === true
-    ? process.env.npm_execpath
-    : fallbackPnpmCli !== undefined && existsSync(fallbackPnpmCli) ? fallbackPnpmCli : undefined
-  return pnpmCli === undefined
-    ? { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', prefix: [] }
-    : { command: process.execPath, prefix: [pnpmCli] }
-}
 
 function run(command, args, options = {}) {
   return execFileSync(command, args, {

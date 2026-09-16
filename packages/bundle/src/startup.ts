@@ -54,10 +54,6 @@ export function bundledPresetPath(): string {
   return resolve(bundledPresetRoot(), 'retrieval-agent')
 }
 
-export function bundledFixturePath(): string {
-  return bundledDefaultTicketPaths()[0]!
-}
-
 export function bundledFixtureRoot(requestedDataRoot?: string): string {
   if (requestedDataRoot !== undefined) {
     const explicitDataRoot = resolve(requestedDataRoot)

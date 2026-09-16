@@ -56,7 +56,7 @@ async def run_case(kind, n, seed, variant):
                 'knowledge_ids': [], 'reason': 'Explicit synthetic oracle; not business evidence.'} for r in payload['records']]})
     store = ArtifactStore()
     rt = Runtime(Scope('benchmark', 1, 'synthetic', 'fixture-owner'), Oracle(), store, Knowledge('empty'), use_cache=False)
-    params = {'algorithm': 'reference' if variant in {'full', 'batch_sort'} else 'csv' if variant == 'csv' else 'cluster',
+    params = {'algorithm': 'reference' if variant in {'full', 'batch_sort'} else 'csv' if variant == 'csv' else 'auto' if variant == 'auto' else 'cluster',
               'batch_size': 8, 'options': {'seed': seed}}
     # Exact 0.3.0 sort+online-feedback path. Keep its computation in the measurement.
     if variant == 'batch_sort': params.update(queries=[rows[0].vectors[0]], embedding_id='synthetic-space')
@@ -105,7 +105,7 @@ async def main():
     parser.add_argument('--size', type=int, default=1024)
     parser.add_argument('--seeds', default='0,7,19')
     parser.add_argument('--cases', default='separable,mixed,identical,rare,multimodal,unknown')
-    parser.add_argument('--variants', default='full,batch_sort,csv,checked,checked_1pct_experiment,linear_1pct_experiment')
+    parser.add_argument('--variants', default='full,auto,batch_sort,csv,checked,checked_1pct_experiment,linear_1pct_experiment')
     args = parser.parse_args()
     report = {'evidence': 'synthetic vectors and deterministic scripted oracle; NOT actual models, databases, or business Gold',
               'environment': {'numpy': np.__version__, 'scipy': scipy.__version__, 'sklearn': sklearn.__version__},

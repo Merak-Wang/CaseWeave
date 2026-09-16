@@ -115,8 +115,8 @@ def test_gate_only_frozen_members_and_scorer(make_runtime):
     assert gate.apply(row,replace(s,scorer_id="changed"),key) is None
 
 
-def test_no_gate_means_no_automatic_knn_labels(make_runtime):
+def test_reference_scorer_without_gate_never_replaces_model_labels(make_runtime):
     rt=make_runtime(); fb=FeedbackSet(rt.predicate_key("x"))
     scorer=MultiViewScorer([[1,0]],"synthetic-test-space",[],fb)
-    out=asyncio.run(collect(sem_filter(rt,source([record(str(i)) for i in range(6)]),"x",scorer=scorer,feedback=fb,batch_size=2)))
+    out=asyncio.run(collect(sem_filter(rt,source([record(str(i)) for i in range(6)]),"x",algorithm="reference",scorer=scorer,feedback=fb,batch_size=2)))
     assert all(o.basis=="model" for o in out) and rt.model.calls==3

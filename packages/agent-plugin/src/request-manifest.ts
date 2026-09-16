@@ -8,19 +8,20 @@ export function requestManifest(state: RetrievalState, options: GenerateOptions,
     : v && typeof v === 'object' ? Object.values(v).flatMap(strings) : []
   // Message source/section metadata is for DSH replay and UI, not provider-visible content.
   const text = options.messages.flatMap(m => strings(m.content)).join('\n')
+  const currentRefs = new Set(state.candidates.map(c => c.ref))
   const parse = (tag: string): Record<string, unknown>[] => [...text.matchAll(new RegExp(`<${tag}>(.*?)</${tag}>`, 'gs'))].flatMap(m => {
     try { return [JSON.parse(m[1]!) as Record<string, unknown>] } catch { return [] }
   })
   const candidates = parse('untrusted_ticket_candidate').flatMap(value => {
     const match = /^c([1-9]\d*)$/u.exec(String(value.alias))
     const candidate = match ? state.candidateHistory[Number(match[1]) - 1] : undefined
-    return candidate && state.candidates.some(c => c.ref === candidate.ref) && candidate.title === value.title && candidate.summary === value.summary ? [candidate.ref] : []
+    return candidate && currentRefs.has(candidate.ref) && candidate.title === value.title && candidate.summary === value.summary ? [candidate.ref] : []
   })
   const evidence = parse('untrusted_ticket_evidence').flatMap(value => {
     const match = /^e([1-9]\d*)$/u.exec(String(value.alias))
     const item = match ? state.promotedEvidence[Number(match[1]) - 1] : undefined
     return item && item.text === value.text && item.field === value.field && item.start === value.start && item.end === value.end
-      && state.candidates.some(c => c.ref === item.candidateRef) ? [item] : []
+      && currentRefs.has(item.candidateRef) ? [item] : []
   })
   const knowledge = parse('untrusted_retrieval_knowledge').flatMap(block => Array.isArray(block.entries) ? block.entries : [])
   const task = state.expertTasks?.find(t => t.id === roleId)

@@ -1,3 +1,4 @@
+import type { ModelRequestMeasurement, ModelResponseMeasurement } from '@retrieval-agent/domain'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -326,16 +327,8 @@ export class RetrievalAgentService extends Service {
    * Measured model steps and wall-clock time never gate admission; only a real
    * context-window overflow rejects, since that request cannot be served at all.
    */
-  async admitModelRequest(agent: Agent, input: {
-    readonly compression?: import('@retrieval-agent/contracts').ContextCompressionStats
-    readonly compactionCount?: number
-    readonly outputReservedTokens?: number
-    readonly protocolMarginTokens?: number
-    readonly estimatedInputTokens: number
-    readonly serializationBytes: number
-    readonly wallClockElapsedMs: number
-    readonly modelContextWindow?: number
-  }): Promise<{ readonly accepted: boolean }> {
+  async admitModelRequest(agent: Agent, input: Omit<ModelRequestMeasurement,
+    'accepted' | 'deploymentContextLimit' | 'effectiveContextLimit' | 'rejectionReason'>): Promise<{ readonly accepted: boolean }> {
     const entry = this.entry(agent)
     let accepted = false
     await this.mutate(entry, async current => {
@@ -362,12 +355,7 @@ export class RetrievalAgentService extends Service {
     return { accepted }
   }
 
-  async recordModelResponse(agent: Agent, input: {
-    readonly inputTokens?: number
-    readonly modelLatencyMs: number
-    readonly outputTokens: number
-    readonly wallClockElapsedMs: number
-  }): Promise<RetrievalState> {
+  async recordModelResponse(agent: Agent, input: ModelResponseMeasurement): Promise<RetrievalState> {
     const entry = this.entry(agent)
     return await this.mutate(entry, async state => entry.controller.recordModelResponse(state, input))
   }
@@ -377,7 +365,7 @@ export class RetrievalAgentService extends Service {
     return await this.mutate(entry, async state => entry.controller.recordToolCall(state, input))
   }
 
-  async principal(agent: Agent, operation: 'detail_read' | 'export' | 'snapshot_open', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
+  async principal(agent: Agent, operation: 'detail_read' | 'evidence_read' | 'export' | 'snapshot_open', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
     return await this.resolvePrincipal(agent, operation, signal)
   }
 

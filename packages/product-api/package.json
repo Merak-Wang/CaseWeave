@@ -26,6 +26,10 @@
     "./detail-client": {
       "types": "./lib/detail-client.d.ts",
       "default": "./lib/detail-client.js"
+    },
+    "./http-client": {
+      "types": "./lib/http-client.d.ts",
+      "default": "./lib/http-client.js"
     }
   },
   "files": [

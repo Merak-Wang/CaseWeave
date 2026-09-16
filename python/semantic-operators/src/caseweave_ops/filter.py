@@ -40,6 +40,24 @@ def unknown(record: Record, key: str, why: str, manifest: str | None = None) -> 
 
 async def judge_batch(runtime: Runtime, records: list[Record], instruction: str,
                       *, require_source: bool = True, required_fields: tuple[str, ...] = (), use_cache: bool | None = None) -> list[Decision]:
+    """Only ask the model about rows whose required evidence is available."""
+    key = runtime.predicate_key(instruction)
+    ready, missing = [], {}
+    for row in records:
+        source_fields = {p.field for p in row.passages if p.origin == 'source' and p.text and p.field != 'displayId'}
+        absent = set((*required_fields, *row.attributes.get('required_evidence_fields', []))) - source_fields
+        if absent or (require_source and not source_fields):
+            missing[row.ref] = unknown(row, key, '需要读取原文字段：' + ', '.join(sorted(absent)) if absent else '需要读取原文依据')
+        else:
+            ready.append(row)
+    judged = await _judge_ready(runtime, ready, instruction, require_source=require_source,
+                                required_fields=required_fields, use_cache=use_cache)
+    by_ref = {**missing, **{d.ref: d for d in judged}}
+    return [by_ref[row.ref] for row in records]
+
+
+async def _judge_ready(runtime: Runtime, records: list[Record], instruction: str,
+                       *, require_source: bool, required_fields: tuple[str, ...], use_cache: bool | None) -> list[Decision]:
     if not records:
         return []
     if len({r.ref for r in records}) != len(records):
@@ -186,15 +204,15 @@ async def sem_filter_reference(runtime: Runtime, source: AsyncIterable[Record], 
 
 
 async def sem_filter(runtime: Runtime, source: AsyncIterable[Record], instruction: str, *,
-                     algorithm="cluster", options=None, **kwargs) -> AsyncIterator[Decision]:
-    """Default public path: disk-backed clustering, selective judgment and checks.
+                     algorithm="auto", options=None, **kwargs) -> AsyncIterator[Decision]:
+    """Stream strict judgments; cluster when a proxy experiment is selected.
 
     reference preserves the 0.3.0 batch-sort baseline. csv is the explicitly
     uncalibrated paper comparison, never a production quality guarantee.
     """
     if algorithm == "reference":
         stream = sem_filter_reference(runtime, source, instruction, **kwargs)
-    elif algorithm in {"cluster", "csv"}:
+    elif algorithm in {"auto", "cluster", "csv"}:
         from .filter_adapter import clustered_filter
         stream = clustered_filter(runtime, source, instruction, algorithm=algorithm, options=options, **kwargs)
     else:

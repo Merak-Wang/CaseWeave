@@ -11,7 +11,7 @@ export function operatorRequiredFields(plan: SemanticQueryPlan | undefined): str
   }))]
 }
 
-export function requiredEvidenceFields(state: RetrievalState, candidate: TicketCandidate): string[] {
-  return [...new Set([...operatorRequiredFields(state.query.contract?.semanticPlan),
+export function requiredEvidenceFields(state: RetrievalState, candidate: TicketCandidate, planFields = operatorRequiredFields(state.query.contract?.semanticPlan)): string[] {
+  return [...new Set([...planFields,
     ...(candidate.summaryOrigin?.verification === 'conflicting' ? candidate.summaryOrigin.requiredEvidenceFields ?? [] : [])])]
 }

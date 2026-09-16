@@ -333,7 +333,7 @@ pnpm retrieval-agent web --no-open --port 3081
 
 ## TypeScript 包与测试约定
 
-包按实际运行环境、依赖方向和公开消费者划分；一个业务组件或实现文件不必独立发包。当前 13 个包及依赖以 [生成图](WORKSPACE_GRAPH.md) 为准。排名客户端已并入 `@retrieval-agent/model-service-client/ranking`；embedding/rerank 继续从主入口导入。两者连接同一 Python 服务，但各自保留响应校验、取消与长任务语义。仓库消费者与安装脚本同步迁移，不保留无消费者的旧排名包转发层。
+包按实际运行环境、依赖方向和公开消费者划分；一个业务组件或实现文件不必独立发包。当前 12 个包及依赖以 [生成图](WORKSPACE_GRAPH.md) 为准。排名客户端已并入 `@retrieval-agent/model-service-client/ranking`；embedding/rerank 继续从主入口导入。两者连接同一 Python 服务，但各自保留响应校验、取消与长任务语义。仓库消费者与安装脚本同步迁移，不保留无消费者的旧排名包转发层。
 
 - 使用现有 ESM / NodeNext、相对 `.js` 导入和 `package.json` 的 `exports`，类型导入用 `import type` / `type`。浏览器从现有的 `domain/result`、`domain/replay` 和 `product-api` 客户端子入口访问，避免加载服务端依赖。
 - 公共 TypeScript 配置统一启用 `strict`、`noUncheckedIndexedAccess`、`exactOptionalPropertyTypes`、`noUnusedLocals`、`noUnusedParameters` 等检查，应用到生产包、测试与浏览器夹具。不通过关闭检查或加无意义读取保留死代码；签名需要的未使用回调参数可使用 `_` 前缀。依据见 [TypeScript 配置参考](https://www.typescriptlang.org/tsconfig/)。
@@ -356,6 +356,7 @@ pnpm retrieval-agent web --no-open --port 3081
 | `pnpm exec vitest run packages/agent-plugin/src/service.spec.ts` | 运行指定相邻测试；路径可换成受影响的现有 spec |
 | `pnpm test` | 运行默认行为/边界回归；不加载全量语料做假排名，实库专项需显式启用 |
 | `pnpm model:test` | 通过 uv 运行 Python model-service 测试；环境未就绪时可能同步依赖 |
+| `pnpm operators:test` | Python 语义算子测试，包含流式执行、抽样量和 Top-K 计算开销对照；CI 使用同一入口 |
 | `pnpm eval:self-test` | Python 评测数据与 scorer 自检，不执行真实 Agent 任务 |
 
 跨包导入可能通过 package exports 读取 `lib/`。跨包源码变更后先显式 `pnpm build` 一次，再运行 `pnpm typecheck:code` 和所选行为检查；也可直接用 `pnpm typecheck` 完成构建与类型检查。单独 `--noEmit` 不能证明已有构建产物与源码一致。依赖开发语料的测试和运行入口要求事先显式准备数据，纯代码检查无需此步骤。
@@ -404,7 +405,7 @@ Remove-Item Env:RETRIEVAL_AGENT_REPLAY_SCALE
 
 变更级检查优先选择上表中的定向命令；核心产品闭环按 A1—A14 选择受影响的公开纵切，具体场景由 [评测策略](EVALUATION_STRATEGY.md) 维护。`verify` 是工程检查聚合，包含 workspace、一次构建和类型检查、Vitest，不隐式执行全量语料假排名或发布检查。
 
-包、依赖或安装行为改变时，在同次构建后选择 `verify:release` 和 `verify:install`；两者都不重复构建。`verify:all` 显式组合工程检查、Python 自检、发布闭包和安装检查，复用工程检查生成的产物。它不是日常定向检查入口，也不会自动准备数据或权重。
+包、依赖或安装行为改变时，在同次构建后选择 `verify:release` 和 `verify:install`；两者都不重复构建。`verify:all` 显式组合工程检查、Python 算子/评测/模型服务自检、发布闭包和安装检查，复用工程检查生成的产物。它不是日常定向检查入口，也不会自动准备数据或权重。
 
 工程检查通过只证明对应代码、协议或受控场景；业务质量需使用真实任务、独立期望和明确的数据范围评估。
 

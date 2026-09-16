@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { FixturePrincipalProviderService } from './principal.js'
 import { LocalTicketProviderService } from './provider.js'
-import { StreamClusterTicketProviderService } from './streamcluster-provider.js'
 import { testHybridRanker } from '../../../tests/support/fake-model-gateway.js'
 
 const LEGACY_REGRESSION_FIXTURE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'data', 'tickets', 'synthetic', 'legacy-bronze-v1.jsonl')
@@ -67,15 +66,4 @@ describe('Cordis service wrappers', () => {
     }
   })
 
-  it('can read the StreamCluster wrapper through a Cordis trace proxy before network I/O', async () => {
-    const ctx = new Context()
-    try {
-      await ctx.plugin(StreamClusterTicketProviderService, { baseUrl: 'http://127.0.0.1:9' })
-      expect(ctx.ticketRetrievalProvider.providerId).toBe('streamcluster-v1')
-      expect(ctx.ticketRetrievalProvider.resolve({ target: 'ranked_cases', query: '副卡', requestedCount: 5, countPolicy: 'explicit' }))
-        .toMatchObject({ normalizedQuery: '副卡', requestedCount: 5 })
-    } finally {
-      await ctx.fiber.dispose()
-    }
-  })
 })

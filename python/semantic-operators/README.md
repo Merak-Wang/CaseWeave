@@ -15,8 +15,15 @@ DSH owns model credentials and the host owns Provider access and publication.
 
 ## Default filter
 
-`dispatch.invoke_rows('sem_filter', ...)` runs the numerical kernel in
-`cluster.py` through the disk/text adapter in `filter_adapter.py`:
+`dispatch.invoke_rows('sem_filter', ...)` defaults to `algorithm='auto'`.
+With zero disagreement tolerance it streams strong judgments in full batches,
+reuses completed results, and skips feature loading, spooling and clustering.
+Example requests stop reading as soon as their accepted-result target is met.
+Rows missing a required source field return unresolved without an LLM call;
+the product host first fetches the explicitly required fields for each input page.
+
+Explicit `algorithm='cluster'`, or nonzero tolerances in `auto` without an
+example target, selects the numerical kernel in `cluster.py`:
 
 1. Publish the first strong batch while ingesting authorized rows in pages.
 2. Read existing features into a float32 memmap; keep text in temporary SQLite.
@@ -27,6 +34,9 @@ DSH owns model credentials and the host owns Provider access and publication.
 6. Freeze each predicted population, draw an independent sample, and invert a
    finite-population hypergeometric bound. Infer only its uncalled remainder if
    the check passes; otherwise split or judge the unresolved remainder directly.
+   Child regions retain applicable strong labels from their parent. Fully known
+   inputs return before partitioning. Sample sizing accounts for discrete error
+   allowance changes instead of assuming globally monotone feasibility.
 
 Strong counterexamples retain their labels. Unknown is unresolved, never a
 negative training label. Proxies never train the next prediction. Current
@@ -34,11 +44,12 @@ host-authorized strong feedback overrides older cached labels; user revisions
 change the task namespace. The host rejects stale output and publishes valid
 proxies with `basis='proxy'`, without a fictitious per-row model request.
 
-Production disagreement tolerances default to **zero**, with `delta=.01` across
-checks. This usually requires nearly a census, can increase batch request count,
-and does not prove business correctness or global search recall. Nonzero
-tolerances in the benchmark are explicit experiments, not production defaults.
-Missing features use strong judgment; the operator never re-embeds the corpus.
+Production disagreement tolerances remain **zero**. Forcing clustering at zero
+tolerance with `delta=.01` usually checks nearly every row, which is why `auto`
+uses direct batches. Nonzero tolerances are explicit experiments. Neither a
+reference judgment nor a regional check proves business correctness or global
+search recall. Missing features use strong judgment; the operator never
+re-embeds the corpus.
 
 ## Comparisons and other operators
 
@@ -49,6 +60,8 @@ Missing features use strong judgment; the operator never re-embeds the corpus.
   This comparison may miss rare positives and is not admitted by the product host.
 - `sem_topk`: `heap` remains the reference default; `strategy='quick'` compares
   every active partition, performs quickselect and orders the selected rows.
+  Heap updates move only the sift path; both strategies finish with O(k log k)
+  merge sort. Quickselect loads each pivot once and skips selection when k ≥ N.
   Neither a vector shortlist nor an unstable LLM comparator proves global Top-K.
 - `sem_join`: explicit pairs remain the reference; `indexed_pairs` and the host's
   `blocking_field` use a disk inverted index. Measure blocking recall separately.
@@ -76,6 +89,8 @@ oracle supplies no real token receipts: these remain unknown. Calls, tokens,
 QPM, TPM and elapsed time are observations, never task quotas. Synthetic results
 are not evidence of production semantic quality; memory probes cover only the
 disk adapter's Python heap, not end-to-end million-row capacity.
+The `auto` variant measures the current strict default; `checked` explicitly
+forces the regional clustering comparison.
 
 Algorithm correspondence, fixed upstream versions and limitations are in the
 [operator design](../../docs/design/OPERATORS.md).

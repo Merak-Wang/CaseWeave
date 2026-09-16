@@ -52,6 +52,7 @@ export function assertTicketFilter(filter: TicketFilter): void {
   }
 }
 
+/** 新请求只接收现行契约；旧 Session 的迁移由重放入口负责。 */
 export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): void {
   if (request.query.trim().length === 0) throw new RetrievalError('INVALID_REQUEST', '检索问题不能为空。')
   if (request.query.length > 4_000) throw new RetrievalError('INVALID_REQUEST', '检索问题过长。')
@@ -68,9 +69,7 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
   if (request.countPolicy !== undefined && !['explicit', 'adaptive', 'exhaustive'].includes(request.countPolicy)) {
     throw new RetrievalError('INVALID_REQUEST', '候选数量策略无效。')
   }
-  const legacyAdaptiveLimit = request.queryContract !== undefined && request.queryContract.schemaVersion <= 5
-    && request.countPolicy === 'adaptive' && request.requestedCount !== undefined
-  if (!legacyAdaptiveLimit && ((request.countPolicy === 'explicit') !== (request.requestedCount !== undefined))) {
+  if ((request.countPolicy === 'explicit') !== (request.requestedCount !== undefined)) {
     throw new RetrievalError('INVALID_REQUEST', '只有显式 Top-K 可以且必须声明用户级结果数量。')
   }
   for (const ambiguity of request.ambiguities ?? []) {
@@ -92,30 +91,21 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
       try { validateQueryExpression(plan.keyword, plan.fields); validateQueryExpression(plan.hard, plan.fields) }
       catch (error) { throw new RetrievalError('INVALID_REQUEST', 'QueryPlan 含未声明字段或非法布尔条件。', { cause: error }) }
     }
-    const resultPolicyValid = ['explicit_top_k', 'adaptive_top_k', 'exhaustive_current_snapshot'].includes(contract.resultPolicy)
-    const legacyBoundedResultPolicy = contract.resultPolicy === 'explicit_top_k' || contract.resultPolicy === 'adaptive_top_k'
     const effectiveCountPolicy = request.countPolicy ?? (request.requestedCount === undefined ? 'adaptive' : 'explicit')
     const expectedResultPolicy = effectiveCountPolicy === 'explicit'
       ? 'explicit_top_k'
       : effectiveCountPolicy === 'exhaustive' ? 'exhaustive_current_snapshot' : 'adaptive_top_k'
-    const legacyLimitValid = contract.schemaVersion <= 5
-      && contract.resultLimit === undefined
-      && (contract.maxResults === undefined
-        ? !legacyBoundedResultPolicy
-        : legacyBoundedResultPolicy && contract.maxResults === request.requestedCount
-          && Number.isSafeInteger(contract.maxResults) && contract.maxResults >= 1 && contract.maxResults <= 100)
-    const currentLimitValid = contract.schemaVersion >= 6
-      && contract.maxResults === undefined
+    const currentLimitValid = contract.maxResults === undefined
       && (contract.resultLimit === undefined
         ? effectiveCountPolicy !== 'explicit' && request.requestedCount === undefined
         : effectiveCountPolicy === 'explicit' && contract.resultLimit === request.requestedCount
           && Number.isSafeInteger(contract.resultLimit) && contract.resultLimit >= 1)
-    if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
+    if (![8, 9, 10].includes(contract.schemaVersion) || contract.original !== request.query || contract.task !== request.target
       || contract.normalized !== (request.retrievalQuery ?? request.query).normalize('NFKC').trim().replace(/\s+/gu, ' ')
-      || !resultPolicyValid || contract.resultPolicy !== expectedResultPolicy
+      || contract.resultPolicy !== expectedResultPolicy
       || !['telecom_ticket', 'general_ticket'].includes(contract.domain)
       || !['zh', 'en', 'und'].includes(contract.language)
-      || (!legacyLimitValid && !currentLimitValid)
+      || !currentLimitValid
       || contract.compilerVersion.trim().length === 0) {
       throw new RetrievalError('INVALID_REQUEST', 'Query Contract 与检索请求不一致或包含无效字段。')
     }
@@ -123,10 +113,10 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
       || JSON.stringify(contract.ambiguities) !== JSON.stringify(request.ambiguities ?? [])) {
       throw new RetrievalError('INVALID_REQUEST', 'Query Contract 的约束或歧义与检索请求不一致。')
     }
-    if (contract.schemaVersion >= 8 && !Array.isArray(contract.userRequirements)) {
+    if (!Array.isArray(contract.userRequirements)) {
       throw new RetrievalError('INVALID_REQUEST', 'Query Contract 缺少用户条件来源。')
     }
-    for (const requirement of contract.userRequirements ?? []) {
+    for (const requirement of contract.userRequirements) {
       if (typeof requirement.text !== 'string' || requirement.text.trim().length === 0
         || !contract.original.includes(requirement.text) || !['compiled', 'unresolved'].includes(requirement.status)
         || !Array.isArray(requirement.filters)
@@ -149,7 +139,7 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
       }
     }
     if (contract.logic !== undefined) {
-      if (contract.schemaVersion < 2 || !['and', 'or'].includes(contract.logic.operator)
+      if (!['and', 'or'].includes(contract.logic.operator)
         || contract.logic.requiredConcepts.length < 2 || contract.logic.requiredConcepts.length > 8) {
         throw new RetrievalError('INVALID_REQUEST', 'Query Contract 包含无效的布尔查询结构。')
       }
@@ -171,7 +161,7 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
         || keyword.terms.length < 1 || keyword.terms.length > 8
         || keyword.terms.some(term => term.trim().length === 0 || term.length > 200)
       )
-      if (contract.schemaVersion < 3 || request.fastQuery === undefined
+      if (request.fastQuery === undefined
         || JSON.stringify(fast) !== JSON.stringify(request.fastQuery)
         || ![1, 2].includes(fast.schemaVersion) || fast.source !== 'direct_user' || fast.rewriteApplied !== false
         || fast.vector.text !== request.query
@@ -181,47 +171,6 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
       }
     }
     if (contract.schemaVersion === 9 && contract.queryPlan === undefined) throw new RetrievalError('INVALID_REQUEST', 'Query Contract v9 必须包含 QueryPlan。')
-    if (contract.schemaVersion >= 4 && contract.schemaVersion < 9 && contract.nlp === undefined) {
-      throw new RetrievalError('INVALID_REQUEST', 'Query Contract v4+ 必须包含 NLP 分析轨迹。')
-    }
-    if (contract.nlp !== undefined) {
-      const nlp = contract.nlp
-      const commonInvalid = nlp.keywordTerms.length > 8
-        || (contract.fastQuery?.schemaVersion === 1 && nlp.keywordTerms.length < 1)
-        || JSON.stringify(nlp.keywordTerms) !== JSON.stringify(contract.fastQuery?.keyword?.terms ?? [])
-        || nlp.triples.length > 8
-      const legacyInvalid = nlp.schemaVersion === 1 && (
-        contract.schemaVersion !== 4 || nlp.analyzerVersion.trim().length === 0 || nlp.analyzerVersion.length > 200
-        || nlp.tokenization.trim().length === 0 || nlp.tokenization.length > 200
-        || nlp.tokens.length > 64
-        || nlp.tokens.some(token => token.surface.trim().length === 0 || token.surface.length > 200
-          || !['word', 'latin', 'number', 'relation', 'task', 'function'].includes(token.kind))
-        || nlp.triples.some(triple => triple.subject !== 'ticket_collection'
-          || !['must_contain', 'may_contain', 'topic'].includes(triple.predicate)
-          || triple.object.trim().length === 0 || triple.object.length > 200)
-      )
-      const spacyInvalid = nlp.schemaVersion === 2 && (
-        ![5, 6, 7, 8, 9].includes(contract.schemaVersion) || nlp.engine !== 'spacy'
-        || [nlp.engineVersion, nlp.pipeline, nlp.pipelineVersion, nlp.lexiconVersion].some(value => value.trim().length === 0 || value.length > 200)
-        // spaCy 的完整 token/实体轨迹由非空原文片段组成；数量受原文及查询分析的 2000 字协议共同约束。
-        || nlp.tokens.length > Math.min(contract.original.length, 2_000)
-        || nlp.tokens.some(token => token.surface.trim().length === 0 || token.surface.length > 200
-          || !Number.isSafeInteger(token.start) || !Number.isSafeInteger(token.end) || token.start < 0 || token.end <= token.start
-          || token.end > contract.original.length || token.head < 0 || token.head >= nlp.tokens.length || !Number.isSafeInteger(token.head)
-          || [token.pos, token.tag, token.dep].some(value => value.trim().length === 0 || value.length > 100)
-          || token.lemma.length > 200 || token.entityType.length > 100)
-        || nlp.entities.length > Math.min(contract.original.length, 2_000)
-        || nlp.entities.some(entity => entity.surface.trim().length === 0 || entity.surface.length > 200
-          || entity.label.trim().length === 0 || entity.label.length > 100
-          || !Number.isSafeInteger(entity.start) || !Number.isSafeInteger(entity.end)
-          || entity.start < 0 || entity.end <= entity.start || entity.end > contract.original.length)
-        || nlp.triples.some(triple => [triple.subject, triple.predicate, triple.object].some(value => value.trim().length === 0 || value.length > 200)
-          || !['dependency', 'coordination'].includes(triple.source))
-      )
-      if (contract.schemaVersion < 4 || commonInvalid || (nlp.schemaVersion !== 1 && nlp.schemaVersion !== 2)
-        || legacyInvalid || spacyInvalid) {
-        throw new RetrievalError('INVALID_REQUEST', 'Query Contract 的 NLP 分析轨迹无效。')
-      }
-    }
+    // NLP 响应已在查询分析 HTTP 入口校验；诊断轨迹不参与工单准入，内部不再重验 token/POS 等元数据。
   }
 }

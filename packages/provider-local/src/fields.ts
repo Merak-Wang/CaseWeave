@@ -3,7 +3,6 @@ import type {
   TicketEvidenceField,
   TicketFieldDescriptor,
 } from '@retrieval-agent/contracts'
-import { estimateTokens } from './text.js'
 
 export const LEGACY_FIELD_CATALOG: readonly TicketFieldDescriptor[] = [
   { key: 'displayId', label: '工单编号', valueKind: 'keyword', accessLevel: 'L0', filterOperators: ['eq', 'neq'], sensitivity: 'non_sensitive' },
@@ -39,8 +38,4 @@ export function evidenceFieldValues(record: NormalizedTicketRecord, field: Ticke
     case 'answer': return record.answer === undefined ? [] : [record.answer]
     default: return record.additionalEvidence?.[field] ?? []
   }
-}
-
-export function evidenceTextCost(record: NormalizedTicketRecord, fields: readonly TicketEvidenceField[]): number {
-  return fields.reduce((total, field) => total + evidenceFieldValues(record, field).reduce((sum, value) => sum + estimateTokens(value), 0), 0)
 }

@@ -31,6 +31,10 @@ class FilterOptions:
     vote_lower: float = 0.1
     vote_upper: float = 0.9
 
+    @property
+    def direct(self):
+        return self.accept_error == self.reject_error == 0 and self.validation_size is None
+
     def __post_init__(self):
         if self.proposal not in {"uniform", "similarity", "linear"}:
             raise ValueError("Unknown proposal")
@@ -57,23 +61,30 @@ def remaining_error_upper(total, sampled, errors, alpha):
 
 
 def check_size(total, tolerance, alpha):
-    """Choose sample size BEFORE observing labels; enough to pass at zero errors.
+    """在看标签前求最小零错误样本量。
 
-    Zero tolerance typically reads nearly the entire region. A small sample
-    cannot establish absence of a rare contrary label in a finite population.
+    整数错误容许数下降时，整体可行性不再单调，不能直接二分。
+    先固定容许数，在这一段内二分最早可行点，再重新计算容许数。
+    被跳过的样本量即使沿用更宽松的上一段容许数也不可行。
     """
-    lo, hi = 1, total
-    while lo < hi:
-        n = (lo + hi) // 2
-        if remaining_error_upper(total, n, 0, alpha) <= tolerance * (total - n):
-            hi = n
-        else:
-            lo = n + 1
-    return lo
+    n, log_alpha = 1, math.log(alpha)
+    while n < total:
+        contrary = math.floor(tolerance * (total - n)) + 1
+        lo, hi = n, total - contrary + 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if hypergeom.logcdf(0, total, contrary, mid) < log_alpha:
+                hi = mid
+            else:
+                lo = mid + 1
+        if lo == n:
+            return n
+        n = lo
+    return total
 
 
 def partition(X, ids, count, rng, block_size, *, csv=False):
-    """Fit on bounded feature blocks; only the small CSV comparison uses KMeans."""
+    """按有限特征块拟合；只有小规模 CSV 对照使用全量 KMeans。"""
     if len(ids) < 2 or count == 1:
         return [ids]
     count = min(count, len(ids))
@@ -126,7 +137,7 @@ def vote(X, train, target, labels, method, block_size):
     return output, False
 
 
-async def cluster_filter(X, judge, *, options=None, known=None, method="cluster"):
+async def cluster_filter(X, judge, *, options=None, known=None, method="auto"):
     """Yield (row ids, labels, basis, phase/check).
 
     judge is an async iterator so every actual model batch can be delivered
@@ -148,6 +159,14 @@ async def cluster_filter(X, judge, *, options=None, known=None, method="cluster"
         async for part, values in judge(pending, phase):
             labels[part] = values
             yield part, values, "reference", {"phase": phase}
+
+    pending = np.flatnonzero(labels == -2)
+    if not len(pending):
+        return
+    if method == "auto" and cfg.direct:
+        async for event in ask(pending, "strict"):
+            yield event
+        return
 
     def split(ids, count):
         with threadpool_limits(limits=1):
@@ -216,7 +235,10 @@ async def cluster_filter(X, judge, *, options=None, known=None, method="cluster"
                     labels[remainder], proxy[remainder] = value, True
                     yield remainder, labels[remainder], "proxy", check
                 elif len(remainder):
-                    children = split(remainder, 2)
+                    # Repartition genuine parent labels with the unresolved
+                    # rows, so each child keeps its relevant training context.
+                    strong = group[(labels[group] >= 0) & ~proxy[group]]
+                    children = split(np.concatenate((remainder, strong)), 2)
                     if len(children) == 1:
                         async for event in ask(remainder, "fallback"):
                             yield event

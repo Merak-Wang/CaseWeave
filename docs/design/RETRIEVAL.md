@@ -20,6 +20,8 @@
 
 新任务使用 schemaVersion 10 的自然语言契约，入口为 `buildSemanticTicketRequest`。Host 立即启动原句向量召回，并通过 DSH 调用 Python `query_plan`；后者接收原句、用户补充、字段目录、任务时刻与固定版本 Wiki，输出 `keywords`、`instruction`、`retrieval_expressions`、`goal` 和步骤。
 
+原句中的换行和空格保留在规划及向量输入中；仅内部比较视图做 NFKC 和空白规范化。新请求接受 v8–v10 查询契约，旧版本只通过 Session 重放迁移读取。spaCy 响应在 HTTP 客户端校验，内部请求不重复检查已解析的词性、依存关系等诊断字段。
+
 关键词只用于 OR 宽召回，业务布尔关系留在完整自然语言判据中。普通检索由 `sem_filter` 进行有证据的三态判断，缺原文时保留未决并由 Agent 定向取证。指定 ID 必须保持完整身份；时间、字段和业务排除不得被改写为更宽的确认条件。语义改写是搜索先验，不是事实或新增要求。
 
 Python 负责语义计算，Host 负责身份、来源、当前输入代次、实际 DSH 请求、合法转移和结果发布。详细接口、恢复与常驻 FastAPI 服务见 [Python 算子](OPERATORS.md)。

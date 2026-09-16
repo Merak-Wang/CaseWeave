@@ -1,6 +1,7 @@
+import { packageManager } from './package-manager.mjs'
 import { execFileSync } from 'node:child_process'
 import { readFile, rm } from 'node:fs/promises'
-import { existsSync, mkdtempSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,15 +9,7 @@ import { fileURLToPath } from 'node:url'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const packagesRoot = resolve(root, 'packages')
 const contract = JSON.parse(await readFile(join(root, 'architecture', 'workspace.json'), 'utf8'))
-const fallbackPnpmCli = process.platform === 'win32' && process.env.APPDATA !== undefined
-  ? join(process.env.APPDATA, 'npm', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
-  : undefined
-const pnpmCli = process.env.npm_execpath?.endsWith('.cjs') === true
-  ? process.env.npm_execpath
-  : fallbackPnpmCli !== undefined && existsSync(fallbackPnpmCli) ? fallbackPnpmCli : undefined
-const packageManager = pnpmCli !== undefined
-  ? { command: process.execPath, prefix: [pnpmCli] }
-  : { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', prefix: [] }
+const manager = packageManager()
 const failures = []
 const manifests = new Map()
 const packageByName = new Map(contract.packages.map(entry => [entry.name, entry]))
@@ -61,7 +54,7 @@ try {
   for (const entry of releaseEntries) {
     let packOutput
     try {
-      packOutput = execFileSync(packageManager.command, [...packageManager.prefix, '--filter', entry.name, 'pack', '--json', '--pack-destination', tempRoot], {
+      packOutput = execFileSync(manager.command, [...manager.prefix, '--filter', entry.name, 'pack', '--json', '--pack-destination', tempRoot], {
         cwd: root,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],

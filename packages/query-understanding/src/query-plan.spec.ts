@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { evaluateQuery, type QueryDocument } from '@retrieval-agent/contracts'
 import { compileQueryPlan } from './query-plan.js'
-import { buildPlannedTicketRequest } from './index.js'
-import { assertTicketRetrievalRequest } from '@retrieval-agent/contracts'
+import { compileUserResultPolicy } from './index.js'
 import { compileUserConditions } from './conditions.js'
 
 const doc = (title: string, body: string, region: string | null = null): QueryDocument => ({ texts: { title: [title], body: [body] }, fields: { region, status: null } })
@@ -47,18 +46,9 @@ describe('sourced Boolean QueryPlan', () => {
     expect(compileUserConditions('上海或北京工单', [], new Date(), 'Asia/Shanghai').ambiguities).toHaveLength(2)
     expect(compileUserConditions('只看上海或排除北京工单', [], new Date(), 'Asia/Shanghai').ambiguities).toHaveLength(2)
   })
-  it('keeps the real workbench request for only one ticket as an explicit target', async () => {
+  it('extracts the result count from a complete instruction', () => {
     const query = '查找摘要包含“手厅暂不支持”的跨域主副卡解绑工单，只需1条。请读取原始对话确认业务情况，短语只要求在摘要中出现，不要求对话逐字相同。'
-    const request = await buildPlannedTicketRequest(query, { parse: async input => compileQueryPlan(input.query, ['跨域', '主副卡', '解绑', '手厅'], input) }, { fields: [], now: new Date('2026-09-08T00:00:00Z'), timeZone: 'Asia/Shanghai' })
-    expect(request).toMatchObject({ countPolicy: 'explicit', requestedCount: 1, queryContract: { resultPolicy: 'explicit_top_k', resultLimit: 1 } })
-  })
-  it('accepts an engine-neutral parser without an NLP token schema', async () => {
-    const request = await buildPlannedTicketRequest('副卡 AND 跨域', { parse: async input => compileQueryPlan(input.query, ['副卡', '跨域'], input) }, {
-      now: new Date('2026-09-07T00:00:00Z'), timeZone: 'Asia/Shanghai', fields: [],
-    })
-    expect(request.queryContract?.schemaVersion).toBe(9)
-    expect(request.queryContract?.nlp).toBeUndefined()
-    expect(() => assertTicketRetrievalRequest(request)).not.toThrow()
+    expect(compileUserResultPolicy(query)).toMatchObject({ countPolicy: 'explicit', requestedCount: 1 })
   })
   it('preserves branch scope, cross-field conjunction, and the exact vector input', () => {
     const query = '上海的副卡问题，或广东的宽带问题'

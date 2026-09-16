@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import { assertTicketRetrievalRequest } from '@retrieval-agent/contracts'
-import { buildFastTicketRequest, SpacyQueryAnalyzer, type QueryAnalysisResponse } from '@retrieval-agent/query-understanding'
+import { buildFastTicketRequest, buildSemanticTicketRequest, SpacyQueryAnalyzer, type QueryAnalysisResponse } from '@retrieval-agent/query-understanding'
+
+it('accepts user whitespace while preserving the exact semantic and vector query', () => {
+  const query = '查找主卡\n  和副卡的相关工单'
+  const request = buildSemanticTicketRequest(query)
+  expect(request.query).toBe(query)
+  expect(request.fastQuery?.vector.text).toBe(query)
+  expect(() => assertTicketRetrievalRequest(request)).not.toThrow()
+})
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -105,25 +113,6 @@ describe('query-analysis HTTP contract', () => {
     })
     await expect(new SpacyQueryAnalyzer({ baseUrl: 'http://127.0.0.1:8012', fetch }).analyze(query))
       .rejects.toMatchObject({ code: 'PROTOCOL_MISMATCH' })
-  })
-
-  it('retains the 64-token bound for legacy NLP v1 replay', () => {
-    const query = '网络'.repeat(40)
-    const fastQuery = { schemaVersion: 1, source: 'direct_user', rewriteApplied: false,
-      keyword: { terms: ['网络'], operator: 'and' }, vector: { text: query } } as const
-    const request = (count: number) => ({
-      target: 'ranked_cases', query, countPolicy: 'adaptive', requestedCount: 20, fastQuery,
-      queryContract: {
-        schemaVersion: 4, original: query, normalized: query, task: 'ranked_cases', resultPolicy: 'adaptive_top_k',
-        maxResults: 20, domain: 'telecom_ticket', language: 'zh', entities: [], constraints: [], ambiguities: [],
-        fastQuery, compilerVersion: 'legacy-fixture', nlp: {
-          schemaVersion: 1, analyzerVersion: 'legacy-fixture', tokenization: 'legacy-fixture', keywordTerms: ['网络'],
-          tokens: Array.from({ length: count }, () => ({ surface: '网络', kind: 'word' as const })), triples: [],
-        },
-      },
-    } as const)
-    expect(() => assertTicketRetrievalRequest(request(64))).not.toThrow()
-    expect(() => assertTicketRetrievalRequest(request(65))).toThrow(/NLP/u)
   })
 
   it('does not dispatch an already-cancelled query to the analysis service', async () => {

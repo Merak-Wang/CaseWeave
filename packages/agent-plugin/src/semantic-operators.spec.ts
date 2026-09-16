@@ -9,15 +9,15 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { LocalTicketProvider, normalizeFixtureTicket } from '@retrieval-agent/provider-local'
 import { buildSemanticTicketRequest } from '@retrieval-agent/query-understanding'
-import { admitOperatorDecisions, foldRetrievalEvents, validateOperatorRecord } from '@retrieval-agent/domain'
+import { admitOperatorDecisions, foldRetrievalEvents, validateOperatorRecords } from '@retrieval-agent/domain'
 import { admitDecision } from '../../domain/src/decision.js'
 import { candidateEvidence, createRetrievalReport, CandidateExportService, InMemoryExportAuditSink } from '@retrieval-agent/product-api'
 import { readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
 import type { RetrievalRanker } from '@retrieval-agent/model-service-client/ranking'
-import type { TicketRetrievalProvider } from '@retrieval-agent/contracts'
+import type { OperatorRecord, TicketCandidateRef, TicketRetrievalProvider } from '@retrieval-agent/contracts'
 import { RetrievalError } from '@retrieval-agent/contracts'
 import { TicketPrincipalProviderService, TicketRetrievalProviderService } from './provider-services.js'
 import { RetrievalAgentService } from './service.js'
@@ -54,9 +54,7 @@ it('retains failed callback metering and the original error instead of treating 
   } finally { bridge.close() }
 }, 30000)
 
-// 1536 supplies enough rows in both classes for the zero-tolerance finite
-// population check to leave both accepted and excluded proxy rows to exercise.
-it.each([2, 1536])('runs public DSH input through Python filtering for %i rows, retaining proxy provenance through replay', async (count) => {
+it.each([2, 24, 1536])('runs public DSH input through Python filtering for %i rows with incremental commits and replay', async (count) => {
   const ctx = new Context(), searches: string[] = [], requests: GenerateOptions[] = []
   const ranker: RetrievalRanker = { profileVersion: 'operator-fixture', capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
     readFeatures: async documents => ({ embedding_id: 'synthetic-operator-fixture', rows: documents.map(d => ({ id: d.id,
@@ -77,7 +75,23 @@ it.each([2, 1536])('runs public DSH input through Python filtering for %i rows, 
     await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)
     new Principal(ctx); new Provider(ctx, new LocalTicketProvider(records, { ranker, defaultMode: 'hybrid' }))
     const app = new RetrievalAgentService(ctx)
+    const updates = vi.spyOn(app, 'updateExpert')
+    const commits = vi.spyOn(app, 'acceptOperatorResults')
     const bridge = new PythonOperatorBridge(process.cwd(), resolve('.cache/semantic-operators', `test-${randomUUID()}.sqlite`))
+    // Keep a real checked-cluster integration case alongside the strict default.
+    // The fixture supplies its numeric features through the same Provider port.
+    if (count === 1536) {
+      const run = bridge.run.bind(bridge)
+      bridge.run = (input, callback, result, signal) => run(input.op === 'sem_filter'
+        ? { ...input, params: { ...input.params, algorithm: 'cluster' } } : input, async (method, payload) => {
+        const reply = await callback(method, payload)
+        if (input.op !== 'sem_filter' || method !== 'rows.read') return reply
+        const page = reply as { rows: OperatorRecord[]; next_cursor: string | null }
+        const features = await ctx.ticketRetrievalProvider.readFeatures(await app.principal(agent!, 'detail_read'),
+          { snapshotId: app.current(agent!).snapshot!.snapshotId, candidateRefs: page.rows.map(r => r.ref as TicketCandidateRef) })
+        return { ...page, rows: page.rows.map(row => ({ ...row, ...features.find(f => f.ref === row.ref) })) }
+      }, result, signal)
+    }
     new SemanticOperators(ctx, app, undefined, process.cwd(), bridge)
     installAutomaticRetrievalStart(ctx, app, { analyzer: { async analyze() { throw new Error('legacy compiler must not run') } } })
     installRetrievalTools(ctx, app); installRetrievalRuntimeBudget(ctx, app)
@@ -117,10 +131,13 @@ it.each([2, 1536])('runs public DSH input through Python filtering for %i rows, 
     await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
     const handle = await ctx.agents.create({ sessionId: SessionId(randomUUID()), agentOptions: { provider: 'operator-fixture', model: 'scripted' } })
     agent = handle.agent; dispose = handle.dispose
-    agent.followup(createUserMessage({ content: [{ type: 'text', text: '查找副卡解绑仍受阻的案例，排除已经解绑。' }], source: { kind: 'user' } }))
+    const query = count === 2 ? '查找副卡解绑仍受阻的案例，\n  排除已经解绑。' : '查找副卡解绑仍受阻的案例，排除已经解绑。'
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: query }], source: { kind: 'user' } }))
     await agent.whenIdle()
     expect(errors).toEqual([])
     const state = app.current(agent)
+    expect(state.query.original).toBe(query)
+    expect(searches).toContain(query)
     expect(state.phase, JSON.stringify({ candidates: state.candidates.length, judgments: state.judgments?.length,
       selected: state.selectedCandidateRefs.length, activity: state.operatorActivity, stop: state.stopExplanation,
       filterRequests: requests.filter(r => r.system?.includes('当前操作：sem_filter')).length })).toBe('stopped')
@@ -129,8 +146,14 @@ it.each([2, 1536])('runs public DSH input through Python filtering for %i rows, 
     expect(state.query.spec.queryPlan).toBeUndefined()
     expect(state.query.contract?.semanticPlan?.goal.mode).toBe('adaptive')
     const filtering = state.contextManifests!.filter(m => m.operator?.operation === 'sem_filter')
-    if (count === 2) expect(filtering).toHaveLength(1)
-    else {
+    if (count !== 1536) {
+      expect(filtering).toHaveLength(Math.ceil(count / 8))
+      expect(commits.mock.calls).toHaveLength(Math.ceil(count / 8))
+      expect(state.judgments!.every(j => j.basis === 'model')).toBe(true)
+    }
+    const registrations = updates.mock.calls.filter(([, , update]) => update.kind === 'manifest' && update.manifest.operator?.operation === 'sem_filter')
+    expect(registrations).toHaveLength(filtering.length)
+    if (count === 1536) {
       const proxies = state.judgments!.filter(j => j.basis === 'proxy')
       const seenByModel = new Set(filtering.flatMap(m => m.candidateRefs))
       expect(proxies.length).toBeGreaterThan(0)
@@ -162,10 +185,10 @@ it.each([2, 1536])('runs public DSH input through Python filtering for %i rows, 
     expect(requests.filter(r => !r.sessionId?.startsWith('operator-'))).toHaveLength(1)
     const manifest = state.contextManifests!.find(m => m.operator?.operation === 'sem_filter')!
     const row = manifest.operator!.records[0]!
-    expect(() => validateOperatorRecord(state, { ...row, content_hash: 'changed' })).toThrow('来源版本')
-    expect(() => validateOperatorRecord(state, { ...row, passages: row.passages.map(p => ({ ...p, text: p.text + '伪造' })) })).toThrow('授权证据')
+    expect(() => validateOperatorRecords(state, [{ ...row, content_hash: 'changed' }])).toThrow('来源版本')
+    expect(() => validateOperatorRecords(state, [{ ...row, passages: row.passages.map(p => ({ ...p, text: p.text + '伪造' })) }])).toThrow('授权证据')
     expect(() => admitOperatorDecisions(state, (state.inputGeneration ?? 0) + 1, [])).toThrow('旧输入代次')
-    expect(() => admitOperatorDecisions(state, state.inputGeneration ?? 0, [{ ref: row.ref, label: 'accept', citations: [], knowledge_ids: [],
+    expect(() => admitOperatorDecisions({ ...state, phase: 'assessed' }, state.inputGeneration ?? 0, [{ ref: row.ref, label: 'accept', citations: [], knowledge_ids: [],
       basis: 'proxy', reason: '未经校准的代理', manifest_id: manifest.operator!.pythonManifestId }])).toThrow('代理推断')
     expect(buildSemanticTicketRequest('副卡 AND 跨域').filters).toBeUndefined()
   } finally { await dispose?.(); await ctx.fiber.dispose() }
