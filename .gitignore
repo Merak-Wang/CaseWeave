@@ -64,6 +64,7 @@ wiki/.staging/
 
 # Local reference material and internal working records.
 /asset/
+/attachments/
 /AGENTS.md
 /PLAN.md
 /docs/PUBLISHING.md

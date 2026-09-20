@@ -220,6 +220,12 @@ def create_app(backend: Any, ranking_backend: RetrievalRankingBackend | None = N
         result = ranking_backend.read_features(value.get("documents"), value.get("profile"))
         return {"protocolVersion": RAG_PROTOCOL_VERSION, "requestId": request_id, **result}
 
+    @app.post("/v1/ranking/feature-block")
+    def ranking_feature_block(value: dict[str, Any], request: Request) -> dict[str, Any]:
+        request_id = _request_id(value, request, RAG_PROTOCOL_VERSION)
+        return {"protocolVersion": RAG_PROTOCOL_VERSION, "requestId": request_id,
+                **ranking_backend.read_feature_block(value.get("documents"), value.get("profile"))}
+
     @app.post("/v1/ranking/rank")
     async def rank(value: dict[str, Any], request: Request) -> dict[str, Any]:
         started = time.perf_counter()

@@ -55,7 +55,7 @@ export class PythonOperatorBridge {
   private process(): ChildProcessWithoutNullStreams {
     if (this.closed) throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Python 算子工作进程已关闭。')
     if (this.child) return this.child
-    const args = ['-m', 'caseweave_ops.rpc', '--state', this.statePath]
+    const args = ['-m', 'caseweave_ops.server', '--stdio', '--state', this.statePath]
     const child = spawn(this.python ?? 'uv', this.python ? args : ['run', '--frozen', '--inexact', '--project', resolve(this.root, 'python/semantic-operators'), 'python', ...args],
       { cwd: this.root, windowsHide: true, stdio: 'pipe', env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8',
         PYTHONPATH: resolve(this.root, 'python/semantic-operators/src') } })
@@ -77,6 +77,14 @@ export class PythonOperatorBridge {
         const job = typeof frame.job === 'string' ? this.jobs.get(frame.job) : undefined
         if (!job) { if (frame.type === 'error' && !frame.job) throw new Error('invalid frame'); return }
         const id = frame.job as string
+        // 独立模型请求可并行；行读取、结果和完成帧仍走单一归并队列。
+        if (frame.type === 'request' && frame.method === 'llm.generate') {
+          void job.tail.then(async () => {
+            try { this.send({ type: 'response', id: frame.id, payload: await job.callback('llm.generate', frame.payload) }) }
+            catch (error) { job.failure = error; this.send({ type: 'response', id: frame.id, error: 'host_callback_rejected' }) }
+          }).catch(() => {})
+          return
+        }
         job.tail = job.tail.then(async () => {
           if (!this.jobs.has(id)) return
           if (frame.type === 'request') {

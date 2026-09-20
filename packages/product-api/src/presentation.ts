@@ -86,7 +86,7 @@ export function projectTicketCandidateState(
       .map(field => ({ key: field.key, label: field.label })) ?? [],
     ...(message === undefined ? {} : { message }),
     exportEnabled: state?.snapshot?.capabilities.exportRead === true
-      && (result?.tickets.length ?? 0) > 0
+      && (result?.learnedSet?.returned ?? result?.tickets.length ?? 0) > 0
       && !['snapshot_invalid', 'permission_blocked', 'error'].includes(status),
     ...(result === undefined ? {} : { result }),
   }

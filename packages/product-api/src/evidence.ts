@@ -18,12 +18,12 @@ export function candidateEvidence(state: RetrievalState, candidateRef: string) {
       contentHash: e.contentHash, field: e.field, part: e.part ?? 0, start: e.start,
       end: e.start + Math.min(1600, e.text.length), text: e.text.slice(0, 1600), origin: e.origin ?? { kind: 'unknown' },
     }))
-  if (allowed.has('summary') && judgment?.evidenceRefs.includes(candidate.ref) && (judgment.basis === 'proxy' || state.modelVisibleCandidateRefs?.includes(candidate.ref)
+  if (judgment?.operatorInference?.algorithm !== 'active' && allowed.has('summary') && judgment?.evidenceRefs.includes(candidate.ref) && (judgment.basis === 'proxy' || state.modelVisibleCandidateRefs?.includes(candidate.ref)
     || state.contextManifests?.some(m => m.inputGeneration === (state.inputGeneration ?? 0) && m.measurement === 'dsh_request' && m.candidateRefs.includes(candidate.ref)))) {
     citations.push({ id: candidate.ref, candidateRef, sourceVersion: candidate.sourceVersion, contentHash: candidate.contentHash,
       field: 'summary', part: 0, start: 0, end: Math.min(1600, candidate.summary.length), text: candidate.summary.slice(0, 1600), origin: candidate.summaryOrigin ?? { kind: 'unknown' } })
   }
   return { candidateRef, displayId: candidate.displayId, sourceVersion: candidate.sourceVersion, contentHash: candidate.contentHash,
     inputGeneration: state.inputGeneration ?? 0, current: state.candidates.some(c => c.ref === candidateRef), judgment: judgment ? { verdict: judgment.verdict, reason: judgment.reason, basis: judgment.basis ?? 'model' } : null,
-    citationCount: citations.length, citations: citations.slice(0, 30) }
+    inference: judgment?.operatorInference ?? null, citationCount: citations.length, citations: citations.slice(0, 30) }
 }

@@ -1,0 +1,13 @@
+{
+  "status": "controlled_stale_knowledge_condition_not_recommended_policy",
+  "entries": [
+    {
+      "id": "STALE-K1",
+      "text": "历史过度泛化规则：系统工单写客户认可，就认为用户实际已经认可。"
+    },
+    {
+      "id": "STALE-K2",
+      "text": "历史过度泛化规则：通过身份验证就说明请求已办理成功。"
+    }
+  ]
+}

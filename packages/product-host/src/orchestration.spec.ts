@@ -3,6 +3,7 @@ import type { RetrievalState } from '@retrieval-agent/contracts'
 import { projectOrchestration } from './orchestration.js'
 
 const state = () => ({ inputGeneration: 2, phase: 'assessed', termination: 'active', candidates: [{ ref: 'current' }],
+  budget: {},
   promotedEvidence: [{ candidateRef: 'current' }, { candidateRef: 'current' }, { candidateRef: 'history' }], selectedCandidateRefs: [],
   lastPage: {}, knowledgeCatalog: { status: 'available', releaseId: 'release-a', domains: [{ id: 'card', description: '主副卡', entryIds: ['rules'] }] },
   expertTasks: [{ id: 'current-expert', domainId: 'card', inputGeneration: 2, status: 'running', knowledgeRefs: ['loaded', 'sent'], actionsUsed: 1 },
@@ -13,6 +14,24 @@ const state = () => ({ inputGeneration: 2, phase: 'assessed', termination: 'acti
 } as unknown as RetrievalState)
 
 describe('public orchestration facts', () => {
+  it('projects the current predicate and bounded learning facts without publishing sampled IDs', () => {
+    const view = projectOrchestration({ ...state(), expertTasks: [],
+      query: { contract: { semanticPlan: { inputGeneration: 2, instruction: '解绑后仍合账，排除未解绑', keywords: ['解绑', '合账'], retrieval_expressions: ['取消副卡后继续扣费'], goal: { mode: 'all', count: null } } } },
+      budget: { operatorUsage: { learning: { input_revision: 2, stop_reason: 'quality_not_met', corpus_records: 20000,
+        teacher_unique_records: 128, training_ids: Array.from({ length: 2000 }, (_, i) => i), quality: { precision_lower: .91, recall_lower: null, precision_target: .95, recall_target: .95 } } } },
+    } as unknown as RetrievalState)
+    expect(view.retrieval.plan).toMatchObject({ instruction: '解绑后仍合账，排除未解绑', goal: { mode: 'all' } })
+    expect(view.retrieval.learning).toMatchObject({ status: 'quality_not_met', scopeCount: 20000, sampledCount: 128,
+      quality: { precision_lower: .91, recall_lower: null } })
+    expect(JSON.stringify(view.retrieval)).not.toContain('training_ids')
+  })
+  it('drops old plan and learning progress after a condition revision', () => {
+    const view = projectOrchestration({ ...state(), query: { contract: { semanticPlan: { inputGeneration: 1 } } },
+      budget: { operatorUsage: { learning: { input_revision: 1, stop_reason: 'quality_passed', returned: 99 } } },
+    } as unknown as RetrievalState)
+    expect(view.retrieval.plan).toBeUndefined()
+    expect(view.retrieval.learning).toBeUndefined()
+  })
   it('shows planning and missing-field limits for an empty current generation instead of candidate review', () => {
     const empty = { ...state(), expertTasks: [], candidates: [], query: { unresolvedConstraints: ['来源没有日期字段'], contract: { schemaVersion: 10 } } } as unknown as RetrievalState
     expect(projectOrchestration(empty)).toMatchObject({ stage: 'planning', blockers: ['来源没有日期字段'] })

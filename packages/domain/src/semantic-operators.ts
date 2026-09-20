@@ -17,8 +17,11 @@ export function operatorRecord(state: RetrievalState, candidate: TicketCandidate
   }
   for (const e of evidence) if (e.candidateRef === candidate.ref) passages.push({ id: e.evidenceId, field: e.field,
     text: e.text, start: e.start, origin: e.origin?.kind ?? 'unknown' })
+  const unresolved = state.judgments?.find(j => j.candidateRef === candidate.ref && j.verdict === 'undetermined')
   return { ref: candidate.ref, version: candidate.sourceVersion, content_hash: candidate.contentHash, passages,
     attributes: { summary_origin: candidate.summaryOrigin ?? { kind: 'unknown' },
+      // 重读后保留待解决的具体疑点；它是复核问题，不是来源事实或新的纳入条件。
+      ...(unresolved ? { unresolved_issue: unresolved.reason } : {}),
       required_evidence_fields: candidate.summaryOrigin?.verification === 'conflicting' ? candidate.summaryOrigin.requiredEvidenceFields ?? [] : [] } }
 }
 
@@ -67,10 +70,16 @@ export function admitOperatorDecisions(state: RetrievalState, generation: number
   const seen = new Set<string>()
   for (const d of decisions) {
     const proxy = d.basis === 'proxy', inference = d.inference
+    const learned = proxy && inference?.algorithm === 'active'
+    const admissible = learned ? inference.inferred && inference.phase === 'prediction'
+      && inference.input_revision === generation && Boolean(inference.model_id && inference.predicate_key && inference.feature_id)
+      && (inference.training_records ?? 0) >= 2 && (inference.proposal !== 'linear' || (inference.fit_count ?? 0) > 0)
+      && inference.checks?.length === 3 && inference.checks.every(c => c.passed && c.sampled <= c.population)
+      : inference?.algorithm === 'cluster' && inference.inferred && inference.phase === 'check'
+        && inference.error_upper === 0 && inference.tolerance === 0 && (inference.alpha ?? 0) > 0 && (inference.alpha ?? 1) <= .005
     // 代理推断来自可信 Python 结果通道，携带数值检验结果，不伪造逐条模型回执。
     if (seen.has(d.ref) || !['model', 'reused_model', 'unresolved', 'proxy'].includes(d.basis)
-      || (proxy && (!inference || inference.algorithm !== 'cluster' || !inference.inferred || inference.phase !== 'check'
-        || inference.error_upper !== 0 || inference.tolerance !== 0 || !(inference.alpha > 0 && inference.alpha <= .005)
+      || (proxy && (!inference || !admissible
         || inference.proposed !== Number(d.label === 'accept') || d.manifest_id !== null))) throw new RetrievalError('INVALID_REQUEST', '算子结果重复或是未经准入的代理推断。')
     seen.add(d.ref)
     const missing = d.basis === 'unresolved' && d.label === 'undetermined' && !d.manifest_id && !d.citations.length && !d.knowledge_ids.length
@@ -80,8 +89,9 @@ export function admitOperatorDecisions(state: RetrievalState, generation: number
     if (!row || (!proxy && !missing && (!manifest || d.knowledge_ids.some(id => !manifest.operator!.knowledgeIds.includes(id))
       || (manifest.releaseId && manifest.releaseId !== state.knowledgeCatalog?.releaseId)))) throw new RetrievalError('INVALID_REQUEST', '算子缺少当前实际模型请求或引用了未送达知识。')
     if (!candidate || candidate.sourceVersion !== row.version || candidate.contentHash !== row.content_hash) throw new RetrievalError('INVALID_REQUEST', '算子记录不属于当前来源版本。')
+    if (learned && (inference.source_version !== candidate.sourceVersion || inference.content_hash !== candidate.contentHash || d.citations.length)) throw new RetrievalError('INVALID_REQUEST', '学习推断来源已变化或伪造了逐条引文。')
     if (!d.reason.trim() || d.reason.length > 1000 || !['accept', 'exclude', 'undetermined'].includes(d.label)
-      || (d.label !== 'undetermined' && (d.basis === 'unresolved' || !d.citations.length))) throw new RetrievalError('INVALID_REQUEST', '算子确定判断缺少依据或理由无效。')
+      || (d.label !== 'undetermined' && (d.basis === 'unresolved' || (!learned && !d.citations.length)))) throw new RetrievalError('INVALID_REQUEST', '算子确定判断缺少依据或理由无效。')
     const evidenceRefs: string[] = []
     for (const citation of d.citations) {
       const p = row.passages.find(p => p.id === citation.passage_id)
@@ -92,7 +102,7 @@ export function admitOperatorDecisions(state: RetrievalState, generation: number
         || p.text.slice(citation.start - p.start, citation.end - p.start) !== citation.quote) throw new RetrievalError('INVALID_REQUEST', '算子引文不属于本条实际送达片段。')
       evidenceRefs.push(evidence.get(p.id)?.candidateRef === row.ref ? p.id : candidate.ref)
     }
-    if (d.label !== 'undetermined' && requiredEvidenceFields(state, candidate, planFields).some(field =>
+    if (!learned && d.label !== 'undetermined' && requiredEvidenceFields(state, candidate, planFields).some(field =>
       !d.citations.some(c => {
         const e = evidence.get(c.passage_id)
         return c.field === field && c.origin === 'source' && e?.candidateRef === candidate.ref && e.field === field
@@ -126,11 +136,11 @@ export function semanticPlanPatch(state: RetrievalState, plan: SemanticQueryPlan
 
 export function validateOperatorArtifact(state: RetrievalState, artifact: import('@retrieval-agent/contracts').OperatorArtifact): void {
   const manifests = artifact.manifestIds.map(id => state.contextManifests?.find(m => m.id === id))
-  const operation = artifact.operation === 'sem_topk' ? 'sem_topk_compare' : artifact.operation
-  const emptyJoin = artifact.operation === 'sem_join' && artifact.events.length === 1
-    && (artifact.events[0] as { type?: string; candidate_pairs?: number }).type === 'join_summary'
-    && (artifact.events[0] as { candidate_pairs?: number }).candidate_pairs === 0
-  if (!emptyJoin && (artifact.operation !== 'sem_topk' || artifact.candidateRefs.length > 1) && !manifests.length
+  const operation = artifact.operation
+  const fieldExtraction = artifact.operation === 'sem_extract' && artifact.events.length > 0 && artifact.events.every(e =>
+    (e as { type?: string; value?: { basis?: string } }).type === 'transform' && (e as { value?: { basis?: string } }).value?.basis === 'field')
+  const directRows = fieldExtraction ? operatorRecords(state, state.candidates.filter(c => artifact.candidateRefs.includes(c.ref))) : []
+  if (!fieldExtraction && !manifests.length
     || manifests.some(m => !m?.operator || m.operator.operation !== operation || m.measurement !== 'dsh_request'
       || m.inputGeneration !== artifact.inputGeneration || m.candidateRefs.some(ref => !artifact.candidateRefs.includes(ref)))) {
     throw new RetrievalError('INVALID_REQUEST', '算子产物缺少本次实际请求来源。')
@@ -141,9 +151,9 @@ export function validateOperatorArtifact(state: RetrievalState, artifact: import
     const obj = value as Record<string, unknown>
     if ('passage_id' in obj && 'quote' in obj) {
       const c = obj as unknown as import('@retrieval-agent/contracts').OperatorCitation
-      if (!manifests.some(m => m?.operator?.records.some(r => r.ref === c.ref && r.version === c.version && r.content_hash === c.content_hash
+      if (![...directRows, ...manifests.flatMap(m => m?.operator?.records ?? [])].some(r => r.ref === c.ref && r.version === c.version && r.content_hash === c.content_hash
         && r.passages.some(p => p.id === c.passage_id && p.field === c.field && p.origin === c.origin && c.start >= p.start
-          && c.end <= p.start + p.text.length && c.end - c.start === c.quote.length && p.text.slice(c.start - p.start, c.end - p.start) === c.quote)))) {
+          && c.end <= p.start + p.text.length && c.end - c.start === c.quote.length && p.text.slice(c.start - p.start, c.end - p.start) === c.quote))) {
         throw new RetrievalError('INVALID_REQUEST', '算子产物引用未送达的工单片段。')
       }
     }

@@ -42,6 +42,19 @@ export class MilvusClient {
       collectionName: name, id: ids, outputFields: ['id', 'ticket_id', 'source_version', 'content_hash', 'vector'],
       consistencyLevel: 'Strong' }, signal)
   }
+  async ticketVectors(name: string, ids: readonly string[], signal?: AbortSignal) {
+    const rows: (Omit<MilvusHit, 'distance'> & { vector: number[] })[] = []
+    // 一个有限工单块内排除已返回片段；不依赖 Milvus 未承诺的返回顺序。
+    while (ids.length) {
+      const page = await this.call<(Omit<MilvusHit, 'distance'> & { vector: number[] })[]>('entities/query', {
+        collectionName: name, filter: `ticket_id in ${JSON.stringify(ids)}` + (rows.length ? ` && id not in ${JSON.stringify(rows.map(r => r.id))}` : ''),
+        outputFields: ['id', 'ticket_id', 'source_version', 'content_hash', 'vector'],
+        limit: 1024, consistencyLevel: 'Strong' }, signal)
+      rows.push(...page)
+      if (page.length < 1024) break
+    }
+    return rows
+  }
   async searchCollection(name: string, vector: readonly number[], topK: number, signal?: AbortSignal): Promise<MilvusHit[]> {
     return this.searchFilter(name, vector, '', topK, signal)
   }

@@ -14,7 +14,7 @@ import numpy as np
 import scipy
 import sklearn
 from caseweave_ops import ArtifactStore, Knowledge, ModelReply, Passage, Record, Runtime, Scope
-from caseweave_ops.dispatch import invoke_rows, records_from
+from caseweave_ops import invoke_rows, records_from
 from caseweave_ops.types import digest
 
 
@@ -27,6 +27,13 @@ def dataset(kind, n, seed):
     if kind in {'identical', 'rare', 'unknown'}: X = np.ones((n, 2))
     if kind == 'rare': y[:] = 0; y[-1] = 1
     if kind == 'unknown': y[:] = -1
+    if kind == 'rare_identical':
+        # 固定审阅反例的数据生成顺序，16384 条中随机放置 32 个正例。
+        rng = np.random.default_rng(seed)
+        groups = np.arange(n) % 4
+        rng.normal(0, .05, (n, 4))
+        X = np.ones((n, 4)); y = np.zeros(n, dtype=int)
+        y[rng.choice(n, max(1, n // 512), replace=False)] = 1
     rows = [Record(str(i), 'synthetic-v1', digest(['source', i]),
         (Passage('p', 'source.raw_dialogue', f'Synthetic ticket {i}; interpretation supplied only by the scripted oracle.'),),
         (tuple(map(float, x)),), 'synthetic-space') for i, x in enumerate(X)]
@@ -45,25 +52,35 @@ def quality(y, predicted):
 
 async def run_case(kind, n, seed, variant):
     rows, gold, groups = dataset(kind, n, seed)
+    teacher = gold.copy()
+    if kind == 'biased_teacher': teacher[np.arange(n) % 4 == 3] = 0
     actual = []
     class Oracle:
         identity = 'synthetic-oracle-not-a-business-model'
         async def generate(self, request):
             payload = json.loads(request['messages'][-1]['content'])
             actual.append([r['ref'] for r in payload['records']])
-            return ModelReply({'rows': [{'ref': r['ref'], 'label': {-1:'undetermined', 0:'exclude', 1:'accept'}[int(gold[int(r['ref'])])],
+            return ModelReply({'rows': [{'ref': r['ref'], 'label': {-1:'undetermined', 0:'exclude', 1:'accept'}[int(teacher[int(r['ref'])])],
                 'citations': [{'ref': r['ref'], 'passage_id': 'p', 'quote': r['passages'][0]['text']}],
                 'knowledge_ids': [], 'reason': 'Explicit synthetic oracle; not business evidence.'} for r in payload['records']]})
     store = ArtifactStore()
     rt = Runtime(Scope('benchmark', 1, 'synthetic', 'fixture-owner'), Oracle(), store, Knowledge('empty'), use_cache=False)
-    params = {'algorithm': 'reference' if variant in {'full', 'batch_sort'} else 'csv' if variant == 'csv' else 'auto' if variant == 'auto' else 'cluster',
+    params = {'algorithm': 'baseline' if variant == 'full' else 'cluster',
               'batch_size': 8, 'options': {'seed': seed}}
-    # Exact 0.3.0 sort+online-feedback path. Keep its computation in the measurement.
-    if variant == 'batch_sort': params.update(queries=[rows[0].vectors[0]], embedding_id='synthetic-space')
     if variant == 'checked_1pct_experiment':
         params['options'].update(accept_error=.01, reject_error=.01)
-    if variant == 'linear_1pct_experiment':
-        params['options'].update(clusters=1, pilot_size=64, proposal='linear', accept_error=.01, reject_error=.01)
+    # 以下三个 proposal 使用相同分区、pilot、seed、容忍值，只改变预测器。
+    matched = {'uniform_global_1pct': 'uniform', 'similarity_global_1pct': 'similarity', 'linear_global_1pct': 'linear'}
+    if variant in matched:
+        params['options'].update(clusters=1, pilot_size=64, proposal=matched[variant], accept_error=.01, reject_error=.01)
+    # 对照 similarity_global_1pct 时分别只改变 pilot 或分区数。
+    if variant in {'similarity_global_pilot12', 'similarity_four_clusters'}:
+        params['options'].update(clusters=4 if variant == 'similarity_four_clusters' else 1,
+            pilot_size=12 if variant == 'similarity_global_pilot12' else 64,
+            proposal='similarity', accept_error=.01, reject_error=.01)
+    allowed = {'full', 'checked', 'checked_1pct_experiment', *matched,
+               'similarity_global_pilot12', 'similarity_four_clusters'}
+    if variant not in allowed: raise ValueError(f'Unknown variant: {variant}')
     started, first = time.perf_counter(), None
     output = []
     try:
@@ -83,7 +100,10 @@ async def run_case(kind, n, seed, variant):
         for v in observations:
             if v['basis'] == 'model': phase_requests[v['phase']].add(v['manifest'])
         checks = [json.loads(row[0]) for row in store.db.execute("SELECT data FROM observations WHERE kind='filter_algorithm'")]
-        return {'case': kind, 'n': n, 'seed': seed, 'variant': variant, 'quality': quality(gold, predicted),
+        return {'case': kind, 'n': n, 'seed': seed, 'variant': variant, 'configuration': params,
+            'quality': quality(gold, predicted), 'quality_against_teacher': quality(teacher, predicted),
+            'teacher_quality_against_gold': quality(gold, teacher), 'teacher_disagreement': float(np.mean(predicted != teacher)),
+            'false_negative_ids': np.flatnonzero((gold == 1) & (predicted != 1)).tolist(),
             'subgroups': {str(g): quality(gold[groups == g], predicted[groups == g]) for g in np.unique(groups)},
             'actual_strong_record_ids': strong, 'actual_strong_batches': actual, 'proxy_record_ids': proxy,
             'outcomes': dict(Counter(v['label'] for v in output)),
@@ -92,7 +112,7 @@ async def run_case(kind, n, seed, variant):
             'training_fits': sum(c.get('model_fits', 0) for c in checks),
             'calibration_checks': [c for c in checks if c['phase'] == 'check'],
             'retries': 0, 'supplemental_evidence_calls': 0, 'adapter_requests': len(actual),
-            'physical_provider_requests': 0, 'tokens': None, 'vendor_qpm_tpm': None,
+            'physical_provider_requests': None, 'tokens': None, 'vendor_qpm_tpm': None,
             'metering': store.metrics('benchmark'), 'first_result_seconds': first, 'total_seconds': elapsed,
             'outside_candidate_recall': 'not_evaluated', 'closed_input': True}
     finally:
@@ -105,7 +125,7 @@ async def main():
     parser.add_argument('--size', type=int, default=1024)
     parser.add_argument('--seeds', default='0,7,19')
     parser.add_argument('--cases', default='separable,mixed,identical,rare,multimodal,unknown')
-    parser.add_argument('--variants', default='full,auto,batch_sort,csv,checked,checked_1pct_experiment,linear_1pct_experiment')
+    parser.add_argument('--variants', default='full,checked,uniform_global_1pct,similarity_global_1pct,linear_global_1pct,similarity_global_pilot12,similarity_four_clusters')
     args = parser.parse_args()
     report = {'evidence': 'synthetic vectors and deterministic scripted oracle; NOT actual models, databases, or business Gold',
               'environment': {'numpy': np.__version__, 'scipy': scipy.__version__, 'sklearn': sklearn.__version__},

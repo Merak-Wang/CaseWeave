@@ -255,6 +255,9 @@ importers:
       '@retrieval-agent/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@retrieval-agent/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@retrieval-agent/product-api':
         specifier: workspace:*
         version: link:../product-api

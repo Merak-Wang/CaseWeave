@@ -27,6 +27,8 @@ import {
 import { installDshSessionCompatibility, readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
 import { SessionRetrievalEventJournal } from './session-journal.js'
 import type { SemanticOperators } from './semantic-operators.js'
+import { MemorySemanticResultStore } from './semantic-result-store.js'
+import { learnedResult } from '@retrieval-agent/domain/result'
 import type { SemanticQueryPlan, ContextManifest, OperatorDecision } from '@retrieval-agent/contracts'
 
 interface ActiveRetrieval {
@@ -77,6 +79,7 @@ function latestRetrieval(agent: Agent): { readonly events: ReturnType<typeof rea
 export class RetrievalAgentService extends Service {
   modelSelection?: (agent: Agent) => { provider: string; model: string } | undefined
   operators?: SemanticOperators
+  semanticResults: import('@retrieval-agent/contracts').SemanticResultStore = new MemorySemanticResultStore()
   coordinator?: { prepare(agent: Agent, signal?: AbortSignal): Promise<void>; validateKnowledge?(agent: Agent): Promise<void>; runPending(agent: Agent, signal?: AbortSignal): Promise<void>; waitForExperts?(agent: Agent, taskIds: readonly string[], signal?: AbortSignal): Promise<void>; settlePending?(agent: Agent, signal?: AbortSignal): Promise<void>; cancelPending?(agent: Agent): void; isExpert(agent: Agent): boolean; knowledgeView?(state: RetrievalState, entryId?: string): Promise<import('./knowledge-view.js').KnowledgeView> }
   static inject = ['ticketRetrievalProvider', 'ticketPrincipalProvider']
   private readonly active = new WeakMap<Agent, ActiveRetrieval>()
@@ -190,6 +193,23 @@ export class RetrievalAgentService extends Service {
   async recordSemanticSearch(agent: Agent, key: string): Promise<RetrievalState> {
     const entry = this.entry(agent)
     return this.mutate(entry, async state => entry.controller.recordSemanticSearch(state, key))
+  }
+  async hydrateResultCandidates(agent: Agent, refs: readonly import('@retrieval-agent/contracts').TicketCandidateRef[], signal?: AbortSignal): Promise<RetrievalState> {
+    const state = this.current(agent), result = learnedResult(state), provider = this.ctx.ticketRetrievalProvider
+    const missing = refs.filter(ref => !state.candidates.some(c => c.ref === ref))
+    if (!result || !missing.length) return state
+    if (!provider.featureBlock || !provider.resolveFeatureIds) throw new RetrievalError('PROVIDER_UNAVAILABLE', '数值结果来源映射未接通。')
+    const principal = await this.principal(agent, 'detail_read', signal)
+    const block = await provider.featureBlock(principal, { snapshotId: state.snapshot!.snapshotId, refs: missing, limit: missing.length }, signal ? { signal } : {})
+    if (block.ids.length !== new Set(missing).size) throw new RetrievalError('CANDIDATE_NOT_FOUND', '结果引用不属于当前来源。')
+    for (const id of block.ids) if ((await this.semanticResults.page(state.retrievalId, result.model_id, id-1, 1)).ids[0] !== id) throw new RetrievalError('CANDIDATE_NOT_FOUND', '工单不属于当前确认集合。')
+    const rows = await provider.resolveFeatureIds(principal, { snapshotId: state.snapshot!.snapshotId, ids: block.ids }, signal ? { signal } : {})
+    if (learnedResult(this.current(agent))?.model_id !== result.model_id) throw new RetrievalError('INVALID_TRANSITION', '结果集合已修订。')
+    return this.registerResultCandidates(agent, result.input_revision, rows, result.model_id)
+  }
+  protected async registerResultCandidates(agent: Agent, generation: number, candidates: readonly import('@retrieval-agent/contracts').TicketCandidate[], modelId: string): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => entry.controller.registerResultCandidates(state, generation, candidates, modelId))
   }
   async recordOperatorActivity(agent: Agent, activity: NonNullable<RetrievalState['operatorActivity']>): Promise<RetrievalState> {
     const entry = this.entry(agent)

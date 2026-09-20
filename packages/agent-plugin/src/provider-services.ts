@@ -30,6 +30,10 @@ declare module '@deepseek-ai/cordis' {
 export abstract class TicketRetrievalProviderService extends Service implements TicketRetrievalProvider {
   abstract readonly providerId: string
   readFeatures: NonNullable<TicketRetrievalProvider['readFeatures']> = async () => []
+  scanFeatures?: NonNullable<TicketRetrievalProvider['scanFeatures']>
+  featureBlock?: NonNullable<TicketRetrievalProvider['featureBlock']>
+  resolveFeatureIds?: NonNullable<TicketRetrievalProvider['resolveFeatureIds']>
+  readCandidates?: NonNullable<TicketRetrievalProvider['readCandidates']>
 
   constructor(ctx: Context) {
     super(ctx, 'ticketRetrievalProvider')

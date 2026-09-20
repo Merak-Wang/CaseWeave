@@ -6,6 +6,7 @@ import {
   type RetrievalState,
 } from '@retrieval-agent/contracts'
 import { allowedAction, validateCandidateRefs } from './state-guards.js'
+import { confirmedCount, learnedResult } from './result.js'
 import { expertConflictResolution, expertNeedsMainReview } from './experts.js'
 import { validateExclusionChecks } from './exclusion-checks.js'
 import { operatorRequiredFields, requiredEvidenceFields } from './evidence-requirements.js'
@@ -101,14 +102,19 @@ export function admitDecision(state: RetrievalState, decision: RetrievalDecision
 /** 主 Agent 和算子共用批量合并，已准入判断只更新一次结果集合。 */
 export function mergeCandidateJudgments(state: RetrievalState, incoming: readonly RetrievalCandidateJudgment[]): Partial<RetrievalState> {
   const judgments = new Map((state.judgments ?? []).map(j => [j.candidateRef, j]))
-  if (incoming.some(j => j.basis !== 'proxy' && judgments.has(j.candidateRef)
-    && judgments.get(j.candidateRef)!.verdict !== j.verdict)) {
+  const corrected = incoming.some(j => j.basis !== 'proxy' && judgments.has(j.candidateRef)
+    && judgments.get(j.candidateRef)!.verdict !== j.verdict)
+  if (corrected) {
     for (const [ref, j] of judgments) if (j.basis === 'proxy') judgments.delete(ref)
   }
   for (const j of incoming) judgments.set(j.candidateRef, { ...j, evidenceRefs: [...new Set(j.evidenceRefs)] })
   const refs = new Set(state.candidates.map(c => c.ref))
   const active = [...judgments.values()].filter(j => refs.has(j.candidateRef))
+  // 强判断推翻旧结论时，旧代理集合和覆盖结论一起失效，下一步重新学习。
+  const learning = state.budget.operatorUsage?.learning
   return { judgments: active, expertConflicts: expertConflictResolution(state, incoming),
+    ...(corrected && learning ? { budget: { ...state.budget, operatorUsage: { ...state.budget.operatorUsage,
+      learning: { ...learning as Record<string, unknown>, stop_reason: 'strong_label_corrected' } } } } : {}),
     selectedCandidateRefs: active.filter(j => j.verdict === 'accept').map(j => j.candidateRef),
     excludedCandidateRefs: active.filter(j => j.verdict === 'exclude').map(j => j.candidateRef) }
 }
@@ -131,10 +137,15 @@ export function finishReason(state: RetrievalState, action: Extract<RetrievalDec
     validateVisibleEvidence(state, review.evidenceRefs)
     reviewed.add(task.id)
   }
-  const accepted = state.selectedCandidateRefs.length
+  const accepted = confirmedCount(state)
   const pending = state.candidates.filter(candidate => !selected.has(candidate.ref) && !excluded.has(candidate.ref)).length
-  const exhausted = state.lastPage?.boundary.resultPagesExhausted ?? false
+  const learning = state.budget.operatorUsage?.learning as { input_revision?: number; task_semantics?: string; unresolved?: number; complete_feature_coverage?: boolean; complete_scope_coverage?: boolean; stop_reason?: string } | undefined
+  const currentLearning = learning?.input_revision === (state.inputGeneration ?? 0) ? learning : undefined
+  const learnedScope = Boolean(learnedResult(state)) || (currentLearning?.complete_feature_coverage || currentLearning?.complete_scope_coverage) && currentLearning.unresolved === 0
+    && ['checked_predictions', 'all_observed'].includes(currentLearning.stop_reason ?? '')
+  const exhausted = learnedScope || (state.lastPage?.boundary.resultPagesExhausted ?? false)
   const blocking = [
+    ...((state.task.countPolicy === 'exhaustive' || currentLearning?.task_semantics === 'full_authorized_scope') && currentLearning && !learnedScope ? ['全库学习未通过集合质量验收，不能把搜索页末或样本判断视为全集完成'] : []),
     ...state.query.unresolvedConstraints.map(c => `用户条件待核实：${c}`),
     ...state.gaps.filter(gap => (!['coverage', 'boundary'].includes(gap.kind) || gap.evaluator === 'model') && ['open', 'unknown'].includes(gap.status))
       .map(g => `semantic_gaps 中 ${g.kind}=${g.status}：${(g.description ?? '未说明').slice(0, 150)}`),
@@ -146,7 +157,7 @@ export function finishReason(state: RetrievalState, action: Extract<RetrievalDec
   ]
   const blocked = blocking.length > 0
   const countMet = state.task.countPolicy !== 'explicit' || accepted >= (state.task.requestedCount ?? 0)
-  const scopeMet = state.task.countPolicy !== 'exhaustive' || (exhausted && pending === 0)
+  const scopeMet = state.task.countPolicy !== 'exhaustive' || Boolean(learnedResult(state)) || (exhausted && pending === 0)
   if (action.reason === 'incomplete') {
     if (!blocked && countMet && scopeMet && pending === 0 && exhausted && accepted > 0) {
       throw new RetrievalError('INVALID_TRANSITION', '当前没有支持未完成结论的缺口或数量、范围限制。')

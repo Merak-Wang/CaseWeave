@@ -34,6 +34,7 @@ import {
   validateCandidateRefs as validateRefs,
 } from './state-guards.js'
 import { executeSearchTransition } from './search-transition.js'
+import { learnedResult } from './result.js'
 import { fallbackQueryContract } from './query-contract.js'
 import { reviseQueryPlan, resolvePlanRequirements } from './query.js'
 import { modelRequestBudget, modelResponseBudget, toolCallBudget } from './runtime-budget.js'
@@ -52,7 +53,7 @@ function frozenCandidate(candidate: TicketCandidate, evidence: readonly TicketEv
 
 export interface RetrievalControllerConfig {
   readonly initialPlanner?: (state: RetrievalState, signal?: AbortSignal) => Promise<{ plan: SemanticQueryPlan; manifests: readonly ContextManifest[] }>
-  readonly onState?: (state: RetrievalState) => void | Promise<void>
+  readonly onState?: (state: RetrievalState) => void | RetrievalState | Promise<void | RetrievalState>
   readonly retrievalId?: RetrievalId
   readonly initialInformation?: readonly RetrievalClarificationAnswer[]
   readonly rulesVersion?: string
@@ -201,7 +202,7 @@ export class RetrievalController {
     if (this.#initialInformation.length) {
       state = this.#record(state, { phase: 'snapshot_opened', allowedActions: [action('search'), action('read_state')] })
     }
-    await this.#onState?.(state)
+    state = await this.#onState?.(state) ?? state
     try {
       if (!snapshot.capabilities.keywordSearch || !snapshot.capabilities.denseSearch || !snapshot.capabilities.hybridFusion) {
         throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Provider 未声明首轮 Hybrid 所需的真实双通道能力。')
@@ -216,7 +217,7 @@ export class RetrievalController {
       state = searched.value
       if (planned.status === 'rejected') throw planned.reason
       state = this.acceptSemanticPlan(state, planned.value.plan, planned.value.manifests)
-      await this.#onState?.(state)
+      state = await this.#onState?.(state) ?? state
       return state
     } catch (error) {
       if (!(error instanceof RetrievalError)) throw error
@@ -432,7 +433,12 @@ export class RetrievalController {
     let current = state
     const catalog = manifests.find(m => m.operator?.operation === 'query_plan')?.operator?.catalog
     if (!current.knowledgeCatalog && catalog) current = this.expertUpdate(current, plan.inputGeneration, { kind: 'catalog', catalog })
-    for (const manifest of manifests) current = this.expertUpdate(current, plan.inputGeneration, { kind: 'manifest', manifest })
+    for (const manifest of manifests) {
+      // 调用用量进入 budget；动态计量不是不可变证据正文的一部分。
+      const { metrics: _metrics, ...operator } = manifest.operator ?? {}
+      current = this.expertUpdate(current, plan.inputGeneration, { kind: 'manifest',
+        manifest: manifest.operator ? { ...manifest, operator: operator as NonNullable<ContextManifest['operator']> } : manifest })
+    }
     if (!current.contextManifests?.some(m => m.operator?.operation === 'query_plan' && m.operator.pythonManifestId === plan.manifest_id
       && m.inputGeneration === plan.inputGeneration && m.measurement === 'dsh_request')) throw new RetrievalError('INVALID_REQUEST', '查询计划没有实际 DSH 请求依据。')
     const metrics = manifests.findLast(m => m.operator?.metrics)?.operator?.metrics
@@ -451,9 +457,17 @@ export class RetrievalController {
   recordSemanticSearch(state: RetrievalState, key: string): RetrievalState {
     return state.semanticSearchKeys?.includes(key) ? state : this.#record(state, { semanticSearchKeys: [...(state.semanticSearchKeys ?? []), key] })
   }
+  registerResultCandidates(state: RetrievalState, generation: number, candidates: readonly import('@retrieval-agent/contracts').TicketCandidate[], modelId: string): RetrievalState {
+    if (generation !== (state.inputGeneration ?? 0) || learnedResult(state)?.model_id !== modelId || candidates.some(c => c.snapshotId !== state.snapshot?.snapshotId)) throw new RetrievalError('INVALID_TRANSITION', '按需结果读取已过期。')
+    const active = new Map(state.candidates.map(c => [c.ref, c])), history = new Map(state.candidateHistory.map(c => [c.ref, c]))
+    candidates.forEach(c => { active.set(c.ref, c); history.set(c.ref, c) })
+    return this.#record(state, { candidates: [...active.values()], candidateHistory: [...history.values()] })
+  }
   recordOperatorUsage(state: RetrievalState, generation: number, metrics: Readonly<Record<string, unknown>>): RetrievalState {
     if (generation !== (state.inputGeneration ?? 0)) throw new RetrievalError('INVALID_TRANSITION', '算子计量属于旧输入代次。')
-    return this.#record(state, { budget: { ...state.budget, operatorUsage: metrics } })
+    const previous = state.budget.operatorUsage?.learning as { input_revision?: number } | undefined
+    const learning = metrics.learning ?? (previous?.input_revision === generation ? previous : undefined)
+    return this.#record(state, { budget: { ...state.budget, operatorUsage: { ...metrics, ...(learning ? { learning } : {}) } } })
   }
   recordOperatorActivity(state: RetrievalState, activity: NonNullable<RetrievalState['operatorActivity']>): RetrievalState {
     if (activity.inputGeneration !== (state.inputGeneration ?? 0) || state.phase === 'stopped') return state
@@ -514,6 +528,7 @@ export class RetrievalController {
 
   /** Every replay presentation and resumed wait checks the trusted Provider again. */
   async reauthorize(principal: TrustedPrincipalContext, state: RetrievalState, signal?: AbortSignal): Promise<RetrievalState> {
+    signal?.throwIfAborted()
     try {
       if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '没有可重新授权的历史快照。')
       const status = await this.#provider.status(principal, state.snapshot.snapshotId)
@@ -533,6 +548,8 @@ export class RetrievalController {
       }
       return state.accessValidation === 'required' ? this.#record(state, { accessValidation: 'current' }) : state
     } catch (error) {
+      // 退出中的请求不产生数据源故障事件，保留已提交的取消或条件修订。
+      signal?.throwIfAborted()
       const failure = asRetrievalError(error)
       const reason = stopReason(failure) ?? 'backend_error'
       if (state.accessValidation === 'required' && state.phase === 'stopped' && state.termination === reason) return state
@@ -744,6 +761,12 @@ export class RetrievalController {
   expertUpdate(state: RetrievalState, generation: number, update: ExpertUpdate): RetrievalState {
     if (generation !== (state.inputGeneration ?? 0) || state.phase === 'stopped') throw new RetrievalError('INVALID_TRANSITION', '专家作业属于过期输入或已停止任务。')
     switch (update.kind) {
+      case 'candidates': {
+        if (update.candidates.some(c => c.snapshotId !== state.snapshot?.snapshotId)) throw new RetrievalError('SNAPSHOT_INVALID', '学习样本不属于当前快照。')
+        const active = new Map(state.candidates.map(c => [c.ref, c])), history = new Map(state.candidateHistory.map(c => [c.ref, c]))
+        for (const c of update.candidates) { active.set(c.ref, c); history.set(c.ref, c) }
+        return this.#record(state, { candidates: [...active.values()], candidateHistory: [...history.values()] })
+      }
       case 'knowledge_invalidated': {
         const affected = state.expertTasks?.filter(t => t.inputGeneration === generation && t.status !== 'failed'
           && t.knowledgeRefs.some(ref => update.references.includes(ref))) ?? []
@@ -969,9 +992,8 @@ export class RetrievalController {
           ...(current.phase === 'awaiting_clarification' ? { allowedActions: current.allowedActions.filter(item => item.kind !== 'search_next') } : {}),
         }, this.#now, this.#id)
         recordRetrievalState(this.#journal, next, this.#proposalBases.get(current) ?? current)
-        state = next
-        await this.#onState?.(next)
-        return next
+        state = await this.#onState?.(next) ?? next
+        return state
       },
       provider: this.#provider,
       journal: this.#journal,
@@ -982,7 +1004,8 @@ export class RetrievalController {
       ...(input.delta === undefined ? {} : { delta: input.delta }),
       ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
       ...(signal === undefined ? {} : { signal }),
-      topK: this.#searchTopK,
+      // 关键词全集用 Provider 允许的 100 条批宽枚举；模型审阅窗口和向量 Top-K 不随之扩大。
+      topK: state.query.contract?.schemaVersion === 10 && (input.mode ?? state.query.spec.mode) === 'keyword' ? 100 : this.#searchTopK,
       maxScan: this.#searchMaxScan,
     }) } catch (error) {
       if (error instanceof RetrievalError && stopReason(error) !== undefined) return this.stop(state, stopReason(error)!, error)
@@ -993,7 +1016,6 @@ export class RetrievalController {
       allowedActions: state.allowedActions.filter(item => item.kind !== 'search_next'),
     } : {}) }, this.#now, this.#id)
     recordRetrievalState(this.#journal, next, this.#proposalBases.get(state) ?? state)
-    await this.#onState?.(next)
-    return next
+    return await this.#onState?.(next) ?? next
   }
 }

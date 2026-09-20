@@ -38,6 +38,7 @@ flowchart LR
   product_api --> domain
   product_host --> agent_plugin
   product_host --> contracts
+  product_host --> domain
   product_host --> product_api
   product_host --> query_understanding
   provider_database --> contracts
@@ -60,7 +61,7 @@ flowchart LR
 | `@retrieval-agent/dsh-compat` | compatibility | 固定 DSH 0.1.5-rc.2 的事件注册、历史 Session 迁移与 OpenCode 会话请求头接线、版本握手和退出断言。 | `@retrieval-agent/contracts` |
 | `@retrieval-agent/model-service-client` | model-client | 同一 Python 模型服务的版本化 HTTP 客户端；主入口提供 embedding/rerank，ranking 子入口提供排名、授权候选校验及可取消的索引准备长任务。 | — |
 | `@retrieval-agent/product-api` | host-api | 可信 Host 的当前授权呈现、详情读取、版本化确认结果分页导出和审计；共享状态投影与浏览器下载客户端。 | `@retrieval-agent/contracts`<br>`@retrieval-agent/domain` |
-| `@retrieval-agent/product-host` | host-adapter | 把 Product API 与独立任务工作台绑定到 DSH，装配持久 worker、查询分析器和可信主体，处理命令、快照、SSE 与确认导出。 | `@retrieval-agent/agent-plugin`<br>`@retrieval-agent/contracts`<br>`@retrieval-agent/product-api`<br>`@retrieval-agent/query-understanding` |
+| `@retrieval-agent/product-host` | host-adapter | 把 Product API 与独立任务工作台绑定到 DSH，装配持久 worker、查询分析器和可信主体，处理命令、快照、SSE 与确认导出。 | `@retrieval-agent/agent-plugin`<br>`@retrieval-agent/contracts`<br>`@retrieval-agent/domain`<br>`@retrieval-agent/product-api`<br>`@retrieval-agent/query-understanding` |
 | `@retrieval-agent/provider-database` | provider | 版本化 MySQL 字面全集与 Milvus 向量召回、索引发布和增量搜索结果。 | `@retrieval-agent/contracts`<br>`@retrieval-agent/model-service-client`<br>`@retrieval-agent/provider-local` |
 | `@retrieval-agent/provider-local` | provider | 开发期只读 Provider、授权快照、来源适配、字段级证据读取与 RAG 排名装配；raw 仅作为受限本地来源存储。 | `@retrieval-agent/contracts`<br>`@retrieval-agent/model-service-client` |
 | `@retrieval-agent/query-understanding` | query-understanding | 构造自然语言查询初始契约，并为显式结构化调用保留 spaCy 分析与条件编译；语义规划由 Python 算子执行。 | `@retrieval-agent/contracts` |

@@ -1,96 +1,69 @@
-# Python 语义算子
+# Python 语义算子与现有 Host
 
-新任务的原句向量召回和 `query_plan` 并行执行。规划器输出关键词、完整自然语言业务判据、语义改写、结果目标和算子步骤。关键词以 OR 枚举字面全集，向量保持有限召回；二者都只是候选。业务 AND/OR/NOT、否定、主体和时序由算子按原句与用户补充判断，检索表达不修改最终要求。
+语义入口只有 `sem_filter`、`sem_extract`、`sem_agg`。搜索和读取是基础工具；确定性集合运算、排序和统计由普通代码执行。一次任务只需要 filter 时不执行抽取或聚合。Python 使用现有 DSH 模型回调，不创建第二个 Agent、标签服务或质量 Agent。
 
-## 执行与职责
-
-核心实现在 [caseweave_ops](../../python/semantic-operators/src/caseweave_ops)，接入由 [SemanticOperators](../../packages/agent-plugin/src/semantic-operators.ts) 负责。新任务先做规划与检索，过滤持续按批交付；后续由 DSH 主 Agent 按缺口调用。计划是有类型的执行建议，不是任意代码或 SQL。
-
-| 算子 | 输入与产物 | 边界 |
+| 入口 | 输入与结果 | 使用边界 |
 | --- | --- | --- |
-| sem_search | 关键词或语义表达 → 流式候选 | 字面全集不被向量 Top-K 截断 |
-| sem_filter | 完整判据与记录 → accept/exclude/undetermined | 引用验证后直接更新确认状态，缺证先未决 |
-| sem_topk | 指令、候选、k → 有比较依据的顺序 | 排名不自动确认相关 |
-| sem_map | 记录、对象 schema → 有来源的对象 | 不改业务工单，严格验证 schema |
-| sem_extract | 记录、对象 schema → 字段及引用 | 非空字段必须有逐字段来源 |
-| sem_join | 显式对或指定 blocking 字段 → 候选对与关系判断 | 阻塞遗漏单独评价，不冒充无损连接 |
-| sem_agg | 有限来源 → 分层归纳与来源链 | 服务当前检索，不自动开展下游统计 |
+| sem_filter | 完整业务判据 → 授权范围的集合及质量对象 | 全集默认学习式过滤；显式指定候选或示例任务可直接判断少量记录 |
+| sem_extract | 明确所需记录、字段/schema → 有字段来源的事实 | 字段读取和可靠解析优先；开放事实通过现有 DSH reader，不按簇传播金额、日期或原因 |
+| sem_agg | 所给事实/证据 → 代码统计与有来源的说明 | 证据窗口不改变集合；总体精确统计必须有全部所需字段 |
 
-普通算子判断无需主 Agent 逐条再判。主 Agent 处理未决、补证、分歧、进一步搜索与停止。定向 `ticket_read` 取得新字段后会对指定候选调用过滤。批宽是上下文调度参数，不是累计调用上限。
+`sem_map`、`sem_topk`、`sem_join` 已退出生产工具、计划、Python 分发和实现。新的关系任务有明确需求后再设计；排名不能决定全集成员。
 
-条件补充进入新输入代次后，先执行新计划的关键词与语义召回，再复核新候选；搜索去重身份绑定任务、代次、快照和授权。`sem_filter.params.required_fields` 声明必须实际读取并引用的字段，规划器从 Provider 字段目录选择。来源性质 `origin=source` 只描述出处，不能证明读过原始对话；旧计划 `require_source=true` 按对话要求处理。已知摘要与原文冲突也会要求对话证据，主 Agent 与算子准入共用该要求。
+## 默认执行路径
 
-Python 通过 Host 回调取得授权记录、搜索结果和 DSH 模型响应，不持有生产数据库或模型凭据。Host 按输入页补读计划和已知摘要冲突要求的缺失字段；仍无内容的记录直接未决，不为已知缺口调用模型。独立算子请求记录实际指令、Wiki、证据和用量，不反复附加主 Agent 的整个历史。
+`工作台任务 → task-worker/pre-step/sem_filter 工具 → SemanticOperators.filter → PythonOperatorBridge → server.Bridge.execute → invoke_rows → filter.sem_filter → filter.learned_filter`。
 
-## FastAPI 与 stdio
+`auto` 和 `learned` 进入同一学习主干，`active` 是已有配置消费者的薄别名。无明确示例数量时按全集学习。`direct` 仅为显式小范围参照；`baseline/cluster` 按需加载独立 `baseline.py`，保留旧区域算法用于迁移对照，不是失败回退。缺少数值 Provider 时默认全集报错，不逐条强判全库。
 
-两种传输共用 `run`、资源 `request/response`、流式 `result`、`done` 和 `cancel` 协议。
+Python 包的模块按职责收敛：三个算子各一文件，模型/质量/数值块各一文件；`search.py` 保留现有一次规划与检索回调，`runtime.py` 统一模型回调、缓存和计量，`server.py` 共用 stdio/WebSocket 服务。抽样归入 `features.py`，证据选择归入 `aggregate.py`，分发直接位于包入口。没有独立 JSONL、embedding 或 HTTP 模型适配，也没有第二套 Python 启动编排。
 
-- 设置 `CASEWEAVE_OPERATORS_URL` 后，Node 连接内部 WebSocket `/v1/operators`。FastAPI 常驻进程复用执行工件库，并发等待模型及 Provider I/O；`/health` 用于就绪检查。
-- 未设置 URL 时，源码工作区启动 UTF-8 stdio worker。可用 `CASEWEAVE_PYTHON` 指定已装依赖的 Python，否则使用锁定 uv workspace 并保留环境内其他包。
-- 完整 Compose 包含独立算子容器，共享私有工件卷，不向宿主发布端口。`CASEWEAVE_OPERATORS_TOKEN` 可配置双方共享令牌；服务拒绝浏览器 Origin。跨机访问使用受控网络与 TLS。
+模型负责判据、歧义、相关性与语义停止。Host 负责当前输入代次、授权来源、真实引用与结果发布。完整自然语言要求来自现有一次 query 理解；关键词 OR 和语义改写只用来发现训练样本。只有标题和摘要时按实际可见事实判断，缺少判据所需事实保持未知。
 
-FastAPI 的收益是进程复用和并发调度，不能仅凭服务 ready 声称模型推理加速。性能比较需要固定模型、数据、缓存状态与并发。
+规划不把 Wiki 的取证建议升级成用户未提出的必要条件；判断时逐项核对用户明确的对象、原状态、变化及时序。部分条件有据而其他条件未被说明时保持未定，不能用相似主题、日期或行业惯例补足，也不能为凑足示例数量放宽条件。示例任务的关键词全集按 100 条一页枚举，模型审阅窗口和原句向量 Top-K 独立配置。
 
-## 一致性与计量
+强模型初判命中的记录在提交前另做一次缺项复核，只传用户判据与该记录材料，不传初判标签或理由。复核独立说明每项必要事实的依据或缺项，缺项保持未定；最终标签与引用来自复核请求。它不是投票或置信度门槛，新增调用如实计量；排除和未定记录不重复复核。
 
-缓存身份包含任务、输入代次、快照、授权、模型、判据、Wiki 版本和记录内容。SQLite 存执行工件与断点，MySQL 仍是任务权威。Host 检查版本、正文哈希、引文偏移、Wiki 可见性、实际 DSH 请求和当前输入代次；缓存输出仍需通过这些检查。取消、断线和补充后旧结果不得进入新状态，重复结果不重复改变确认集合。
+后续重读同时携带该工单上一次的未解决疑点。它不是来源事实或新的纳入要求；改为确认时必须说明新增材料如何解决疑点，或指出先前疑点与原文的具体矛盾，不能靠重复抽样改判。对话中的新推荐方案与原先状态分别理解，指代或转写歧义无法消除时保持未定。
 
-非全集任务的零结果由 Agent 按已核实范围及覆盖说明结束，不要求逐个排除范围外的宽召回候选；存在条件、证据或专家分歧缺口时仍拒绝完成。
+编号核验可要求已有 `displayId`，其存在性与业务原文存在性分别判断；编号字段不能单独证明任何业务事实。
 
-过滤判断走现有 Controller；派生算子写 `operatorArtifacts`，不自动确认。报告、下载与重放引用同一确认集合和结果版本。
+启用算子时，`ticket_decide` 只接收当前明确专家分歧的主 Agent 判断；普通候选通过 `sem_filter` 或读证后的自动筛选提交。主 Agent 不能绕过算子把缺项结果改成确认，充分时用空 judgments 提交结束动作。
 
-计划通过结构和完整语义契约校验后才写入成功缓存。缓存命中经 `llm.reuse` 回传原实际请求回执，Host 重验当前任务范围和请求内容。派生产物只记录本次调用使用的 manifest；Top-K 使用实际 `sem_topk_compare` 请求，分层聚合保留叶工单版本、内容哈希、字段、片段和中间摘要回执，最终引文逐段与实际送达内容核对。聚合摘要本身不成为新的原始事实。
+明确数量的示例任务每次自动筛选只处理一个尚未判断的审阅窗口，然后交回主 Agent。已经未定的记录不因再次调用而自动重判；主 Agent 可定向读证后复核、继续下一窗口或搜索新表达。窗口结束不改变任务的未完成状态，不是总调用、时间或 token 限额，也不代表要求已满足。未给数量的全集学习仍走原来的全域数值路径。
 
-模型回调只登记本次新增请求清单，单次请求文件只包含自身记录。过滤结果按模型批宽合并后提交；尾批在下次资源回调或结束时提交。主 Agent 与算子共用一次集合合并，避免逐条重建全体判断。反馈使用当前强判断索引，在判断集合变化时比较，取代每条输出散列全部反馈。
+## 数值输入与持久集合
 
-批量取证与准入按工单、片段和实际请求建立索引；同一批处理复用已解析的原文字段要求。分层聚合按工单和片段各归并一次，避免重复来源触发全表过滤。派生算子只在候选或正文变化后重新核验输入；活动和计量更新不触发同一来源的重复扫描。新模型调用与缓存命中都经统一回调登记回执。
+- `featureBlock` 返回对齐整数 IDs、连续 little-endian float32 稠密块、availability，以及可选 CSR 列块；正文不随全域扫描传输。`features.take` 按小块读取有界样本池，`rows.read` 仅按标注或问答证据 IDs 读正文。
+- 数据库索引准备阶段的 `prepareNumericFeatures` 将既有 Milvus 分片向量按工单聚合、归一化一次，批量写 `ra_numeric_feature`。缺向量仍保留 ID 和缺失标记。现有索引执行 `node scripts/database.mjs index` 补齐数值列；新数据执行 `pnpm db:prepare`。Provider 检查数值索引覆盖，不在查询中重建 embedding。
+- 数据库 Provider 以授权 SQL 范围和数值键分页，默认 Host 传输批宽上限 2048；Python 本地可使用只读 memmap 块。当前生产表示是稠密 embedding，只有 Provider 真正提供 CSR 时才比较稀疏 SVM，不复制一套稠密向量冒充多表示。
+- `predictions.begin/write/finish` 复用一份模型与质量说明。每块输出 IDs/labels/scores，`MySqlSemanticResultStore` 批量写已接受 ID，任务状态仅持有模型/集合句柄；数值结果不构造逐条 LLM 清单或重复抽验报告。
+- 确认页、报告计数、CSV/JSONL 下载使用同一集合句柄。分页时才映射真实工单 ID 并重新授权；报告保存有明确口径的集合哈希。点击原文和反馈只水合所需记录。新查询代次及强标签更正使旧句柄失效。
 
-批量准入同时产生带输入代次的判断事件。反馈回执消费同代次、同工单的有效处置，不要求主 Agent 重复判断，也不因后续算子事件较多而丢失对应反馈。
+非持久示例会话使用内存集合存储，只用于小数据接线。不能据此声称跨进程恢复或 4000 万条容量。生产持久任务使用现有 MySQL TaskStore 的集合表。
 
-调用、输入/输出 token、缓存 token、QPM、TPM 和耗时仅计量，无累计中止阈值。供应商缺失用量保留未知；适配器调用数不冒充供应商内部重试数。取消、权限、上下文容量、协议或服务故障、无进展循环仍须明确未完成。
+## 学习、选择与独立抽验
 
-## 默认过滤算法
+1. 全域数值扫描维护有界随机 ID 池，与既有关键词/ANN 候选合并。相关、新表达、多样性、模型分歧、边界和全局探索共用真实 DSH 样本标签。块级 `argpartition` 先保留 ID/优先级，不为每行复制特征。
+2. 同一训练集实际拟合 scikit-learn LR、LinearSVC、浅 MLP、浅 HGB。稀疏表示存在时 SVM 使用 CSR。训练类别平衡权重不代替总体采样权重。未知标签不训练为负例；单类先扩大一次表达发现，仍不足则返回具体缺口。
+3. 独立选择集用于模型及阈值选择；支持显式采样权重。选取经验质量合格候选中估计执行成本较低者，分数不跨模型平均、不当概率证书。线性模型等价折叠标准化；保留训练精度，不默认量化。小标签集可用有界 worker，内部 BLAS 线程受限。
+4. 没有选择集合格候选时，可做一次由误差驱动的有界补样。随后冻结模型和阈值，一遍全范围数值扫描同时输出预测、计数并保留互斥区域的独立简单随机抽验样本。四个模型不需要四次标注或四次全库扫描。
+5. `quality.py` 通过有限总体超几何区间计算接受 TP 与未返回 FN 的数量区间，从而得到集合 Precision/Recall 下界。缺特征、未知和未覆盖区域进入遗漏上界；训练、选择和已知标签单列，不能从分母消失。负区污染率不等于 Recall。
+6. 抽验中已知标签优先于预测；有限修正后的区间从冻结集合区间保守推导。抽验标签用于后续训练后不能继续作为独立验收。新测量分配 `delta/(t*(t+1))`，旧观察从新抽验总体中移出并显式计入已知贡献。
+7. 默认目标 P/R 下界均为 .95、总 delta=.05。区间假设固定总体、区域内简单随机抽样和可信参考标签；这是朴素有限总体方法，不是完整 SUPG，也不证明 LLM 标签等同业务真值。`quality_passed` 仍需主 Agent 按真实任务语义决定停止。
 
-调用链为 `pre-step / task-worker / sem_filter tool → SemanticOperators.filter → PythonOperatorBridge → rpc.execute → dispatch.invoke_rows → sem_filter → clustered_filter`。默认 `algorithm=auto` 在零分歧容许值下逐批强判断；Host 跳过已有当前强判断的候选，最多 8 条一页，直接读取所需正文，不加载向量。页面和批宽不截断全集；“找几个案例”只读取到确认数量目标满足为止。
+未达标返回 `next_action`：缺事实补信息、覆盖不足找新表达/样本、预测错误换表示或判别器、区间太宽增加新的独立测量。输入没有变化时不重复启动同一失败过滤；新增发现或证据后可重新测量。没有按累计调用/token/耗时宣布完成的门槛，也没有隐式全量 teacher 回退。样本大小、优化器迭代数、HTTP 批宽、线程数均为运行配置。
 
-显式 `algorithm=cluster` 保留完整聚类对照；`auto` 的非零容许值实验在没有案例数量目标时也进入该内核。数字内核 [cluster.py](../../python/semantic-operators/src/caseweave_ops/cluster.py) 只处理位置 ID、归一化特征、标签与未判集合；[filter_adapter.py](../../python/semantic-operators/src/caseweave_ops/filter_adapter.py) 管分批正文/特征、模型和结果适配。已有全部标签时不再分组。
+## 抽取与问答
 
-1. 第一批先强判断，其余正文进入临时 SQLite，特征写 float32 memmap。记录特征为已有分片向量归一化均值再归一化；没有特征时强判断，缺必需原文时直接未决。严格流式路径跳过整个磁盘特征准备过程。
-2. MiniBatchKMeans 对整个候选区域分组，区域内随机选样。已有同判据强标签优先复用；默认 SimVote，可选择 UniVote 或实际拟合的局部 LogisticRegression。
-3. 先冻结未判记录的正/负预测区域，再分别均匀无放回抽取独立检验样本。检验之前确定样本数，按超几何分布反演未检记录的分歧数上界；每次检验分配 `delta/(t*(t+1))`。样本量按固定整数错误容许数跳到首个可行点，再更新容许数；不对非单调的整体可行性二分。
-4. 上界满足该区域容许值时，仅对未调用强模型的剩余记录产生 `basis=proxy`。否则将未解决记录与父组真实强标签一起重新分组，子组继续复用适用标签，或直接强判断。过程以未判集合减少推进，不设调用次数、深度、累计 token 或时间截止。
-5. 样本反例保留自己的强判断；Unknown 仍未决，在检验中视为分歧而非负标签。代理不训练自己。当前 Host 强判断覆盖旧缓存；撤销需要重新强判断；更正强判断会重新打开既有代理结果，迟到输出拒收，下一次过滤使用当前反馈。
+`sem_extract(field_map=...)` 直接解析已送达的来源字段，缺失或不可解析时返回 undetermined；先用 `ticket_read` 取得确实需要的字段。开放事实调用实际 DSH reader，非空字段各有引用，不沿相似关系复制事实。
 
-默认 accept/reject 分歧容许值仍都是 **0**。在此运行点强制聚类并以 `delta=.01` 检验通常接近全量判断，故 `auto` 直接流式强判断，消除聚类、校准和额外尾批开销。该统计检验只约束相对固定强标签的分歧，**不是业务正确率或全局召回保证**。1% 容许值与局部分类器的组合仅在显式计算实验中使用，Host 不接受这些宽容许值的代理产物。
+`sem_agg(numeric_fields=...)` 先统计所给记录的 present/missing/observed_sum。缺字段时不生成精确 sum/mean；代码结果和覆盖口径送入实际 DSH writer。当前该接口统计命名输入记录，未自动扫描任意整个确认集合的所有业务字段；局部字段结果不能冒充总体精确统计。
 
-通过的代理携带独立检验结果与本条来源位置，不伪造逐条模型 manifest。Controller 直接准入；页面、报告、CSV/JSONL 和重放保留代理身份。主 Agent 按未决、业务边界和搜索缺口继续工作，不为旧清单协议重判所有代理。
+`evidence_window` 仅对已确认、命名的有界证据池执行 MMR 多样性选择。池内相关性已由 filter 判定，窗口按等相关度选择不同向量；不将模型分数当概率。返回 `selected_evidence_only` 与 Host 提供的总体数量，不截断 filter 集合。需要针对新问题更相关的池时，先用现有 search/read 取得所需证据。
 
-## 论文对照与改造
+分层摘要只传子摘要、来源 ID 和父关系；独立索引保存叶证据，最后物化所引用叶子的来源。最终引用列表仍随所引用证据量增长，当前证据窗口用于控制解释规模，不能把局部摘要宣称为全部记录的事实统计。
 
-| 机制 | CSV 对照 `algorithm=csv` | 显式区域过滤 `algorithm=cluster` |
-| --- | --- | --- |
-| 分组 | KMeans，未解决集合跨簇汇总后重新分组 | 分批 MiniBatchKMeans，失败区域局部二分 |
-| 选样 | 按区域比例选样，并设最小 pilot 数 | 优先复用真实强标签，补充区域 pilot |
-| 推断 | UniVote / shifted-cosine SimVote，阈值直接推断 | 投票或实际局部拟合，预测后独立检验 |
-| 检验 | 无独立检验 | 固定样本、有限总体单侧上界，失败补判 |
-| 交付 | Python 对照用；Host 不准入未检 CSV 代理 | 通过检验的未调用记录流式进入权威状态 |
+## 验证口径
 
-阅读基于 [CSV Algorithms 1–3](https://arxiv.org/html/2603.04799v1) 和 [固定 optimized_filter.py](https://github.com/Anto-an/CSV_SemanticFilter/blob/ae4d35048dc9226672e2bbfd1686f0f3dc6cb122/operators/filter/optimized_filter.py)。SimVote 使用 `(cos+1)/2` 权重，不改称 softmax。论文 Algorithm 1 的全局未决汇总，与该固定代码的局部递归及深度截止并不相同；这里的对照采用论文控制流，并保留来源/Unknown/首批输出适配，不能称逐行复现。生产独立固定样本检验也不是论文原保证或 BARGAIN 的序贯检验。
-
-`sem_filter_reference` 保留原“固定批次内排序再全部强判断”实现，`feedback.py` 中旧弱评分/门控用于 reference 对照。默认 `auto` 复用同一输入适配与有效强判断，按当前参数选择流式执行或数字内核。
-
-## 其他算子完成边界
-
-- `sem_topk`：保留 heap 默认基线，新增 `strategy=quick`。对照 [LOTUS 固定 quick 实现](https://github.com/lotus-data/lotus/blob/136ae4f4a344a2f75d89f811e516dfcb0de30e46/lotus/sem_ops/sem_topk.py) 的主元比较/分区机制，项目版用 quickselect 后排序入选项，未照搬原实现。访问全体输入与活动分区，不先截成向量 Top-K。Unknown 明示算法未完整完成；比较器不满足全序时不声称全局语义最优。
-  Heap 先计算移动路径再更新，取消每条输入复制整个堆；两条策略最终都用 O(k log k) 归并排序。Quick 每个分区只读取一次主元，k ≥ N 时直接排序；其磁盘行缓存不计算向量。
-- `sem_join`：SQLite 倒排 blocking 索引生成候选对后语义判断，公共工具支持字段 blocking；显式 pairs 保留 reference。无命中输出零候选对及召回未知，不能把少生成配对计作无损收益。当前没有学习式 blocking 或领域 recall 结论。
-- `sem_map/sem_extract`：本地 Schema 引用正确定位 payload，输出存储绑定 Schema 和输入观察身份。仅复用相同输入的有效结果，回传原批次请求记录；不按簇复制具体金额、日期或状态。
-- `sem_agg`：上层默认只读子摘要、完整性和来源 ID，实际叶来源关系放在结果/请求适配中。必要原文可由已有 `ticket_read` 定向补读；自动事实缺口补读策略仍未实现。最终引文物化仍为 O(N)，没有百万规模内存结论。
-- `sem_search`：Python 关键词通道不等待改写 embedding；API 保留 q0 并增加强反馈的数值 Rocchio 扩召，撤销反馈不再参与更新，JSONL 向量扫描按记录页及查询块计算。Host 首轮仍在原句向量与计划汇合后启动计划检索；当前按关键词/自然语言改写召回，数值反馈扩召尚未沿真实 Provider 默认接通。
-
-CPU 内核与磁盘适配避免正文全量列表及 N×N 相似矩阵；ID/标签仍为 O(N)。Host 的候选与恢复 DTO 仍可能完整水合，本改造不代表端到端百万工单内存或并发压测已完成。
-
-## 验证
-
-命令见 [开发与运行](../DEVELOPMENT.md)。`semantic-operators.spec.ts` 用公开 DSH 输入、真实 Python 和受控模型检验接线；`semantic-boundary-real.spec.ts` 用公开 HTTP、指定真实数据和模型检查独立样例。单测、接线、实际模型质量分别报告，工程通过不能外推全库质量。
+[评测策略](../EVALUATION_STRATEGY.md) 区分静态审查、数值等价、受控合成质量、真实模型/中文业务、完整 Agent 端到端和 40M 冷热 I/O。公开 DSH 工具加实际 Python 的测试证明接线，但脚本 teacher 不是真实模型。MySQL/Milvus 批写、重启恢复与容量必须在对应服务和数据上实测。运行入口见 [Python README](../../python/semantic-operators/README.md) 和 [开发说明](../DEVELOPMENT.md)。

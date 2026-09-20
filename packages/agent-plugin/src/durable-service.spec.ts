@@ -59,6 +59,9 @@ class Provider extends TicketRetrievalProviderService {
   readEvidence: TicketRetrievalProvider['readEvidence'] = (...a) => this.p.readEvidence(...a)
   readDetails: TicketRetrievalProvider['readDetails'] = (...a) => this.p.readDetails(...a)
   status: TicketRetrievalProvider['status'] = (...a) => this.p.status(...a)
+  override featureBlock: NonNullable<TicketRetrievalProvider['featureBlock']> = (...a) => this.p.featureBlock!(...a)
+  override resolveFeatureIds: NonNullable<TicketRetrievalProvider['resolveFeatureIds']> = (...a) => this.p.resolveFeatureIds!(...a)
+  override readCandidates: NonNullable<TicketRetrievalProvider['readCandidates']> = (...a) => this.p.readCandidates!(...a)
 }
 class Principal extends TicketPrincipalProviderService {
   revoked = false
@@ -514,13 +517,57 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       expect(after.contextCandidateRefs).toEqual(before.contextCandidateRefs)
       expect(after.progress).toEqual(before.progress)
       release()
-      const done = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped')
+      await until(() => store.read(id), t => t?.state_json?.phase === 'stopped')
+      // 停止状态先于工具计量落库；等本次 DSH 调用结算后比较同一版本的重放。
+      await (await f.agentFor(id)).whenIdle()
+      const done = await store.read(id)
       expect(done!.state_json!.termination, JSON.stringify(f.errors)).toBe('top_k_accepted')
       expect(f.adapter.calls).toBe(1)
       expect(done!.state_json!.budget.failedToolCalls).toBe(0)
       expect(foldRetrievalEvents(await store.domainEvents(id))).toEqual(done!.state_json)
     } finally { release(); await f.close() }
   })
+
+  it('A4: public detail reads finish while Provider search is blocked and survive its later commit', async () => {
+    const f = await fixture(false, false)
+    let releaseModel!: () => void, releaseSearch!: () => void
+    const modelGate = new Promise<void>(resolve => { releaseModel = resolve })
+    const searchGate = new Promise<void>(resolve => { releaseSearch = resolve })
+    ;(f.adapter as Adapter).beforeAnswer = () => modelGate
+    let search: Promise<unknown> | undefined
+    try {
+      const id = randomUUID()
+      await f.post('', { operationId: id, kind: 'query', text: '找副卡解绑工单' }); f.host.start()
+      await until(async () => f.adapter.calls, n => n === 1)
+      const agent = await f.agentFor(id), before = (await store.read(id))!.state_json!
+      const original = f.providerPort.search.bind(f.providerPort)
+      let searching = false
+      vi.spyOn(f.providerPort, 'search').mockImplementationOnce(async (...args) => {
+        searching = true; await searchGate; return original(...args)
+      })
+      search = f.application.refresh(agent)
+      await until(async () => searching, Boolean)
+      const response = await fetch(f.url.replace('/tasks', '/detail'), {
+        method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(2000),
+        body: JSON.stringify({ sessionId: id, retrievalId: id, candidateRefs: [before.candidates[1]!.ref], fields: ['problemDescription'] }),
+      })
+      expect(response.status).toBe(200)
+      const read = (await store.read(id))!.state_json!
+      const visible = read.promotedEvidence.filter(e => e.readers?.includes('user')).map(e => e.evidenceId)
+      expect(visible.length).toBeGreaterThan(0)
+      expect(read.modelVisibleEvidenceIds).toEqual(before.modelVisibleEvidenceIds)
+      releaseSearch(); await search
+      const after = (await store.read(id))!.state_json!
+      expect(after.promotedEvidence.filter(e => e.readers?.includes('user')).map(e => e.evidenceId)).toEqual(visible)
+      expect(foldRetrievalEvents(await store.domainEvents(id))).toEqual(after)
+      // 本夹具在模型生成中人为发起新搜索；旧模型回复不能代表新搜索的完成判断。
+      await f.post('/' + id, { kind: 'cancel', operationId: randomUUID() })
+      releaseModel()
+      const done = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped')
+      expect(done!.state_json!.termination).toBe('cancelled')
+      expect(foldRetrievalEvents(await store.domainEvents(id))).toEqual(done!.state_json)
+    } finally { releaseSearch(); await search?.catch(() => {}); releaseModel(); await f.close() }
+  }, 15000)
 
   it('continues from a clarification example without introducing a region filter or repeating the first search', async () => {
     const f = await fixture(true, false)
@@ -1238,7 +1285,8 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       installWorkingContext(ctx, application)
     }
     if (deliveryScale) installWorkingContext(ctx, application)
-    if (operatorMode) new SemanticOperators(ctx, application)
+    // 两条合成工单只验证 Python 判断的持久化接线；全集学习质量由独立评测验收。
+    if (operatorMode) new SemanticOperators(ctx, application, undefined, undefined, undefined, { algorithm: 'direct' })
     if (learning) new WikiLearningService(ctx, application, learning.root)
     installAutomaticRetrievalStart(ctx, application, { analyzer }); installRetrievalTools(ctx, application); installRetrievalRuntimeBudget(ctx, application)
     ctx.on('tools/result', (_exec, result) => { if (result.isError) errors.push(result.content) })
@@ -1311,7 +1359,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       const response = await fetch(`http://127.0.0.1:${address.port}/api/retrieval-agent/export`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: id, retrievalId: id, resultRevision }) })
       return { status: response.status, body: await response.json() as Record<string, unknown> }
     }
-    return { host, adapter, url, errors, principal: p, post, release, application, agentFor, exportCsv, replaceSource, close: async () => {
+    return { host, adapter, url, errors, principal: p, post, release, application, agentFor, exportCsv, replaceSource, providerPort, close: async () => {
       await host.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); for (const dispose of disposers) await dispose(); await ctx.fiber.dispose()
       if (credentialRef) { if (previousCredential === undefined) delete process.env[credentialRef]; else process.env[credentialRef] = previousCredential }
     } }

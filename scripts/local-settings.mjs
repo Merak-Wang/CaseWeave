@@ -13,6 +13,9 @@ export async function seedModelSettings(paths, environment) {
   const model = environment.RETRIEVAL_AGENT_BROWSER_LLM_MODEL?.trim()
   const baseURL = environment.RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL?.trim()
   const apiKeyEnv = environment.RETRIEVAL_AGENT_BROWSER_LLM_API_KEY_ENV?.trim()
+  const api = environment.RETRIEVAL_AGENT_BROWSER_LLM_API?.trim()
+  const contextWindow = Number(environment.RETRIEVAL_AGENT_BROWSER_LLM_CONTEXT_WINDOW) || undefined
+  const maxTokens = Number(environment.RETRIEVAL_AGENT_BROWSER_LLM_MAX_TOKENS) || undefined
   if ([provider, model, baseURL, apiKeyEnv].every(value => !value)) return false
   if ([provider, model, baseURL, apiKeyEnv].some(value => value === undefined || value.length === 0)) {
     throw new Error('browser Agent LLM setup requires provider, model, base URL, and API-key environment name together')
@@ -20,7 +23,7 @@ export async function seedModelSettings(paths, environment) {
 
   const settingsPath = join(paths.dshHome, 'settings.yaml')
   const seedPath = join(paths.dshHome, 'retrieval-model-seed.sha256')
-  const seed = createHash('sha256').update(JSON.stringify({ provider, model, baseURL, apiKeyEnv,
+  const seed = createHash('sha256').update(JSON.stringify({ provider, model, baseURL, apiKeyEnv, api, contextWindow, maxTokens,
     reasoning: environment.RETRIEVAL_AGENT_BROWSER_LLM_REASONING ?? 'off', name: environment.RETRIEVAL_AGENT_BROWSER_LLM_DISPLAY_NAME })).digest('hex')
   let existing = {}
   if (existsSync(settingsPath)) {
@@ -58,7 +61,9 @@ export async function seedModelSettings(paths, environment) {
           displayName: environment.RETRIEVAL_AGENT_BROWSER_LLM_DISPLAY_NAME?.trim() || provider,
           apiKeyEnv,
           baseURL,
-          models: [...models.filter(entry => record(entry).id !== model), { ...previousModel, id: model }],
+          ...(api ? { api } : {}),
+          models: [...models.filter(entry => record(entry).id !== model), { ...previousModel, id: model,
+            ...(contextWindow ? { contextWindow } : {}), ...(maxTokens ? { maxTokens } : {}) }],
         },
       },
     },

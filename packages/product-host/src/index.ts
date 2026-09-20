@@ -268,7 +268,7 @@ export async function exportCandidatesForAgent(
   await assertCurrentResult()
   const principal = await retrievalAgent.principal(agent, 'export', signal)
   await assertCurrentResult()
-  const exported = await new CandidateExportService(provider, audit, { assertCurrentResult })
+  const exported = await new CandidateExportService(provider, audit, { assertCurrentResult, semanticResults: retrievalAgent.semanticResults })
     .exportCsv(principal, state, params.candidateRefs, signal)
   await retrievalAgent.recordExport(agent, exported.receipt)
   return {
@@ -301,8 +301,13 @@ export async function readTicketDetailsForAgent(
     throw new RetrievalError('INVALID_REQUEST', '当前会话没有对应的检索结果。')
   }
   const principal = await retrievalAgent.principal(agent, 'detail_read', signal)
+  if (params.candidateRefs.some(ref => !state.candidates.some(c => c.ref === ref)) && retrievalAgent.currentOrUndefined(agent)?.retrievalId !== state.retrievalId) {
+    throw new RetrievalError('INVALID_TRANSITION', '请在对应任务中打开数值结果原文。')
+  }
+  const detailState = params.candidateRefs.every(ref => state.candidates.some(c => c.ref === ref)) ? state
+    : await retrievalAgent.hydrateResultCandidates(agent, params.candidateRefs, signal)
   const read = await new CandidateDetailService(provider, audit)
-    .readDetails(principal, state, params.candidateRefs, params.fields, signal)
+    .readDetails(principal, detailState, params.candidateRefs, params.fields, signal)
   const latest = await (retrievalAgent.stateForTask?.(agent, params.retrievalId) ?? retrievalAgent.currentOrUndefined(agent))
   if (!latest || latest.inputGeneration !== state.inputGeneration || latest.snapshot?.snapshotId !== state.snapshot?.snapshotId) {
     throw new RetrievalError('INVALID_TRANSITION', '读取期间任务范围已变化，请重新打开原文。')

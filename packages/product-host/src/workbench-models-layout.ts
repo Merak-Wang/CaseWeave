@@ -12,20 +12,20 @@ export const MODEL_SETTINGS_HTML = String.raw`<dialog id="context-dialog" class=
 <p class="muted">密钥只存于本机服务端。OpenCode Go 的会话标识由系统自动附加。</p><button id="model-save" class="primary" type="submit">保存并使用</button></form></section></dialog>`
 
 export const MODEL_STYLES = String.raw`
-.model-trigger { display:inline-flex; align-items:center; gap:7px; border:0; background:transparent; padding:6px 9px; color:#63746c; border-radius:8px; font-size:12px; max-width:260px; }
-.model-trigger span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.model-trigger:hover { background:#eaf0e9; color:#245d50; }
-.model-dialog { width:min(560px,calc(100vw - 30px)); max-height:85dvh; padding:26px; border:1px solid #dce4dc; border-radius:20px; box-shadow:0 25px 90px #18382a25; }
-.model-dialog::backdrop { background:#132b2340; backdrop-filter:blur(4px); }.model-dialog h2 { margin:0; font-size:20px; }.model-dialog p { line-height:1.7; }
-.model-dialog input,.model-dialog select { width:100%; padding:11px 12px; border:1px solid #d7dfd8; border-radius:9px; background:#fff; color:#24382e; font:inherit; box-sizing:border-box; }
-#model-options { max-height:45dvh; overflow:auto; padding:8px 0; }.model-group { color:#849187; font-size:11px; margin:15px 10px 5px; }
+.model-trigger { display:inline-flex; align-items:center; gap:7px; border:0; background:transparent; padding:6px 9px; color:#726869; border-radius:8px; font-size:12px; max-width:260px; }
+.model-trigger span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.model-trigger:hover { background:#eeecec; color:#68282d; }
+.model-dialog { width:min(560px,calc(100vw - 30px)); max-height:85dvh; padding:26px; border:1px solid #e1dfdf; border-radius:20px; box-shadow:0 25px 90px #34202225; }
+.model-dialog::backdrop { background:#28191a40; backdrop-filter:blur(4px); }.model-dialog h2 { margin:0; font-size:20px; }.model-dialog p { line-height:1.7; }
+.model-dialog input,.model-dialog select { width:100%; padding:11px 12px; border:1px solid #dcdada; border-radius:9px; background:#fff; color:#35292a; font:inherit; box-sizing:border-box; }
+#model-options { max-height:45dvh; overflow:auto; padding:8px 0; }.model-group { color:#8c8a8a; font-size:11px; margin:15px 10px 5px; }
 .model-option { width:100%; display:flex; align-items:center; justify-content:space-between; border:0; text-align:left; background:transparent; padding:13px 12px; border-radius:10px; transition:background .18s; }
-.model-option strong,.model-option small { display:block; }.model-option strong { font-size:14px; font-weight:500; }.model-option small { color:#8b958e; margin-top:3px; font-size:11px; }
-.model-option:hover,.model-option[aria-selected=true] { background:#edf4ee; }.model-option[aria-selected=true]>span { color:#297462; }
-.model-reasoning { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:14px 0 3px; font-size:12px; color:#65766d; }.model-reasoning select { width:auto; max-width:65%; padding:7px; }
-.model-manage { display:block; width:100%; text-align:left; padding:17px 10px 4px; border:0; border-top:1px solid #e3e8e1; background:transparent; color:#366454; }.model-manage span { display:block; margin-top:5px; color:#8b958e; font-size:11px; }
-.model-form { display:grid; gap:8px; padding-top:14px; }.model-form label { font-size:12px; color:#65766d; }.model-form p { margin:3px 0 8px; font-size:12px; }.model-form>label:not(:first-child) { margin-top:7px; }
+.model-option strong,.model-option small { display:block; }.model-option strong { font-size:14px; font-weight:500; }.model-option small { color:#918f8f; margin-top:3px; font-size:11px; }
+.model-option:hover,.model-option[aria-selected=true] { background:#f2f0f0; }.model-option[aria-selected=true]>span { color:#822e35; }
+.model-reasoning { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:14px 0 3px; font-size:12px; color:#746a6b; }.model-reasoning select { width:auto; max-width:65%; padding:7px; }
+.model-manage { display:block; width:100%; text-align:left; padding:17px 10px 4px; border:0; border-top:1px solid #e6e4e4; background:transparent; color:#6c393d; }.model-manage span { display:block; margin-top:5px; color:#918f8f; font-size:11px; }
+.model-form { display:grid; gap:8px; padding-top:14px; }.model-form label { font-size:12px; color:#746a6b; }.model-form p { margin:3px 0 8px; font-size:12px; }.model-form>label:not(:first-child) { margin-top:7px; }
 .model-capacities { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:7px; }.model-capacities input { margin-top:6px; }.model-form .primary { padding:12px; margin-top:8px; }
-.sidebar-settings { display:flex; align-items:center; gap:9px; width:100%; border:0; border-radius:8px; background:transparent; padding:12px; color:#78877d; text-align:left; }.sidebar-settings:hover { background:#e9eee6; }
-.context-meter { display:flex; align-items:center; gap:7px; border:0; background:transparent; color:#76877c; font:11px/1.4 inherit; padding:4px 6px; border-radius:8px; cursor:help; }.context-meter svg { width:24px; height:24px; transform:rotate(-90deg); }.context-meter circle { fill:none; stroke-width:2.8; }.context-track { stroke:#dfe6dc; }.context-fill { stroke:#568e76; transition:stroke-dasharray .6s ease,stroke .3s; }.context-meter[data-pressure=high] .context-fill { stroke:#bb8740; }.context-meter:hover { background:#edf1e8; }
+.sidebar-settings { display:flex; align-items:center; gap:9px; width:100%; border:0; border-radius:8px; background:transparent; padding:12px; color:#827f7f; text-align:left; }.sidebar-settings:hover { background:#ebe9e9; }
+.context-meter { display:flex; align-items:center; gap:7px; border:0; background:transparent; color:#857b7c; font:11px/1.4 inherit; padding:4px 6px; border-radius:8px; cursor:help; }.context-meter svg { width:24px; height:24px; transform:rotate(-90deg); }.context-meter circle { fill:none; stroke-width:2.8; }.context-track { stroke:#e2e0e0; }.context-fill { stroke:#98595f; transition:stroke-dasharray .6s ease,stroke .3s; }.context-meter[data-pressure=high] .context-fill { stroke:#d24754; }.context-meter:hover { background:#eeecec; }
 @media(prefers-reduced-motion:reduce) { .context-fill,.model-option { transition:none; } }
 `

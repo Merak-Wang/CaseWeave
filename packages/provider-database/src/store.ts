@@ -6,6 +6,7 @@ import { fieldCapabilities, grams, queryDocument } from './projection.js'
 import { compileSql, necessaryGrams } from './sql.js'
 
 const DDL = [
+  `CREATE TABLE IF NOT EXISTS ra_numeric_feature (index_id CHAR(64) NOT NULL, ordinal BIGINT NOT NULL, ticket_id VARCHAR(191) NOT NULL, vector_blob MEDIUMBLOB NULL, PRIMARY KEY(index_id,ordinal), UNIQUE KEY feature_ticket(index_id,ticket_id))`,
   ...QUERY_DDL,
   `CREATE TABLE IF NOT EXISTS ra_provider_snapshot (id VARCHAR(191) PRIMARY KEY, dataset_id VARCHAR(191) NOT NULL, generation CHAR(64) NOT NULL, index_id CHAR(64) NULL, snapshot_json JSON NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS ra_generation (id CHAR(64) PRIMARY KEY, dataset_id VARCHAR(191) NOT NULL, source_watermark VARCHAR(255) NOT NULL, mapping_version VARCHAR(100) NOT NULL, status VARCHAR(20) NOT NULL, record_count INT NOT NULL, fields_json JSON NOT NULL, grams_ready BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3))`,
@@ -69,7 +70,7 @@ export class TicketDatabase {
   }
   async importRecords(datasetId: string, records: readonly NormalizedTicketRecord[], watermark: string, onProgress?: (n: number) => void): Promise<string> {
     if (!records.length || new Set(records.map(r => r.ticketId)).size !== records.length) throw new TypeError('Import requires nonempty unique ticket identities')
-    const id = sha256(stableJson({ datasetId, watermark, mapping: 'normalized-fields-v2', normalization: 'nfkc-lower-v1', records }))
+    const id = sha256(stableJson({ datasetId, watermark, mapping: 'normalized-fields-v3', normalization: 'nfkc-lower-v1', records }))
     const fields = fieldCapabilities(records)
     const connection = await this.pool.getConnection()
     const lock = `ra-import-${id.slice(0, 48)}`
@@ -78,7 +79,7 @@ export class TicketDatabase {
       if (locks[0]?.acquired !== 1) throw new Error('This generation is already being imported')
       const existing = await this.rows<Generation>('SELECT * FROM ra_generation WHERE id=?', [id])
       if (existing[0]?.status === 'ready') return id
-      await connection.query('INSERT IGNORE INTO ra_generation(id,dataset_id,source_watermark,mapping_version,status,record_count,fields_json) VALUES (?,?,?,?,?,?,?)', [id, datasetId, watermark, 'normalized-fields-v2', 'building', records.length, JSON.stringify(fields)])
+      await connection.query('INSERT IGNORE INTO ra_generation(id,dataset_id,source_watermark,mapping_version,status,record_count,fields_json) VALUES (?,?,?,?,?,?,?)', [id, datasetId, watermark, 'normalized-fields-v3', 'building', records.length, JSON.stringify(fields)])
       const published = (await this.rows<{ generation: string }>('SELECT generation FROM ra_publication WHERE dataset_id=?', [datasetId]))[0]
       const previous = published ? new Map((await this.records(published.generation)).map(r => [r.ticketId as string, r.contentHash])) : new Map<string, string>()
       for (let offset = 0; offset < records.length; offset += 100) {

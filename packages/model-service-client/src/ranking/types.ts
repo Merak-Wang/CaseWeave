@@ -109,6 +109,8 @@ export interface PrepareOptions {
 }
 
 export interface RetrievalRanker {
+  readFeatureBlock?(documents: readonly Pick<RankingDocument, 'id' | 'contentHash'>[], signal?: AbortSignal): Promise<{
+    readonly embedding_id: string; readonly dense: string; readonly dimensions: number; readonly available: string }>
   readonly profileVersion: string
   readFeatures?(documents: readonly Pick<RankingDocument, 'id' | 'contentHash'>[], signal?: AbortSignal): Promise<{
     readonly embedding_id: string; readonly rows: readonly { readonly id: string; readonly vector: readonly number[] }[] }>

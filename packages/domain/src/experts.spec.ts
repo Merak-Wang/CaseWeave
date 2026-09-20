@@ -7,7 +7,7 @@ const ref = TicketCandidateRef('test-current')
 const state = { candidates: [{ ref }], candidateHistory: [{ ref }], selectedCandidateRefs: [ref], excludedCandidateRefs: [],
   modelVisibleCandidateRefs: [ref], promotedEvidence: [], query: { unresolvedConstraints: [] }, gaps: [],
   task: { countPolicy: 'explicit', requestedCount: 1 }, lastPage: { boundary: { resultPagesExhausted: true } },
-  knowledgeCatalog: { status: 'empty', domains: [] }, inputGeneration: 0,
+  knowledgeCatalog: { status: 'empty', domains: [] }, inputGeneration: 0, budget: {},
 } as unknown as RetrievalState
 const finish = { kind: 'finish', reason: 'satisfied', explanation: '已核对一个个案的来源。',
   coverage: { checked: ['用户指定场景'], remaining: [], nextAction: '个案已足够，不需扩展。', nextActionValue: 'none' },

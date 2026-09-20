@@ -329,6 +329,10 @@ export class HybridRankingEngine implements RetrievalRanker {
     return this.#request<{ embedding_id: string; rows: { id: string; vector: number[] }[] }>('/v1/ranking/features',
       { protocolVersion: RAG_SERVICE_PROTOCOL_VERSION, requestId: randomUUID(), documents, profile: this.#profile }, signal)
   }
+  async readFeatureBlock(documents: readonly Pick<RankingDocument, 'id' | 'contentHash'>[], signal?: AbortSignal) {
+    return this.#request<{ embedding_id: string; dense: string; dimensions: number; available: string }>('/v1/ranking/feature-block',
+      { protocolVersion: RAG_SERVICE_PROTOCOL_VERSION, requestId: randomUUID(), documents, profile: this.#profile }, signal)
+  }
 
   async #readPreparationProgress(requestId: string, signal: AbortSignal): Promise<PreparationProgress | undefined> {
     const response = await this.#fetch(`${this.#baseUrl}/v1/ranking/prepare/${encodeURIComponent(requestId)}`, {

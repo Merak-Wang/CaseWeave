@@ -34,6 +34,15 @@ export * from './tools.js'
 export const name = 'retrieval-agent'
 export const inject = ['agents', 'llm', 'tokenMeter', 'ticketRetrievalProvider', 'ticketPrincipalProvider', 'tools', 'systemPrompt']
 
+interface SemanticFilterConfig {
+  algorithm?: 'auto' | 'cluster' | 'active' | 'learned' | 'baseline' | 'direct'
+  options?: Record<string, number | string>
+}
+const SemanticFilterConfig: z<SemanticFilterConfig> = z.object({
+  algorithm: z.union(['auto', 'cluster', 'active', 'learned', 'baseline', 'direct'] as const),
+  options: z.dict(z.union([z.number(), z.string()])),
+})
+
 export interface Config extends RetrievalAgentServiceConfig {
   readonly taskPersistence?: 'session' | 'mysql'
   readonly mysqlUrl?: string
@@ -42,6 +51,7 @@ export interface Config extends RetrievalAgentServiceConfig {
   readonly wikiRoot?: string
   readonly wikiLearning?: boolean
   readonly semanticOperatorsRoot?: string
+  readonly semanticFilter?: SemanticFilterConfig
 }
 
 export const Config: z<Config> = z.object({
@@ -50,6 +60,7 @@ export const Config: z<Config> = z.object({
   wikiRoot: z.string(),
   wikiLearning: z.boolean().default(true),
   semanticOperatorsRoot: z.string(),
+  semanticFilter: SemanticFilterConfig,
   maxRepeatedToolErrors: z.number().step(1).min(1),
   searchTopK: z.number().step(1).min(1).max(50).default(20),
   searchMaxScan: z.number().step(1).min(1).default(50_000),
@@ -69,7 +80,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   if (store) ctx.effect(() => () => store.close())
   const application = store ? new DurableRetrievalAgentService(ctx, config, store) : new RetrievalAgentService(ctx, config)
   new ExpertCoordinator(ctx, application, config.wikiRoot)
-  new SemanticOperators(ctx, application, config.wikiRoot, config.semanticOperatorsRoot)
+  new SemanticOperators(ctx, application, config.wikiRoot, config.semanticOperatorsRoot, undefined, config.semanticFilter)
   if (application instanceof DurableRetrievalAgentService && config.wikiRoot && config.wikiLearning !== false) new WikiLearningService(ctx, application, config.wikiRoot)
   installAutomaticRetrievalStart(ctx, application, {
     analyzer: new SpacyQueryAnalyzer({

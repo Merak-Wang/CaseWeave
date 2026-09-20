@@ -1,22 +1,102 @@
-"""实现核心 sem_search，以及原始向量与首次模型规划并行启动的流程。
-
-搜索输出按 upsert 事件处理，同一记录可从多个通道到达；命中只是候选，不是已确认
-业务结果。k 表示 ANN/搜索窗口大小，不表示完整语义结果集的数量。
-"""
+"""现有 Host 的一次查询理解与并行搜索；数据和 embedding 均回调既有 Provider。"""
 from __future__ import annotations
 import asyncio
-import heapq
-import json
-from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import AsyncIterable, AsyncIterator, Any, Protocol
-import httpx
-import numpy as np
-from .types import Record, Scope
-from .feedback import unit, norm_text, matrix, rocchio, FeedbackSet
-from .model import Runtime
-from .planner import plan_query
-from .filter import batches
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, AsyncIterable, AsyncIterator, Protocol
+from jsonschema import Draft202012Validator
+from .runtime import Runtime, check_schema
+from .types import Record, Scope, ProtocolError
+
+OPS = ("sem_search", "sem_filter", "sem_extract", "sem_agg")
+
+
+PLAN_SCHEMA = {"type": "object", "additionalProperties": False,
+    "required": ["keywords", "instruction", "retrieval_expressions", "goal", "steps"],
+    "properties": {
+        "keywords": {"type": "array", "items": {"type": "string"}},
+        "instruction": {"type": "string"},
+        "retrieval_expressions": {"type": "array", "items": {"type": "string"}},
+        "goal": {"type": "object", "additionalProperties": False, "required": ["mode", "count"],
+                 "properties": {"mode": {"enum": ["adaptive", "examples", "all"]}, "count": {"type": ["integer", "null"]}}},
+        "steps": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "required": ["id", "op", "inputs", "instruction", "params"], "properties": {
+                "id": {"type": "string"}, "op": {"enum": list(OPS)},
+                "inputs": {"type": "array", "items": {"type": "string"}},
+                "instruction": {"type": "string"}, "params": {"type": "object", "additionalProperties": False,
+                    "properties": {"keywords": {"type": "array", "items": {"type": "string"}},
+                        "expressions": {"type": "array", "items": {"type": "string"}},
+                        "k": {"type": "integer", "minimum": 1}, "batch_size": {"type": "integer", "minimum": 1},
+                        "require_source": {"type": "boolean"}, "required_fields": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                        "fan_in": {"type": "integer", "minimum": 2},
+                        "output_schema": {"type": "object"}}}}}}}}
+
+
+def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    # 先校验封闭 Schema，再检查跨字段约束，拒绝模型夹带未声明能力。
+    if not Draft202012Validator(PLAN_SCHEMA).is_valid(plan):
+        raise ProtocolError("Invalid query plan schema")
+    plan = deepcopy(plan)
+    if not plan["instruction"].strip() or not plan["steps"]:
+        raise ProtocolError("A plan must preserve a nonempty business instruction and executable steps")
+    goal = plan["goal"]
+    if (goal["mode"] == "examples" and (type(goal["count"]) is not int or goal["count"] <= 0)) or (goal["mode"] != "examples" and goal["count"] is not None):
+        raise ProtocolError("Only examples has an explicit positive result count")
+    # known 只收录已验证步骤，使输入引用天然满足拓扑顺序且不可形成环。
+    known = {"$source"}
+    permitted_params = {"sem_search": {"keywords", "expressions", "k"}, "sem_filter": {"batch_size", "require_source", "required_fields"},
+                        "sem_extract": {"output_schema", "batch_size"},
+                        "sem_agg": {"fan_in"}}
+    for step in plan["steps"]:
+        if not step["id"] or step["id"] in known or any(i not in known for i in step["inputs"]):
+            raise ProtocolError("Duplicate step ID, invalid input, or non-topological plan")
+        # 每种算子仅接收明确白名单参数，计划不能注入代码、身份或预算控制。
+        if not set(step["params"]).issubset(permitted_params[step["op"]]):
+            raise ProtocolError("Unsupported operator argument; no arbitrary code or budget controls")
+        if not step["inputs"] or not step["instruction"].strip():
+            raise ProtocolError("Operator requires an input and an instruction")
+        if "require_source" in step["params"] and type(step["params"]["require_source"]) is not bool:
+            raise ProtocolError("require_source must be Boolean")
+        if step["op"] == "sem_extract":
+            # 类型化转换的输出 Schema 既要存在，也要通过本地引用安全检查。
+            schema = step["params"].get("output_schema")
+            if not isinstance(schema, dict):
+                raise ProtocolError("Typed transforms require an output schema")
+            check_schema(schema)
+        for name in ("k", "batch_size", "fan_in"):
+            if name in step["params"] and (type(step["params"][name]) is not int or step["params"][name] < (2 if name == "fan_in" else 1)):
+                raise ProtocolError("Invalid physical parameter")
+        known.add(step["id"])
+    # 这里只做保序去重和空白清理，不擅自解释或改写中文逻辑词。
+    plan["keywords"] = list(dict.fromkeys(w.strip() for w in plan["keywords"] if w.strip()))
+    plan["retrieval_expressions"] = list(dict.fromkeys(w.strip() for w in plan["retrieval_expressions"] if w.strip()))
+    return plan
+
+
+async def plan_query(runtime: Runtime, query: str, confirmed_context: str = "") -> dict[str, Any]:
+    if not query.strip():
+        raise ValueError("Query is empty")
+    instruction = ("理解用户要检索的业务集合，给出关键词列表、完整自然语言判据和核心算子计划。"
+        "不生成关键词AND/OR/NOT树；词表只是宽召回线索。复杂逻辑保留在instruction中交给算子执行。"
+        "保留主体、时间、已完成与待办理、纳入与排除边界，不凭空增加字段筛选。"
+        "业务判据只重述原句及用户补充中的要求。Wiki、检索假设和常见核查建议只能帮助理解与取证，不能升级为用户未提出的必要条件或排除项。"
+        "例如用户要相关工单时，不额外要求特定角色确认、账单凭证或争议状态；说明依据不等于必须提供用户未要求的证明材料。"
+        "不要提问，不要要求用户标注。首轮计划保持直接，仅选本次需要的算子。"
+        "少量retrieval_expressions是检索先验，不是事实或标签。"
+        "未明确指定案例数量时使用all且count=null，进入全集学习和独立抽验。"
+        "all的count必须为null；examples是用户明确要求的案例数量，不是页面大小。"
+        "仅核实指定工单ID时keywords只填完整ID，retrieval_expressions可为空；instruction限定该工单，不以主题近似替代ID。"
+        "普通检索只需一个sem_filter步骤。需要原始对话时params为{\"require_source\":true,\"required_fields\":[\"source.raw_dialogue\"]}；若来源只有conversationOrUpdates则使用该字段。按evidence_fields选择实际对话字段。"
+        "required_fields只选实际可用的原文字段，不选summary/title等摘要或生成字段，不选availability=unavailable字段。有原始对话时优先只要求对话，不同时要求重复的派生摘要或空字段。"
+        "核实其他原文字段时在required_fields中填写字段名。require_source表示引文必须是来源事实，required_fields独立约束实际读到并引用的字段；摘要不能替代对话。缺少原文返回未决，主Agent定向读取后再过滤。"
+        "sem_filter仅允许batch_size、require_source、required_fields参数，不支持field/op/value；语义条件写instruction。"
+        "sem_search是基础检索，仅允许keywords/expressions/k；sem_extract必须有output_schema；"
+        "sem_agg仅允许fan_in。没有字段产出或问答要求时只执行sem_filter。"
+        "输入从$source开始，按依赖顺序填写steps，每步都必须有params对象。计量不设预算，不生成call/token次数上限。")
+    # Runtime 在首次响应和缓存复用时执行校验，返回前再校验一次并复制为规范计划。
+    result = await runtime.call("query_plan", instruction, {"original": query, "confirmed_context": confirmed_context}, PLAN_SCHEMA, validate=validate_plan)
+    plan = validate_plan(result.payload)
+    return {"original": query, **plan, "manifest_id": result.manifest_id}
 
 
 @dataclass(frozen=True)
@@ -29,11 +109,6 @@ class Hit:
 class SearchBackend(Protocol):
     def semantic(self, vectors: list[list[float]], embedding_id: str, k: int) -> AsyncIterator[Hit]: ...
     def lexical(self, keywords: list[str]) -> AsyncIterator[Hit]: ...
-
-
-class EmbeddingPort(Protocol):
-    identity: str
-    async def embed_queries(self, texts: list[str]) -> list[list[float]]: ...
 
 
 async def _take(scope: Scope, queue: asyncio.Queue):
@@ -67,8 +142,7 @@ async def _pump(stream: AsyncIterable[Any], queue: asyncio.Queue, tag: str) -> N
 
 
 async def sem_search(scope: Scope, backend: SearchBackend, vectors: list[list[float]],
-                     embedding_id: str, keywords: list[str], k: int = 20, *, expressions: list[str] | None = None,
-                     feedback: FeedbackSet | None = None) -> AsyncIterator[Hit]:
+                     embedding_id: str, keywords: list[str], k: int = 20, *, expressions: list[str] | None = None) -> AsyncIterator[Hit]:
     if type(k) is not int or k < 1:
         raise ValueError("Search window must be positive")
     queue: asyncio.Queue = asyncio.Queue(maxsize=64)
@@ -76,17 +150,6 @@ async def sem_search(scope: Scope, backend: SearchBackend, vectors: list[list[fl
     lanes = []
     if vectors:
         lanes.append(_pump(backend.semantic(vectors, embedding_id, k), queue, "semantic"))
-    if vectors and feedback and feedback.samples:
-        positive, negative = [], []
-        for row, label in feedback.samples.values():
-            features = matrix(row, embedding_id, len(vectors[0]))
-            if features is not None:
-                (positive if label else negative).extend(features)
-        if positive or negative:
-            # Keep q0, add a separate learned numeric query; never stringify and
-            # re-embed a Rocchio vector or train from proxy/withdrawn decisions.
-            learned = [rocchio(q, positive, negative).tolist() for q in vectors]
-            lanes.append(_pump(backend.semantic(learned, embedding_id, k), queue, "feedback"))
     if keywords:
         lanes.append(_pump(backend.lexical(keywords), queue, "lexical"))
     # 语义改写保序去重，避免相同表达重复扫描后端。
@@ -113,163 +176,3 @@ async def sem_search(scope: Scope, backend: SearchBackend, vectors: list[list[fl
         for task in tasks:
             if not task.done(): task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def bootstrap(runtime: Runtime, backend: SearchBackend, embedding: EmbeddingPort,
-                    query: str, k: int = 20) -> AsyncIterator[dict[str, Any]]:
-    """立即启动原始查询向量，同时由首次模型调用生成关键词和语义改写。
-
-    原始向量通道不等待规划或学习；流程没有有限总调用额度。宿主可取消协程或设置
-    Scope.cancelled 终止任务，任一通道失败都会显式返回而不是伪装成空结果成功。
-    """
-    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
-    async def raw_lane():
-        # 原始 query 直接向量化，保证快查不受模型规划延迟影响。
-        vectors = await embedding.embed_queries([query])
-        async for hit in backend.semantic(vectors, embedding.identity, k):
-            yield {"type": "candidate", "channel": "raw_vector", "hit": hit}
-    async def plan_lane():
-        # 规划通道先发布完整计划，再用改写向量和关键词拓展召回。
-        plan = await plan_query(runtime, query)
-        yield {"type": "plan", "plan": plan}
-        expressions = [x for x in plan["retrieval_expressions"] if x != query]
-        async def rewritten():
-            for start in range(0, len(expressions), 16):
-                vectors = await embedding.embed_queries(expressions[start:start + 16])
-                async for hit in backend.semantic(vectors, embedding.identity, k):
-                    yield hit
-        lanes = [backend.lexical(plan["keywords"]), rewritten()]
-        q = asyncio.Queue(maxsize=64)
-        workers = [asyncio.create_task(_pump(lane, q, str(i))) for i, lane in enumerate(lanes)]
-        running = len(workers)
-        try:
-            while running:
-                _, hit, error = await _take(runtime.scope, q)
-                if isinstance(error, StopAsyncIteration): running -= 1
-                elif error is not None: yield {"type": "error", "lane": "planned", "error": type(error).__name__}
-                else: yield {"type": "candidate", "channel": hit.channel, "hit": hit}
-        finally:
-            for worker in workers:
-                if not worker.done(): worker.cancel()
-            await asyncio.gather(*workers, return_exceptions=True)
-    # 两条通道同时启动，通过同一队列按实际完成顺序流式汇合。
-    tasks = [asyncio.create_task(_pump(raw_lane(), queue, "raw")),
-             asyncio.create_task(_pump(plan_lane(), queue, "plan"))]
-    running = 2
-    try:
-        while running:
-            await runtime.scope.check()
-            tag, value, error = await _take(runtime.scope, queue)
-            if isinstance(error, StopAsyncIteration):
-                running -= 1
-            elif error is not None:
-                yield {"type": "error", "lane": tag, "error": type(error).__name__}
-            else:
-                await runtime.scope.check()
-                yield value
-    finally:
-        for t in tasks:
-            if not t.done(): t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-class JsonlBackend:
-    """真实磁盘流式本地适配器，不替代生产环境的 Milvus。
-
-    每个 JSONL 行遵循 Record Schema 并携带预计算真实向量。线性全量扫描仅用于
-    可移植验证和小语料；生产环境通过既有鉴权 Provider 实现 SearchBackend。
-    """
-    def __init__(self, path: str | Path):
-        self.path = Path(path)
-
-    async def records(self) -> AsyncIterator[Record]:
-        with self.path.open(encoding="utf-8") as handle:
-            while True:
-                # 分块文件读取放入工作线程，避免同步磁盘操作长期占用事件循环。
-                lines = await asyncio.to_thread(_read_lines, handle, 128)
-                if not lines: break
-                for line in lines:
-                    if line.strip():
-                        yield Record.from_dict(json.loads(line))
-
-    async def lexical(self, keywords: list[str]) -> AsyncIterator[Hit]:
-        words = [norm_text(w).strip() for w in keywords if w.strip()]
-        if not words: return
-        async for r in self.records():
-            # 各段落独立匹配，禁止跨字段拼接词语制造并不存在的同段关系。
-            if any(w in norm_text(p.text) for w in words for p in r.passages):
-                # 字面通道只表示命中，不把扫描顺序冒充 BM25 排名。
-                yield Hit(r, "keyword", None)
-
-    async def semantic(self, vectors: list[list[float]], embedding_id: str, k: int) -> AsyncIterator[Hit]:
-        if not vectors: return
-        if type(k) is not int or k < 1: raise ValueError("k must be positive")
-        queries = np.vstack([unit(v) for v in vectors])
-        # 线性扫描期间只保留 k 个最高分记录，空间复杂度保持 O(k)。
-        heap = []
-        sequence = 0
-        async for rows in batches(self.records(), 128):
-            features = [(r, matrix(r, embedding_id, queries.shape[1])) for r in rows]
-            features = [(r, a) for r, a in features if a is not None]
-            if not features: continue
-            offsets = np.r_[0, np.cumsum([len(a) for _, a in features])]
-            scores = np.full(offsets[-1], -np.inf)
-            vectors = np.vstack([a for _, a in features])
-            # Bound the query axis as well as the feature-read page.
-            for start in range(0, len(queries), 16):
-                scores = np.maximum(scores, (vectors @ queries[start:start+16].T).max(axis=1))
-            for index, (r, _) in enumerate(features):
-                score = float(scores[offsets[index]:offsets[index+1]].max())
-                item = (score, sequence, r)
-                sequence += 1
-                if len(heap) < k: heapq.heappush(heap, item)
-                elif score > heap[0][0]: heapq.heapreplace(heap, item)
-        for score, _, r in sorted(heap, key=lambda x: (-x[0], x[1])):
-            yield Hit(r, "vector", score)
-
-
-def _read_lines(handle, n):
-    result = []
-    for _ in range(n):
-        line = handle.readline()
-        if not line: break
-        result.append(line)
-    return result
-
-
-class ExistingEmbeddingService:
-    """对接既有 model-service `/v1/embeddings` 契约的网络适配器。"""
-    def __init__(self, url: str, model: str, revision: str, dimensions: int, protocol_version: str,
-                 identity: str, *, client: httpx.AsyncClient | None = None):
-        self.url, self.model, self.revision = url.rstrip("/"), model, revision
-        self.dimensions, self.protocol_version, self.identity = dimensions, protocol_version, identity
-        self.client = client or httpx.AsyncClient(timeout=None)
-        self.owns_client = client is None
-
-    async def embed_queries(self, texts: list[str]) -> list[list[float]]:
-        import uuid
-        if not texts: return []
-        request_id = str(uuid.uuid4())
-        # 请求显式声明协议、模型、维度和完整输入要求，禁止服务端静默降级。
-        response = await self.client.post(self.url + "/v1/embeddings", json={
-            "protocolVersion": self.protocol_version, "requestId": request_id,
-            "model": self.model, "input": texts, "inputType": "query", "normalize": True,
-            "dimensions": self.dimensions, "requireCompleteInput": True})
-        response.raise_for_status()
-        data = response.json()
-        # 严格核对响应身份和归一化契约，避免串包或错误模型向量进入索引空间。
-        if (data.get("protocolVersion") != self.protocol_version or data.get("requestId") != request_id or
-            data.get("model") != self.model or data.get("revision") != self.revision or
-            data.get("dimensions") != self.dimensions or data.get("normalization") != "l2" or data.get("inputComplete") is not True):
-            raise ValueError("Embedding response identity/completeness mismatch")
-        items = data.get("data", [])
-        # 数量和索引必须一一对应，不能容忍缺失、重复或重排后的向量行。
-        if len(items) != len(texts) or [r.get("index") for r in items] != list(range(len(texts))):
-            raise ValueError("Missing, duplicate or reordered embedding rows")
-        vectors = [unit(r["embedding"]).tolist() for r in items]
-        if any(len(v) != self.dimensions for v in vectors):
-            raise ValueError("Wrong embedding dimension")
-        return vectors
-
-    async def aclose(self):
-        if self.owns_client: await self.client.aclose()

@@ -11,7 +11,8 @@ import {
 } from '@retrieval-agent/contracts'
 import { encodeCsv, csvCell } from './csv.js'
 import { hostAuthorizedCandidates } from './candidate-selection.js'
-import { createTicketResultCollection } from '@retrieval-agent/domain/result'
+import { createTicketResultCollection, learnedResult } from '@retrieval-agent/domain/result'
+import { learnedResultWindow, materializeLearnedRefs } from './numeric-results.js'
 
 export interface ExportAuditRecord {
   readonly auditId: string
@@ -45,6 +46,7 @@ export interface CandidateExport {
 }
 
 export interface CandidateExportServiceConfig {
+  readonly semanticResults?: import('@retrieval-agent/contracts').SemanticResultStore
   readonly maxRows?: number
   readonly maxBytes?: number
   readonly now?: () => Date
@@ -72,9 +74,11 @@ export class CandidateExportService {
   readonly #id: () => string
   readonly #pageSize: number
   readonly #assertCurrentResult: () => void | Promise<void>
+  readonly #semanticResults: import('@retrieval-agent/contracts').SemanticResultStore | undefined
 
   constructor(provider: TicketRetrievalProvider, audit: ExportAuditSink, config: CandidateExportServiceConfig = {}) {
     this.#provider = provider
+    this.#semanticResults = config.semanticResults
     this.#audit = audit
     this.#maxRows = config.maxRows ?? Number.POSITIVE_INFINITY
     this.#maxBytes = config.maxBytes ?? 50_000_000
@@ -107,13 +111,16 @@ export class CandidateExportService {
     if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '检索快照不存在。')
     if (!state.snapshot.capabilities.exportRead) throw new RetrievalError('FIELD_NOT_ALLOWED', '当前数据源未开放工单下载。')
     if (!['csv', 'jsonl'].includes(options.format) || !['summary', 'full'].includes(options.template)) throw new RetrievalError('INVALID_REQUEST', '下载格式或字段模板无效。')
+    const numeric = learnedResult(state)
+    if (numeric && !this.#semanticResults) throw new RetrievalError('PROVIDER_UNAVAILABLE', '完整结果集合存储未接通，不能导出样本子集。')
+    if (numeric && refs) state = await materializeLearnedRefs(state, this.#provider, principal, this.#semanticResults!, refs)
     const result = createTicketResultCollection(state)
-    const confirmed = new Map(result.tickets.map(c => [c.ref, c]))
+    const confirmed = new Map((numeric && refs ? state.candidates.filter(c => refs.includes(c.ref)) : result.tickets).map(c => [c.ref, c]))
     const selectedRefs = refs ?? [...confirmed.keys()]
     if (selectedRefs.some(ref => !confirmed.has(ref))) throw new RetrievalError('CANDIDATE_NOT_FOUND', '下载只能包含当前结果版本中已确认的工单。')
-    const candidates = hostAuthorizedCandidates(state, selectedRefs)
-    if (candidates.length > this.#maxRows) throw new RetrievalError('EXPORT_LIMIT_EXCEEDED', '候选数量超过单次导出限制。')
-    const fields = options.template === 'full' ? state.snapshot.fieldCatalog.filter(isReadableTicketField).map(f => f.key) : []
+    const candidates = numeric && !refs ? [] : hostAuthorizedCandidates(state, selectedRefs)
+    if ((numeric && !refs ? numeric.returned : candidates.length) > this.#maxRows) throw new RetrievalError('EXPORT_LIMIT_EXCEEDED', '候选数量超过单次导出限制。')
+    const fields = options.template === 'full' ? state.snapshot!.fieldCatalog.filter(isReadableTicketField).map(f => f.key) : []
     const headers = options.template === 'full' ? [...HEADERS, 'body_fields', 'unavailable_fields'] : [...HEADERS]
     const authorize = async () => {
       if (signal?.aborted) throw new RetrievalError('CANCELLED', '下载已取消。')
@@ -136,13 +143,21 @@ export class CandidateExportService {
     const evidenceByRef = new Map<string, typeof result.evidence[number][]>()
     for (const e of result.evidence) { const list = evidenceByRef.get(e.candidateRef) ?? []; list.push(e); evidenceByRef.set(e.candidateRef, list) }
     const judgments = new Map(result.judgments.map(j => [j.candidateRef, j]))
-    for (let offset = 0; offset < candidates.length; offset += this.#pageSize) {
+    const pages = async function* (service: CandidateExportService) {
+      if (numeric && !refs) {
+        let cursor: string | undefined
+        do {
+          const page = await learnedResultWindow(state, service.#provider, principal, service.#semanticResults!, cursor, service.#pageSize)
+          yield page.items; cursor = page.nextCursor
+        } while (cursor)
+      } else for (let offset = 0; offset < candidates.length; offset += service.#pageSize) yield candidates.slice(offset, offset + service.#pageSize)
+    }
+    for await (const page of pages(this)) {
       if (signal?.aborted) throw new RetrievalError('CANCELLED', '下载已取消。')
-      const page = candidates.slice(offset, offset + this.#pageSize)
-      const details = await this.#provider.readDetails(principal, { snapshotId: state.snapshot.snapshotId,
+      const details = await this.#provider.readDetails(principal, { snapshotId: state.snapshot!.snapshotId,
         candidateRefs: page.map(c => c.ref), fields, purpose: 'candidate_export' }, signal ? { signal } : undefined)
       await this.#assertCurrentResult()
-      if (details.snapshotId !== state.snapshot.snapshotId) throw new RetrievalError('PROTOCOL_MISMATCH', '下载响应不属于当前来源快照。')
+      if (details.snapshotId !== state.snapshot!.snapshotId) throw new RetrievalError('PROTOCOL_MISMATCH', '下载响应不属于当前来源快照。')
       if (details.rejectedCandidateRefs.length || details.details.length !== page.length) throw new RetrievalError('UNAUTHORIZED', '部分确认工单已不可导出，请重新复核。')
       const byRef = new Map<TicketCandidateRef, TicketDetail>()
       const allowed = new Set(page.map(c => c.ref))
@@ -158,11 +173,13 @@ export class CandidateExportService {
       for (const c of page) {
         const d = byRef.get(c.ref)!
         if (d.sourceVersion !== c.sourceVersion || d.displayId !== c.displayId || d.title !== c.title || d.summary !== c.summary) throw new RetrievalError('SNAPSHOT_INVALID', '工单来源版本已变化，请重新检索后导出。')
-        const evidence = evidenceByRef.get(c.ref) ?? [], judgment = judgments.get(c.ref)
-        const row = [state.query.original, generatedAt, state.snapshot.shortId, state.lastPage?.completeness ?? 'unknown',
+        const evidence = evidenceByRef.get(c.ref) ?? [], judgment = judgments.get(c.ref) ?? (numeric ? {
+          reason: '学习模型集合预测；本条未逐条交 LLM 判断。', basis: 'proxy', evidenceRefs: [],
+          operatorInference: { algorithm: 'learned', model_id: numeric.model_id } } : undefined)
+        const row = [state.query.original, generatedAt, state.snapshot!.shortId, state.lastPage?.completeness ?? 'unknown',
           String(c.rank), d.displayId, d.title, d.summary, d.l0.type ?? '', d.l0.category ?? '', d.l0.product ?? '', d.l0.component ?? '',
           d.l0.region ?? '', d.l0.status ?? '', d.l0.priority ?? '', d.l0.createdAt ?? '', d.sourceVersion,
-          confirmed.get(c.ref)!.evidenceLevel, 'confirmed', judgment?.reason ?? '', JSON.stringify(evidence.map(e => e.evidenceId)),
+          c.evidenceLevel, 'confirmed', judgment?.reason ?? '', JSON.stringify(evidence.map(e => e.evidenceId)),
           JSON.stringify(Object.fromEntries(evidence.map(e => [e.evidenceId, e.readers ?? ['unknown']]))), result.resultRevision, c.ref, c.contentHash,
           JSON.stringify(judgment?.evidenceRefs ?? []), JSON.stringify(state.query.confirmedConstraints), result.stoppingReason,
           d.l0.additionalFields?.find(f => f.key === 'source.redaction')?.value ?? '',
@@ -175,13 +192,13 @@ export class CandidateExportService {
           resultRevision: result.resultRevision, judgment: { verdict: 'accept', reason: judgment?.reason ?? '', basis: judgment?.basis ?? 'model',
             inference: judgment?.operatorInference ?? null, evidenceRefs: judgment?.evidenceRefs ?? [] },
           evidence: evidence.map(e => ({ evidenceId: e.evidenceId, field: e.field, start: e.start, end: e.end, text: e.text, origin: e.origin, spanHash: e.spanHash })),
-          scope: { query: state.query.original, conditions: state.query.confirmedConstraints, snapshot: state.snapshot.shortId, stoppingReason: result.stoppingReason },
+          scope: { query: state.query.original, conditions: state.query.confirmedConstraints, snapshot: state.snapshot!.shortId, stoppingReason: result.stoppingReason },
         }) + '\n')
       }
     }
     await authorize()
     const contentSha256 = hash.digest('hex'), exportId = this.#id(), auditId = this.#id()
-    const receipt: CandidateExportReceipt = { exportId, retrievalId: state.retrievalId, snapshotShortId: state.snapshot.shortId,
+    const receipt: CandidateExportReceipt = { exportId, retrievalId: state.retrievalId, snapshotShortId: state.snapshot!.shortId,
       generatedAt, rowCount, fields: options.format === 'csv' ? headers : ['ticketId', 'candidateRef', 'title', 'summary', 'l0', 'fields', 'unavailableFields', 'sourceVersion', 'contentHash', 'resultRevision', 'judgment', 'evidence', 'scope'], contentSha256, auditId, resultRevision: result.resultRevision }
     await this.#audit.append({ ...receipt, resultRevision: result.resultRevision, tenantId: principal.tenantId, subjectId: principal.subjectId,
       entitlementVersion: principal.entitlementVersion, candidateRefs: candidates.map(c => c.ref), fields: receipt.fields })

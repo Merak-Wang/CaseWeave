@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { RetrievalError, type RetrievalState, type TicketRetrievalProvider, type TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import { MySqlDeliveryStore, type MySqlTaskStore, type DeliveryRecord, type DeliverySpec } from '@retrieval-agent/agent-plugin'
 import { CandidateExportService, createRetrievalReport, validateReportNarrative, reportMarkdown, type RetrievalReport } from '@retrieval-agent/product-api'
+import { confirmedCount } from '@retrieval-agent/domain/result'
 
 export interface DeliveryAccess { state: RetrievalState; principal: TrustedPrincipalContext; agent: Agent }
 export interface DeliveryOptions {
@@ -65,7 +66,7 @@ export class TaskDeliveryHost {
   async request(taskId: string, value: unknown) {
     const { operationId, spec, retry } = parseDelivery(value)
     const { state } = await this.current(taskId, spec.resultRevision)
-    if (spec.kind !== 'report' && !state.selectedCandidateRefs.length) throw new RetrievalError('CANDIDATE_NOT_FOUND', '尚无可下载的确认工单。')
+    if (spec.kind !== 'report' && !confirmedCount(state)) throw new RetrievalError('CANDIDATE_NOT_FOUND', '尚无可下载的确认工单。')
     return deliveryView(await this.store.create(taskId, operationId, spec, retry))
   }
   async report(taskId: string, revision: string, audience: RetrievalReport['audience']): Promise<RetrievalReport> {
@@ -119,7 +120,7 @@ export class TaskDeliveryHost {
         let buffers: Buffer[] = [], bytes = 0, rows = 0
         const flush = async () => { if (bytes) { await this.store.append(job, Buffer.concat(buffers), rows); buffers = []; bytes = 0 } }
         const exported = await new CandidateExportService(this.options.providerFor(agent), { append: record => this.store.trace(job, 'export-audit', record) },
-          { assertCurrentResult: check, id: () => job.id }).stream(principal, state, { format: job.spec_json.kind, template: job.spec_json.template },
+          { assertCurrentResult: check, id: () => job.id, semanticResults: this.tasks.semanticResults, maxBytes: Number.POSITIVE_INFINITY }).stream(principal, state, { format: job.spec_json.kind, template: job.spec_json.template },
           async (part, count) => {
             const body = Buffer.from(part, 'utf8'); rows = count
             for (let offset = 0; offset < body.length;) {
@@ -145,8 +146,8 @@ export class TaskDeliveryHost {
     if (d.status !== 'ready') throw new RetrievalError('INVALID_TRANSITION', '工件尚未生成完成。')
     // Re-read the complete confirmed set through the Provider before serving a saved file.
     const { state, principal, agent } = await this.current(d.task_id, d.spec_json.resultRevision)
-    if (state.selectedCandidateRefs.length) await new CandidateExportService(this.options.providerFor(agent), { append() {} },
-      { assertCurrentResult: async () => { await this.current(d.task_id, d.spec_json.resultRevision) } }).stream(principal, state,
+    if (confirmedCount(state)) await new CandidateExportService(this.options.providerFor(agent), { append() {} },
+      { semanticResults: this.tasks.semanticResults, maxBytes: Number.POSITIVE_INFINITY, assertCurrentResult: async () => { await this.current(d.task_id, d.spec_json.resultRevision) } }).stream(principal, state,
       { format: 'jsonl', template: d.spec_json.template }, async () => {})
     const hash = createHash('sha256'); let bytes = 0
     for await (const chunk of this.store.chunks(d)) { hash.update(chunk); bytes += chunk.length }

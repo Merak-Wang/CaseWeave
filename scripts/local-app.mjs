@@ -484,10 +484,11 @@ async function prepareIndex(paths, environment, progress, model) {
   const preparation = resolveIndexPreparationConfig(environment)
   progress?.stage(
     '[startup 7/8] Vector index',
-    'checking/resuming 19,587 tickets',
+    environment.RETRIEVAL_AGENT_DATA_PATH ? 'checking configured ticket dataset' : 'checking default ticket dataset',
   )
   const controller = new AbortController()
   const preparing = prepareDevelopmentIndex({
+    environment,
     cacheDir: paths.vectorCacheDir,
     modelServiceBaseUrl: paths.modelServiceBaseUrl,
     ...preparation,

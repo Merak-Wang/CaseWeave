@@ -328,6 +328,17 @@ function accept(ref: TicketCandidateRef) {
 }
 
 describe('RetrievalController', () => {
+  it('keeps same-generation learning progress when a model failure settles usage', async () => {
+    const { controller } = setup()
+    let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡' })
+    const generation = state.inputGeneration ?? 0
+    const learning = { input_revision: generation, fit_count: 1, teacher_unique_records: 128, stop_reason: 'sampling' }
+    state = controller.recordOperatorUsage(state, generation, { llm_adapter_calls: 16, learning })
+    state = controller.recordOperatorUsage(state, generation, { llm_adapter_calls: 17, failed_attempts: 1 })
+    expect(state.budget.operatorUsage).toEqual({ llm_adapter_calls: 17, failed_attempts: 1, learning })
+    state = controller.recordOperatorUsage({ ...state, inputGeneration: generation + 1 }, generation + 1, { llm_adapter_calls: 18 })
+    expect(state.budget.operatorUsage?.learning).toBeUndefined()
+  })
   it('keeps correcting different tool errors beyond six failures and stops only an unchanged loop', async () => {
     const { controller, journal } = setup(provider())
     let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡' })
@@ -647,6 +658,22 @@ describe('RetrievalController', () => {
     expect(state).toMatchObject({ termination: 'permission_blocked', candidates: [], promotedEvidence: [] })
     expect(await controller.reauthorize(PRINCIPAL, state)).toBe(state)
     expect(() => controller.projectContext(state)).toThrow(/尚未重新授权/u)
+  })
+
+  it.each(['before', 'during'])('does not rewrite cancellation when a request is aborted %s reauthorization', async timing => {
+    const base = provider()
+    const abort = new AbortController()
+    const { controller, journal } = setup({ ...base, async readEvidence(...args) {
+      if (args[2]?.signal && timing === 'during') abort.abort(new Error('user cancelled'))
+      args[2]?.signal?.throwIfAborted()
+      return base.readEvidence(...args)
+    } })
+    const initial = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    const stopped = controller.stop(initial, 'cancelled')
+    if (timing === 'before') abort.abort(new Error('user cancelled'))
+    await expect(controller.reauthorize(PRINCIPAL, stopped, abort.signal)).rejects.toThrow('user cancelled')
+    expect(foldRetrievalEvents(journal.read(initial.retrievalId), initial.retrievalId)).toEqual(stopped)
+    expect(await controller.reauthorize(PRINCIPAL, stopped)).toBe(stopped)
   })
 
   it('withdraws presentation authorization when a Provider fails without a structured error', async () => {

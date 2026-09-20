@@ -6,7 +6,7 @@
 
 `pnpm operators:test` 运行 Python 验收。uv 的 `--inexact` 保留已有模型依赖，不删除环境内其他包。算子不重新下载模型权重，embedding/rerank 继续复用既有模型服务。模型供应商和凭据仍配置在 DSH；共享服务令牌用 `CASEWEAVE_OPERATORS_TOKEN` 同时配置服务和 Node，避免放进 URL。算子设计与计量定义见 [Python 算子](design/OPERATORS.md)。
 
-默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。Provider 的 `readFeatures` 分页读取已有索引向量；本地模型服务使用 `/v1/ranking/features`，数据库 Provider 从当前 Milvus 索引读取分片向量。缺失或过期特征不触发建库，改走强判断。计算对照运行方法见 [算子 README](../python/semantic-operators/README.md)；结果默认写入本地 `.cache/algorithm-evaluation`，不作为业务质量验收。
+默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 使用 Provider 的 `featureBlock` 扫描对齐 ID 与连续数值块，共享样本拟合 LR/SVM/MLP/HGB，再独立抽验集合 P/R。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。缺特征计入遗漏上界，不自动逐条强判全库。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验与显式旧 baseline 命令见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
 
 完整容器部署适合单机试用；源码入口供开发、集成与排障使用。产品概览见 [README](../README.md)，测试范围见 [评测与验收](EVALUATION_STRATEGY.md)。
 
@@ -356,7 +356,7 @@ pnpm retrieval-agent web --no-open --port 3081
 | `pnpm exec vitest run packages/agent-plugin/src/service.spec.ts` | 运行指定相邻测试；路径可换成受影响的现有 spec |
 | `pnpm test` | 运行默认行为/边界回归；不加载全量语料做假排名，实库专项需显式启用 |
 | `pnpm model:test` | 通过 uv 运行 Python model-service 测试；环境未就绪时可能同步依赖 |
-| `pnpm operators:test` | Python 语义算子测试，包含流式执行、抽样量和 Top-K 计算开销对照；CI 使用同一入口 |
+| `pnpm operators:test` | 三个核心算子、默认四模型/全域扫描、独立集合质量、未知/缺特征、数值等价和旧 filter baseline；CI 使用同一入口 |
 | `pnpm eval:self-test` | Python 评测数据与 scorer 自检，不执行真实 Agent 任务 |
 
 跨包导入可能通过 package exports 读取 `lib/`。跨包源码变更后先显式 `pnpm build` 一次，再运行 `pnpm typecheck:code` 和所选行为检查；也可直接用 `pnpm typecheck` 完成构建与类型检查。单独 `--noEmit` 不能证明已有构建产物与源码一致。依赖开发语料的测试和运行入口要求事先显式准备数据，纯代码检查无需此步骤。
@@ -390,6 +390,10 @@ Remove-Item Env:RETRIEVAL_AGENT_REPLAY_SCALE
 `RETRIEVAL_AGENT_BOUNDARY_MODEL` 可在当前 Provider 上独立比较其他已发现模型。此选项通过运行中的工作台模型发现接口读取容量，默认 `http://127.0.0.1:3086/api/retrieval-agent/models`（可用 `RETRIEVAL_AGENT_BOUNDARY_DISCOVERY_URL` 覆盖），只修改实验进程内的模型声明与选择，并保存非敏感的 `model-discovery.json`；不会保存工作台设置。缺少已发现的上下文/输出容量时直接失败，不猜测容量。
 
 ## 数据、模型与发布工具
+
+批量集合评测使用 `pnpm eval --benchmark <解包测试集根目录> --target http://127.0.0.1:3088 --out .cache/evals/current`。该入口使用 Inspect 调度同一 HTTP 产品，不另建 Agent。数据准备、首批六项/全部百项选择、质量与调用成本/时延文件见 [eval README](../python/evals/README.md)。
+
+自定义模型未进入 DSH 内置目录时，可在模型设置中选择正确协议，或设置 `RETRIEVAL_AGENT_BROWSER_LLM_API`（如 `openai-completions`）、`RETRIEVAL_AGENT_BROWSER_LLM_CONTEXT_WINDOW` 与 `RETRIEVAL_AGENT_BROWSER_LLM_MAX_TOKENS`，填写端点实际支持的容量。启动种子保留已有凭据引用，不把密钥写入源码。算子容量检查与 DSH 使用同一模型声明。
 
 | 现有命令 | 当前用途 |
 |---|---|

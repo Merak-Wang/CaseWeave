@@ -158,18 +158,7 @@ class Decision:
     reason: str = ""
     manifest_id: str | None = None
     error: str | None = None
-    proxy_attestation: str | None = None
     inference: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class Scoring:
-    priority: float
-    proxy_score: float | None
-    support: int
-    nearest_similarity: float | None
-    conflict: float
-    scorer_id: str
 
 
 def verify_citations(raw: Any, records: list[Record]) -> tuple[Citation, ...]:

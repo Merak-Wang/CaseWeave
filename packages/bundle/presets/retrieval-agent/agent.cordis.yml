@@ -61,6 +61,7 @@
         taskPersistence: !!js "process.env.RETRIEVAL_AGENT_STORAGE === 'mysql_milvus' ? 'mysql' : 'session'"
         searchTopK: 20
         reviewBatchSize: !!js Number(process.env.RETRIEVAL_AGENT_REVIEW_BATCH_SIZE ?? 8)
+        semanticFilter: !!js JSON.parse(process.env.RETRIEVAL_AGENT_FILTER_CONFIG ?? '{}')
         searchMaxScan: 50000
         queryAnalysisBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
         queryAnalysisDeadlineMs: 5000

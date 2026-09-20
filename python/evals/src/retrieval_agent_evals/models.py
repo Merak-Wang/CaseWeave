@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
@@ -23,6 +23,8 @@ class EvalCase:
     forbidden_display_ids: frozenset[str]
     max_candidates: int
     expected_termination: str | None = None
+    expected_verdicts: Mapping[str, str] = field(default_factory=dict)
+    require_facts: bool = False
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> EvalCase:
@@ -37,7 +39,8 @@ class EvalCase:
         termination = value.get("expectedTermination")
         if termination is not None:
             termination = _required_text(termination, "expectedTermination")
-        return cls(case_id, relevant, forbidden, max_candidates, termination)
+        return cls(case_id, relevant, forbidden, max_candidates, termination,
+                   value.get("expectedVerdicts", {}), value.get("requireFacts", False))
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,11 @@ class ProductTrace:
     ui_visible_display_ids: tuple[str, ...]
     final_display_ids: tuple[str, ...]
     final_evidence_ids: tuple[str, ...]
+    final_citations: tuple[Mapping[str, Any], ...] = ()
+    source_evidence: tuple[Mapping[str, Any], ...] = ()
+    final_verdicts: Mapping[str, str] = field(default_factory=dict)
+    final_answer: str = ""
+    facts_passed: bool | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> ProductTrace:
@@ -62,4 +70,9 @@ class ProductTrace:
             ui_visible_display_ids=_text_tuple(value.get("uiVisibleDisplayIds", []), "uiVisibleDisplayIds"),
             final_display_ids=_text_tuple(value.get("finalDisplayIds", []), "finalDisplayIds"),
             final_evidence_ids=_text_tuple(value.get("finalEvidenceIds", []), "finalEvidenceIds"),
+            final_citations=tuple(value.get("finalCitations", [])),
+            source_evidence=tuple(value.get("sourceEvidence", [])),
+            final_verdicts=value.get("finalVerdicts", {}),
+            final_answer=value.get("finalAnswer", ""),
+            facts_passed=value.get("factsPassed"),
         )

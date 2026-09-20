@@ -20,7 +20,7 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
   private readonly mutations = new WeakMap<Agent, Promise<void>>()
   private readonly persistentConfig: RetrievalAgentServiceConfig
   constructor(ctx: Context, config: RetrievalAgentServiceConfig, store: MySqlTaskStore) {
-    super(ctx, config); this.store = store; this.persistentConfig = config
+    super(ctx, config); this.store = store; this.persistentConfig = config; this.semanticResults = store.semanticResults
   }
   override currentOrUndefined(agent: Agent): RetrievalState | undefined { return this.states.get(agent)?.state_json ?? undefined }
   override current(agent: Agent): RetrievalState {
@@ -148,13 +148,14 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
     let committed = 0
     const job = options.taskId ? undefined : this.jobs.get(agent)
     if (job && job.input_revision !== base.input_revision) throw staleTask()
-    const commit = async (state: RetrievalState): Promise<void> => {
-      if (state.stateId === base!.state_json?.stateId && journal.pending.length === committed) return
-      base = await this.store.commit(base!, state, journal.pending.slice(committed), job, options.semantic ?? true)
+    const commit = async (state: RetrievalState): Promise<RetrievalState> => {
+      if (state.stateId === base!.state_json?.stateId && journal.pending.length === committed) return base!.state_json!
+      base = await this.store.commit(base!, state, journal.pending.slice(committed), job, options.semantic ?? true, !options.taskId)
       committed = journal.pending.length
       if (active?.id === base.id) this.states.set(agent, base)
       // Mirror delivery is recoverable and cannot roll back or replace the authoritative commit.
       try { await this.mirror(agent) } catch { /* persistent outbox is drained by the Host */ }
+      return base.state_json!
     }
     const controller = new RetrievalController(this.ctx.ticketRetrievalProvider, journal, this.createContextPolicy(),
       { ...this.persistentConfig, ...(this.operators ? { initialPlanner: (state: RetrievalState, signal?: AbortSignal) => this.operators!.plan(agent, state, signal) } : {}),
@@ -162,7 +163,7 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
     try {
       let state = await work(controller, base.state_json!, journal)
       state = await controller.finalizeExhaustedEmptyResult(state)
-      await commit(state)
+      state = await commit(state)
       if (active?.id === base.id) this.states.set(agent, base)
       return state
     } catch (error) { await this.loadTask(agent); throw error }
@@ -220,6 +221,9 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
   }
   override async recordSemanticSearch(agent: Agent, key: string): Promise<RetrievalState> {
     return this.execute(agent, async (c, s) => c.recordSemanticSearch(s, key))
+  }
+  protected override async registerResultCandidates(agent: Agent, generation: number, candidates: readonly import('@retrieval-agent/contracts').TicketCandidate[], modelId: string): Promise<RetrievalState> {
+    return this.execute(agent, async (c, s) => c.registerResultCandidates(s, generation, candidates, modelId), { semantic: false })
   }
   override async recordOperatorActivity(agent: Agent, activity: NonNullable<RetrievalState['operatorActivity']>): Promise<RetrievalState> {
     return this.execute(agent, async (c, s) => c.recordOperatorActivity(s, activity), { semantic: false })
@@ -307,21 +311,11 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
   override async principal(agent: Agent, operation: 'detail_read' | 'evidence_read' | 'export' | 'snapshot_open', signal?: AbortSignal) { return this.resolve(agent, operation, signal) }
   override async recordDetailRead(agent: Agent, receipt: CandidateDetailReadReceipt, result: TicketDetailResult): Promise<RetrievalState> {
     const before = await this.store.read(receipt.retrievalId)
-    // Two tabs can finish independent Provider reads together. Rebase only the local
-    // visibility receipt; never repeat I/O or carry it across a changed user input.
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await this.execute(agent, async (c, s, journal) => {
-          if (s.inputGeneration !== before?.state_json?.inputGeneration) throw staleTask()
-          const state = c.recordDetailRead(s, receipt, result)
-          journal.append(s.retrievalId, 'retrieval/detail-read', { receipt }); return state
-        }, { taskId: receipt.retrievalId, semantic: false })
-      } catch (error) {
-        const current = await this.store.read(receipt.retrievalId)
-        if (attempt >= 3 || !(error instanceof RetrievalError) || !error.retryable
-          || !current || current.input_revision !== before?.input_revision) throw error
-      }
-    }
+    if (!before?.state_json || before.session_id !== String(agent.session.id)) throw staleTask()
+    const task = await this.store.recordUserRead(before, receipt, result)
+    if ((await this.executionIdentity(agent))?.id === task.id) this.states.set(agent, task)
+    try { await this.mirror(agent) } catch { /* outbox is drained by the Host */ }
+    return task.state_json!
   }
   override async recordExport(agent: Agent, receipt: CandidateExportReceipt): Promise<void> {
     await this.execute(agent, async (_c, s, journal) => {

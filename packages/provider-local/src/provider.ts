@@ -384,6 +384,78 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       return feature ? [{ ref, version: record.sourceVersion, content_hash: record.contentHash, embedding_id: data.embedding_id, vectors: [feature.vector] }] : []
     })
   }
+  async scanFeatures(principal: TrustedPrincipalContext,
+    request: { snapshotId: TicketSnapshotId; cursor?: string; limit: number }, options?: ProviderCallOptions) {
+    const entry = this.#authorizeSnapshot(principal, request.snapshotId)
+    const offset = Number(request.cursor ?? 0), records = entry.records.slice(offset, offset + request.limit)
+    const refs = records.map(record => {
+      const ref = TicketCandidateRef(shortOpaque('cand', request.snapshotId, record.ticketId))
+      entry.candidateRefs.set(ref, record)
+      return ref
+    })
+    const features = new Map((await this.readFeatures(principal, { snapshotId: request.snapshotId, candidateRefs: refs }, options)).map(f => [f.ref, f]))
+    return { rows: records.map((r, i) => features.get(refs[i]!) ?? { ref: refs[i]!, version: r.sourceVersion,
+      content_hash: r.contentHash, embedding_id: '', vectors: [] }), total: entry.records.length,
+      ...(offset + records.length < entry.records.length ? { nextCursor: String(offset + records.length) } : {}) }
+  }
+  async featureBlock(principal: TrustedPrincipalContext,
+    request: Parameters<NonNullable<TicketRetrievalProvider['featureBlock']>>[1], options?: ProviderCallOptions) {
+    const entry = this.#authorizeSnapshot(principal, request.snapshotId)
+    const offset = Number(request.cursor ?? 0)
+    const requestedRefs = request.refs && new Set(request.refs)
+    const ids = request.ids ? [...request.ids] : []
+    let next = offset
+    if (!request.ids) for (; next < entry.records.length && ids.length < request.limit; next++) {
+      const r = entry.records[next]!
+      if ((!requestedRefs || requestedRefs.has(TicketCandidateRef(shortOpaque('cand', request.snapshotId, r.ticketId))))
+        && (request.filters ?? []).every(f => matchesFilter(r, f))) ids.push(next)
+    }
+    const next_cursor = !request.ids && !request.refs && next < entry.records.length ? String(next) : null
+    if (this.#ranker.readFeatureBlock) {
+      const block = await this.#ranker.readFeatureBlock(ids.map(i => ({ id: entry.records[i]!.ticketId, contentHash: entry.records[i]!.contentHash })), options?.signal)
+      this.#authorizeSnapshot(principal, request.snapshotId)
+      return { ids, dense: block.dense, dimensions: block.dimensions, available: block.available, feature_id: block.embedding_id, next_cursor }
+    }
+    const refs = ids.map(i => {
+      const r = entry.records[i]
+      if (!r || !canRead(r, principal)) throw new RetrievalError('UNAUTHORIZED', '数值 ID 不属于当前授权范围。')
+      const ref = TicketCandidateRef(shortOpaque('cand', request.snapshotId, r.ticketId)); entry.candidateRefs.set(ref, r); return ref
+    })
+    const rows = await this.readFeatures(principal, { snapshotId: request.snapshotId, candidateRefs: refs }, options)
+    const byRef = new Map(rows.map(r => [r.ref, r])), dimensions = rows[0]?.vectors[0]?.length ?? 0
+    const dense = Buffer.alloc(ids.length * dimensions * 4), available = Buffer.alloc(ids.length)
+    refs.forEach((ref, i) => {
+      const vector = byRef.get(ref)?.vectors[0]
+      if (!vector?.length) return
+      available[i] = 1
+      vector.forEach((v, j) => dense.writeFloatLE(v, (i * dimensions + j) * 4))
+    })
+    return { ids, dense: dense.toString('base64'), available: available.toString('base64'), dimensions,
+      feature_id: entry.snapshot.indexVersion, next_cursor }
+  }
+  async resolveFeatureIds(principal: TrustedPrincipalContext,
+    request: Parameters<NonNullable<TicketRetrievalProvider['resolveFeatureIds']>>[1], options?: ProviderCallOptions) {
+    const entry = this.#authorizeSnapshot(principal, request.snapshotId)
+    const candidateRefs = request.ids.map(i => {
+      const r = entry.records[i]
+      if (!r || !canRead(r, principal)) throw new RetrievalError('UNAUTHORIZED', '数值 ID 不属于当前授权范围。')
+      const ref = TicketCandidateRef(shortOpaque('cand', request.snapshotId, r.ticketId)); entry.candidateRefs.set(ref, r); return ref
+    })
+    return this.readCandidates(principal, { snapshotId: request.snapshotId, candidateRefs }, options)
+  }
+  async readCandidates(principal: TrustedPrincipalContext,
+    request: { snapshotId: TicketSnapshotId; candidateRefs: readonly TicketCandidateRef[] }, options?: ProviderCallOptions): Promise<TicketCandidate[]> {
+    options?.signal?.throwIfAborted()
+    const entry = this.#authorizeSnapshot(principal, request.snapshotId)
+    return request.candidateRefs.map(ref => {
+      const r = entry.candidateRefs.get(ref)
+      if (!r || !canRead(r, principal)) throw new RetrievalError('UNAUTHORIZED', '工单不属于授权全库。')
+      return { ref, displayId: r.displayId, sourceVersion: r.sourceVersion, contentHash: r.contentHash,
+        snapshotId: request.snapshotId, evidenceLevel: 'L1', projectionVersion: 2, rank: 0,
+        title: r.title, summary: r.summary, summaryOrigin: overviewOrigin(r, 'summary'), titleOrigin: overviewOrigin(r, 'title'),
+        l0: candidateL0(r), matchFragments: [], matchSignals: { channels: [], keywordTerms: [] } }
+    })
+  }
   async readDetails(principal: TrustedPrincipalContext, request: DetailReadRequest, options?: ProviderCallOptions): Promise<TicketDetailResult> {
     return projectDetails({ ...this.#authorizeSnapshot(principal, request.snapshotId), now: this.#now }, principal, request, options)
   }

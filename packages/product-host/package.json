@@ -23,6 +23,7 @@
   "dependencies": {
     "@retrieval-agent/agent-plugin": "workspace:*",
     "@retrieval-agent/contracts": "workspace:*",
+    "@retrieval-agent/domain": "workspace:*",
     "@retrieval-agent/product-api": "workspace:*",
     "@retrieval-agent/query-understanding": "workspace:*"
   },

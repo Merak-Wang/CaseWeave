@@ -2,6 +2,7 @@ import { readTicketDetail, detailFailureMessage } from '@retrieval-agent/product
 import { displayFieldPart } from './workbench-content.js'
 import { createOrchestrationUI, revealText } from './workbench-orchestration.js'
 import { createModelUI } from './workbench-models.js'
+import { renderRetrieval, collectionBoundary, qualityValue, evidenceScopeChanged } from './workbench-retrieval.js'
 const $ = id => document.getElementById(id), endpoint = '/api/retrieval-agent/tasks'
 const pendingKey = 'retrieval.pending.commands', taskKey = 'retrieval.tasks'
 let taskId = new URL(location.href).searchParams.get('task'), snapshot, stream, lastSeq = 0, minimumInput = 0
@@ -107,6 +108,7 @@ function invalidateDelivery() {
 }
 function invalidateViews(preserveHistory = true) {
   orchestrationUI.reset(preserveHistory)
+  renderRetrieval({})
   generation++; pageRequest++; pageLoading = false; page = undefined; currentListVersion = undefined
   pageCursor = undefined; previousCursors = []; invalidateDelivery(); closeDetail(false)
   $('feedback-dialog').close(); $('cards').replaceChildren(); $('new-results').hidden = true
@@ -140,7 +142,7 @@ async function refresh() {
     if (id !== taskId || gen !== generation || next.inputRevision < minimumInput || (snapshot && next.eventSeq < snapshot.eventSeq)) return
     if (snapshot && snapshot.inputRevision !== next.inputRevision) invalidateViews()
     if (snapshot?.node?.result?.resultRevision !== next.node?.result?.resultRevision) invalidateDelivery()
-    if (currentListVersion && currentListVersion !== next.node?.collectionWindow?.version && !$('evidence-panel').hidden) closeDetail()
+    if (snapshot && evidenceScopeChanged(snapshot, next) && !$('evidence-panel').hidden) closeDetail()
     snapshot = next; currentListVersion = next.node?.collectionWindow?.version; minimumInput = next.inputRevision
     lastSeq = Math.max(lastSeq, next.eventSeq); clearError('refresh'); render()
     if (hasAccess() && view !== 'report' && (view === 'results' || $('candidate-disclosure').open)) {
@@ -178,6 +180,7 @@ function setView(next, focus = false) {
 }
 function render() {
   orchestrationUI.update(snapshot, disconnected)
+  renderRetrieval(snapshot)
   const n = snapshot.node, count = totals()?.confirmed ?? 0, result = n?.result
   $('task').dataset.inputRevision = String(snapshot.inputRevision)
   $('home').hidden = true; $('task').hidden = false; $('query-title').textContent = snapshot.query
@@ -209,7 +212,7 @@ function render() {
     $('experts').replaceChildren(...experts.map(e => { const row = text('div', '', 'card'); row.append(text('h3', e.domainId + ' · ' + expertStatus[e.status]), text('p', e.goal), text('small', e.findingCount + ' 条判断' + (e.failure ? ' · ' + e.failure : '')), button('查看工作依据', () => expertDetail(e.id))); return row }))
     if (n?.openExpertConflicts) $('experts').append(text('p', n.openExpertConflicts + ' 条工单存在分歧，Agent 正在补充核实。', 'notice')); expertsKey = ek
   }
-  $('process-search').replaceChildren(text('p', status), text('p', n?.resultPagesExhausted ? '已检查本次搜索返回的全部线索。' : '仍有线索需要检查。', 'muted'))
+  $('process-search').replaceChildren(text('p', status), text('p', collectionBoundary(n ?? {}), 'muted'))
   const feedbacks = snapshot.feedback ?? []; $('feedback-panel').hidden = !feedbacks.length
   const latestFeedback = feedbacks.at(-1)
   const pendingFeedback = snapshot.orchestration?.terminal ? '反馈已保存，本轮结束前尚未完成复核。' : '反馈已收到，正在核实'
@@ -223,7 +226,7 @@ function render() {
     box.append(button('查看检索过程', () => setView('process', true)))
   }
   $('result-summary').hidden = !result
-  if (result) { $('result-explanation').textContent = result.explanation || status; $('result-boundary').textContent = (result.resultPagesExhausted ? '已检查本次搜索返回的全部线索。' : '本次搜索仍有未检查的线索。') + (result.semanticRecallKnown ? '' : '其他表述的相关工单仍可能遗漏。') }
+  if (result) { $('result-explanation').textContent = result.explanation || status; $('result-boundary').textContent = collectionBoundary(result) }
   const ready = deliveryReady(); $('download').disabled = $('download-jsonl').disabled = !ready || !n.exportEnabled; $('save-report').disabled = !ready || generatingReport
   $('delivery-state').textContent = ready ? '' : '检索结束后可下载'
   $('delivery-note').textContent = ready ? '包含全部 ' + count + ' 条已确认工单。' : hasAccess() ? '正在整理结果，请稍后再来。' : '当前来源尚未就绪或已失效，暂不能交付。'
@@ -252,10 +255,10 @@ function renderPage() {
   const judgments = new Map(page.judgments.map(j => [j.candidateRef, j])), history = page.view === 'history', readable = new Set(page.readableCandidateRefs)
   $('candidate-note').textContent = history ? '历史线索可回看原文，是否纳入以当前确认结果为准。' : page.view === 'confirmed' ? ''
     : snapshot?.orchestration?.terminal ? '本轮已结束。未确认线索未纳入报告和下载。' : '线索仍在核实，确认后会加入结果。'
-  $('cards').replaceChildren(...page.items.map(c => {
+  $('cards').replaceChildren(...page.items.map((c, index) => {
     const j = judgments.get(c.ref), card = text('article', '', 'card ticket-card'), meta = text('div', '', 'ticket-meta'); card.dataset.ref = c.ref
-    meta.append(text('span', c.displayId, 'ticket-id'))
-    if (j?.basis === 'proxy') meta.append(text('span', '代理推断', 'badge'))
+    meta.append(text('span', String(page.offset + index + 1).padStart(2, '0'), 'ticket-index'), text('span', c.displayId, 'ticket-id'))
+    if (j?.basis === 'proxy') meta.append(text('span', '模型预测 · 未逐条判断', 'badge'))
     if (page.view !== 'confirmed') { const badge = text('span', history ? '历史线索' : snapshot?.orchestration?.terminal && (!j || j.verdict === 'undetermined') ? '未确认' : verdict(j?.verdict), 'badge'); badge.dataset.verdict = j?.verdict || ''; meta.append(badge) }
     card.append(meta, text('h3', ''))
     card.querySelector('h3').append(readable.has(c.ref) ? button(c.title, () => detail(c), 'link ticket-title') : text('span', c.title, 'ticket-title'))
@@ -288,6 +291,7 @@ async function detail(candidate, citation) {
     const detailVerdict = e.current === false ? '历史线索' : snapshot?.orchestration?.terminal && (!e.judgment || e.judgment.verdict === 'undetermined') ? '未确认' : verdict(e.judgment?.verdict)
     $('detail-title').textContent = d.displayId; const box = $('detail'); box.replaceChildren(text('h2', d.title), text('span', detailVerdict, 'badge'), text('h3', '匹配依据'), text('p', e.judgment?.reason ||
       (page?.view === 'history' ? '此条为历史线索，当前没有有效确认依据。' : snapshot.orchestration?.terminal ? '本轮已结束，此条尚未形成确认依据。' : '正在结合原文核实。')))
+    if (e.judgment?.basis === 'proxy') box.append(text('p', '本条由模型预测纳入，未逐条调用语言模型判断。下方原文供查看，不代表已有逐条引用核验。', 'notice'))
     box.append(text('h3', e.citationCount ? '引用原文 · ' + e.citations.length + (e.citationCount > e.citations.length ? ' / ' + e.citationCount : '') : '暂无引用片段'))
     const spans = new Map()
     for (const c of e.citations) {
@@ -355,6 +359,7 @@ function renderReport() {
   box.append(text('h3', '检索范围与限制'), text('p', ({ satisfied: '本次检索要求已满足。', no_result: '本轮无可确认结果。', incomplete: '本次检索尚未完成，以下为已确认的工单。' }[r.coverage.semanticStatus])), text('p', r.coverage.resultPagesExhausted ? '本次搜索的结果已全部返回。' : '本次搜索的结果尚未全部返回。'), text('p', r.coverage.semanticRecallKnown ? '已保存覆盖判断。' : '其他表述的相关工单仍可能遗漏。', 'muted'))
   for (const g of r.coverage.gaps.filter(g => !g.description.startsWith('semanticRecallKnown=false；'))) box.append(text('p', g.description))
   box.append(text('h3', '结论依据'))
+  if (r.learning) box.append(text('p', '集合包含学习模型预测，未逐条经过语言模型判断。相对抽验标签的查准率下界为 ' + qualityValue(r.learning.quality.precision_lower) + '，召回率下界为 ' + qualityValue(r.learning.quality.recall_lower) + '；区间依赖参考标签可靠性。', 'notice'))
   if (r.narrative.status === 'model') for (const p of r.narrative.paragraphs) {
     const paragraph = text('p', ''); revealText(paragraph, p.text, animateNextReport); box.append(paragraph)
     for (const id of p.citations) { const c = r.citations.find(c => c.id === id); if (c) box.append(button('查看引用 · ' + c.displayId, () => detail({ ref: c.candidateRef, displayId: c.displayId }, c), 'link')) }

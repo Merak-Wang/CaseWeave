@@ -155,6 +155,20 @@ def test_read_features_reuses_prepared_vectors_without_embedding(tmp_path):
     assert np.allclose(result['rows'][0]['vector'], backend.prepared.vectors[1])
 
 
+def test_binary_features_preserve_alignment_missing_and_prepared_values(tmp_path):
+    import base64
+    models = FakeModels(); backend = RetrievalRankingBackend(models, tmp_path)
+    backend.prepare(documents(), profile(), 10)
+    def forbidden(*args, **kwargs): raise AssertionError('No per-query embedding')
+    models.embed = forbidden
+    rows = [documents()[1], {**documents()[2], 'contentHash': 'stale'}, documents()[0]]
+    block = backend.read_feature_block(rows, profile())
+    X = np.frombuffer(base64.b64decode(block['dense']), dtype='<f4').reshape(3, 2)
+    assert list(base64.b64decode(block['available'])) == [1, 0, 1]
+    np.testing.assert_array_equal(X[[0, 2]], backend.prepared.vectors[[1, 0]])
+    np.testing.assert_array_equal(X[1], [0, 0])
+
+
 def checkpoint_documents() -> list[dict[str, str]]:
     return [
         {

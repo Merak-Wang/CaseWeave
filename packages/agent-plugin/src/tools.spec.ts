@@ -42,6 +42,25 @@ async function mounted() {
 const base = { state_id: 'state-1', judgments: [], semantic_gaps: [] }
 
 describe('public decision tool', () => {
+  it('keeps operator uncertainty authoritative instead of accepting an ordinary main-agent override', async () => {
+    const { ctx, app, decisions, execute } = await mounted()
+    Object.defineProperty(app, 'operators', { value: {} })
+    try {
+      const result = await execute({ ...base, judgments: [{ candidate_alias: 'c1', verdict: 'accept',
+        evidence_aliases: ['c1'], reason: '摘要相似，直接确认' }], action: { kind: 'inspect', next_window: true } })
+      expect(result.isError).toBe(true)
+      expect(JSON.stringify(result.content)).toContain('不能在 ticket_decide 覆盖算子结论')
+      expect(decisions).toEqual([])
+      const next = await execute({ ...base, action: { kind: 'inspect', next_window: true } })
+      expect(next.isError).toBe(false)
+      expect(decisions).toHaveLength(1)
+      Object.assign(app.current(fakeAgent()), { expertConflicts: [{ candidateRef: 'candidate-1', status: 'open' }] })
+      const conflict = await execute({ ...base, judgments: [{ candidate_alias: 'c1', verdict: 'accept',
+        evidence_aliases: ['c1'], reason: '处置已存在的专家分歧' }], action: { kind: 'inspect', next_window: true } })
+      expect(conflict.isError).toBe(false)
+      expect(decisions).toHaveLength(2)
+    } finally { await ctx.fiber.dispose() }
+  })
   it('ships a persona that composes the actual model review and collaboration policies', async () => {
     const { ctx } = await mounted()
     try {

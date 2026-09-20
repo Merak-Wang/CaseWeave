@@ -4,16 +4,12 @@ version = "0.3.0"
 description = "Python semantic operators for CaseWeave; metering without task quotas"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-dependencies = ["numpy>=2.2,<3", "scikit-learn>=1.7,<2", "scipy>=1.15,<2", "httpx>=0.28,<0.29", "jsonschema>=4.23,<5", "fastapi==0.141.1", "uvicorn==0.52.4", "websockets>=15,<17"]
-
-[project.optional-dependencies]
-ml = ["scikit-learn>=1.7,<2", "scipy>=1.15,<2"]
+dependencies = ["numpy>=2.2,<3", "scikit-learn>=1.7,<2", "scipy>=1.15,<2", "jsonschema>=4.23,<5", "fastapi==0.141.1", "uvicorn==0.52.4", "websockets>=15,<17"]
 
 [dependency-groups]
-dev = ["pytest>=8.4,<10"]
+dev = ["pytest>=8.4,<10", "httpx>=0.28,<0.29"]
 
 [project.scripts]
-caseweave-ops = "caseweave_ops.cli:main"
 caseweave-operators-serve = "caseweave_ops.server:main"
 
 [build-system]

@@ -11,7 +11,8 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { RetrievalError, RetrievalId, type TicketCandidateNode, type TicketRetrievalProvider } from '@retrieval-agent/contracts'
 import { DurableRetrievalAgentService, MySqlTaskStore, compileTaskInformation, executeTaskJob, taskOwner, callReportModel, type TaskJob, type TaskCommand } from '@retrieval-agent/agent-plugin'
-import { projectTicketCandidateState, windowedNode, candidateWindow, candidateEvidence, CandidateDetailService, InMemoryDetailReadAuditSink, type CandidateView } from '@retrieval-agent/product-api'
+import { projectTicketCandidateState, windowedNode, candidateWindow, candidateEvidence, CandidateDetailService, InMemoryDetailReadAuditSink, learnedResultWindow, materializeLearnedRefs, type CandidateView } from '@retrieval-agent/product-api'
+import { learnedResult } from '@retrieval-agent/domain/result'
 import { SpacyQueryAnalyzer, type TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
 import { TASK_WORKBENCH_HTML } from './workbench.js'
 import { TaskDeliveryHost, deliveryView, type DeliveryOptions } from './delivery.js'
@@ -233,7 +234,8 @@ export class TaskHost {
           send(response, 202, await this.store.create(operationId, String(agent.session.id), principal, command.text, operationId))
         } else {
           if (command.kind === 'query') throw new RetrievalError('INVALID_REQUEST', '请通过新任务入口提交查询。')
-          const { principal, application } = await this.access(id)
+          const { principal, application, agent } = await this.access(id)
+          if (command.kind === 'feedback') await application.hydrateResultCandidates(agent, [command.candidateRef as import('@retrieval-agent/contracts').TicketCandidateRef])
           const admitted = !application.operators && (command.kind === 'supplement' || command.kind === 'answer')
             ? { ...command, information: compileTaskInformation(command.text, true) } : command
           const receipt = await this.store.submit(id, principal, operationId, admitted)
@@ -253,11 +255,13 @@ export class TaskHost {
       }
       if (request.method === 'GET' && id && parts[1] === 'evidence' && parts.length === 2) {
         const { agent, application } = await this.access(id)
-        const state = await application.authorizePresentation(agent, RetrievalId(id))
-        const ref = url.searchParams.get('candidateRef') ?? '', view = candidateEvidence(state, ref)
+        let state = await application.authorizePresentation(agent, RetrievalId(id))
+        const ref = url.searchParams.get('candidateRef') ?? ''
         const provider = this.options.providerFor?.(agent)
         if (!provider) throw new RetrievalError('PROVIDER_UNAVAILABLE', '当前来源服务不可用。')
         const principal = await application.principal(agent, 'detail_read')
+        if (learnedResult(state) && !state.judgments?.some(j => j.candidateRef === ref)) state = await materializeLearnedRefs(state, provider, principal, application.semanticResults, [ref as import('@retrieval-agent/contracts').TicketCandidateRef])
+        const view = candidateEvidence(state, ref)
         await new CandidateDetailService(provider, new InMemoryDetailReadAuditSink()).readDetails(principal, state,
           [ref as import('@retrieval-agent/contracts').TicketCandidateRef], [])
         const latest = await application.authorizePresentation(agent, RetrievalId(id))
@@ -268,8 +272,13 @@ export class TaskHost {
         const { agent, application } = await this.access(id)
         const state = await application.authorizePresentation(agent, RetrievalId(id))
         if (state.accessValidation !== 'current') throw new RetrievalError('UNAUTHORIZED', '当前候选访问资格失效。')
-        send(response, 200, candidateWindow(state, (url.searchParams.get('view') ?? 'current') as CandidateView,
-          url.searchParams.get('cursor') ?? undefined, Number(url.searchParams.get('limit') ?? 30))); return
+        const cursor = url.searchParams.get('cursor') ?? undefined, limit = Number(url.searchParams.get('limit') ?? 30)
+        if (learnedResult(state) && url.searchParams.get('view') === 'confirmed') {
+          const provider = this.options.providerFor?.(agent)
+          if (!provider) throw new RetrievalError('PROVIDER_UNAVAILABLE', '当前来源服务不可用。')
+          send(response, 200, await learnedResultWindow(state, provider, await application.principal(agent, 'detail_read'), application.semanticResults, cursor, limit))
+        } else send(response, 200, candidateWindow(state, (url.searchParams.get('view') ?? 'current') as CandidateView, cursor, limit))
+        return
       }
       if (request.method === 'GET' && id && parts[1] === 'knowledge' && parts.length <= 3) {
         const { agent, application } = await this.access(id)

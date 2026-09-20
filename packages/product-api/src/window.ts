@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { RetrievalError, type RetrievalState, type TicketCandidate, type TicketCandidateNode } from '@retrieval-agent/contracts'
-import { confirmedTickets } from '@retrieval-agent/domain/result'
+import { confirmedTickets, confirmedCount } from '@retrieval-agent/domain/result'
 
 export type CandidateView = 'current' | 'confirmed' | 'history'
 export interface CandidateWindow {
@@ -47,6 +47,6 @@ export function windowedNode(state: RetrievalState, node: TicketCandidateNode): 
   const refs = new Set(page.items.map(c => c.ref))
   return { ...node, candidates: page.items, alreadyReadEvidence: [],
     selectedCandidateRefs: node.selectedCandidateRefs?.filter(ref => refs.has(ref)) ?? [],
-    collectionWindow: { current: page.total, history: state.candidateHistory.length, confirmed: confirmed.total, version: page.version, limit: page.limit },
+    collectionWindow: { current: page.total, history: state.candidateHistory.length, confirmed: confirmedCount(state), version: page.version, limit: page.limit },
     ...(node.result ? { result: { ...node.result, tickets: confirmed.items, judgments: node.result.judgments.filter(j => confirmed.items.some(c => c.ref === j.candidateRef)), evidence: [] } } : {}) }
 }

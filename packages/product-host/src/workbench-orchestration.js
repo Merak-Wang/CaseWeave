@@ -4,7 +4,7 @@ const action = (label, run, cls = '') => { const b = make('button', label, cls);
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 const statusNames = { pending: '等待开始', running: '正在核查', completed: '已提交', failed: '未完成', superseded: '已更新' }
 const workNames = { starting: '正在阅读领域知识', inspect: '正在核对工单原文', search: '正在补充搜索', report: '正在整理核查发现' }
-const stages = [['search', '并行快查'], ['review', '审阅线索'], ['experts', '专家协作'], ['synthesis', '汇总结果']]
+const stages = [['search', '理解与召回'], ['review', '语义筛选'], ['experts', '专项核查'], ['synthesis', '结果交付']]
 
 /** Reveal only newly committed public text; restored history is rendered immediately. */
 export function revealText(el, value, animate = false) {
@@ -90,7 +90,7 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
     $('context-description').textContent = description
     const usage = current?.usage
     $('output-usage').textContent = usage ? `输出 ${usage.outputTokens.toLocaleString()} tokens` : '输出待计量'
-    $('usage-description').textContent = usage ? `累计输出 ${usage.outputTokens.toLocaleString()} tokens\n主 Agent：${usage.mainOutputTokens.toLocaleString()}\n专家合计：${usage.expertOutputTokens.toLocaleString()}\n模型请求：${usage.modelRequests} 次\n` + usage.experts.map(e => `${e.title}（第 ${e.inputGeneration + 1} 轮）：${e.outputTokens.toLocaleString()}`).join('\n') : '收到模型用量回执后更新。'
+    $('usage-description').textContent = usage ? `累计输出 ${usage.outputTokens.toLocaleString()} tokens\n主 Agent：${usage.mainOutputTokens.toLocaleString()}\n专家合计：${usage.expertOutputTokens.toLocaleString()}\n语义算子：${(usage.operatorOutputTokens ?? 0).toLocaleString()}\n模型请求：${usage.modelRequests} 次\n` + usage.experts.map(e => `${e.title}（第 ${e.inputGeneration + 1} 轮）：${e.outputTokens.toLocaleString()}`).join('\n') : '收到模型用量回执后更新。'
   }
   function update(s, offline = false) {
     disconnected = offline
@@ -104,21 +104,22 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
     const last = s.conversation?.filter(c => c.role === 'assistant').at(-1)
     const titles = { planning: '正在理解当前要求，制定检索计划', coverage: '尚未找到候选，正在核对搜索范围与后续方向', search: '正在从关键词与语义中寻找线索', review: '正在审阅标题与摘要，按需核实疑点', experts: working.length + ' 位领域专家正在独立核查', synthesis: '正在汇总发现，核对遗漏与分歧', finished: ['top_k_accepted', 'no_result'].includes(o?.outcome) ? '本轮检索已结束' : '本轮已停止，仍有未完成项' }
     const title = unavailable ? '检索暂时无法继续' : disconnected ? o?.terminal ? '连接已断开，显示已保存结果' : '正在重连，后台检索仍在继续' : s.question && !working.length ? '有一处范围需要你补充'
-      : !o?.terminal && o?.operation === 'sem_filter' ? '模型正在按当前业务要求核实已召回的工单' : !o?.terminal && o?.operation === 'sem_search' ? '正在执行本轮检索计划，补充候选' : titles[o?.stage] ?? '正在准备检索'
+      : !o?.terminal && o?.operation === 'sem_filter' ? '正在按当前业务判据筛选工单集合' : !o?.terminal && o?.operation === 'sem_extract' ? '正在从工单证据中提取所需事实' : !o?.terminal && o?.operation === 'sem_agg' ? '正在整理证据与引用' : !o?.terminal && o?.operation === 'sem_search' ? '正在执行本轮检索计划，补充候选' : titles[o?.stage] ?? '正在准备检索'
     revealText($('live-title'), title, wasInitialized)
     const note = $('live-note')
     const stoppedReason = o?.terminal && !['top_k_accepted', 'no_result'].includes(o.outcome) ? o.stopExplanation : undefined
     const limitation = o?.blockers?.join('；')
     note.hidden = disconnected || !(stoppedReason || limitation || busy && last)
     if (stoppedReason || limitation || last) revealText(note, stoppedReason || limitation || last.text, wasInitialized)
-    $('live-metrics').replaceChildren(...(o ? [['线索', o.counts.candidates], ['已读原文', o.counts.inspected], ['已确认', o.counts.confirmed]].map(([label, count]) => { const e = make('span'); e.append(make('strong', String(count)), make('small', label)); return e }) : []))
+    const learning = o?.retrieval?.learning
+    $('live-metrics').replaceChildren(...(o ? [['已召回线索', o.counts.candidates], ...(typeof learning?.scopeCount === 'number' ? [['筛选范围', learning.scopeCount]] : [['已读原文', o.counts.inspected]]), ['已确认', o.counts.confirmed]].map(([label, count]) => { const e = make('span'); e.append(make('strong', Number(count).toLocaleString()), make('small', label)); return e }) : []))
     const active = stages.findIndex(([key]) => key === o?.stage), done = o?.terminal && ['top_k_accepted', 'no_result'].includes(o.outcome)
-    const railKey = [o?.stage, done, unavailable, o?.counts.experts, o?.counts.completedExperts, o?.counts.inspected, o?.fastQueryComplete, disconnected].join(':')
+    const railKey = [o?.stage, done, unavailable, o?.counts.experts, o?.counts.completedExperts, o?.counts.confirmed, learning?.status, o?.fastQueryComplete, disconnected].join(':')
     if ($('stage-rail').dataset.key !== railKey) {
       $('stage-rail').dataset.key = railKey
       $('stage-rail').replaceChildren(...stages.map(([key, label], i) => {
         const e = make('li'), skipped = key === 'experts' && !o?.counts.experts && (done || o?.terminal)
-        const observed = key === 'search' ? o?.fastQueryComplete || Boolean(s.node?.searchProgress?.channels.some(c => c.status === 'completed')) : key === 'review' ? o?.counts.inspected > 0 && (active > 1 || o.terminal) : key === 'experts' ? o?.counts.experts > 0 && o.counts.completedExperts === o.counts.experts : done
+        const observed = key === 'search' ? o?.fastQueryComplete || Boolean(s.node?.searchProgress?.channels.some(c => c.status === 'completed')) : key === 'review' ? (o?.counts.confirmed > 0 || learning?.status === 'quality_passed') && (active > 1 || o.terminal) : key === 'experts' ? o?.counts.experts > 0 && o.counts.completedExperts === o.counts.experts : done
         e.dataset.state = skipped ? 'skipped' : i === active && !unavailable ? 'active' : observed ? 'done' : o?.terminal ? 'stopped' : 'upcoming'
         if (i === active && !unavailable) e.setAttribute('aria-current', 'step')
         e.append(make('span', skipped ? '−' : e.dataset.state === 'done' ? '✓' : e.dataset.state === 'stopped' ? '−' : String(i + 1), 'stage-number'), make('span', label), ...(skipped ? [make('small', '无需调用')] : [])); return e

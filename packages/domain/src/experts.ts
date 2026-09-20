@@ -4,6 +4,7 @@ import { RetrievalError, type RetrievalState, type ExpertAssignment, type Expert
 import { validateExclusionChecks } from './exclusion-checks.js'
 
 export type ExpertUpdate =
+  | { kind: 'candidates'; candidates: readonly import('@retrieval-agent/contracts').TicketCandidate[] }
   | { kind: 'knowledge_invalidated'; references: readonly string[]; catalog: RetrievalKnowledgeCatalog }
   | { kind: 'catalog'; catalog: RetrievalKnowledgeCatalog }
   | { kind: 'task'; taskId: string; patch: Partial<Pick<ExpertTask, 'status' | 'knowledgeRefs' | 'releaseId' | 'childSessionId' | 'failure' | 'actionsUsed' | 'modelSteps' | 'inputTokens' | 'outputTokens' | 'context' | 'activity' | 'repeatedToolFailure'>> }

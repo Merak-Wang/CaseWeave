@@ -1,4 +1,5 @@
-import type { RetrievalState } from '@retrieval-agent/contracts'
+import type { LearnedResult, RetrievalState } from '@retrieval-agent/contracts'
+import { confirmedCount, learnedResult } from '@retrieval-agent/domain/result'
 
 /** A public view of committed work. No prompts, private reasoning, raw tool arguments or invented percent. */
 export function projectOrchestration(state: RetrievalState) {
@@ -22,9 +23,27 @@ export function projectOrchestration(state: RetrievalState) {
   const expertOutputTokens = (state.expertTasks ?? []).reduce((total, t) => total + (t.outputTokens ?? 0), 0)
   const mainOutputTokens = state.budget?.totalOutputTokens ?? 0
   const operatorUsage = state.budget?.operatorUsage
+  const plan = state.query?.contract?.semanticPlan
+  const learning = operatorUsage?.learning as Record<string, unknown> | undefined
+  // 检索视图只取本轮判据与集合计数，不复制训练 ID 和逐条分数。
+  const currentLearning = learning?.input_revision === generation ? learning : undefined
   const operatorOutputTokens = Number(operatorUsage?.reported_completion_tokens ?? 0)
+  const measuredInput = state.budget?.totalMeasuredInputTokens ?? ((state.budget?.modelStepsUsed ?? 0) === 0 ? 0 : undefined)
+  const expertInput = (state.expertTasks ?? []).reduce((sum, t) => sum + (t.inputTokens ?? 0), 0)
+  const expertReceiptsComplete = !(state.expertTasks ?? []).some(t => (t.modelSteps ?? 0) > 0 && t.inputTokens === undefined)
   return {
+    retrieval: {
+      plan: plan?.inputGeneration === generation ? { instruction: plan.instruction, keywords: plan.keywords,
+        expressions: plan.retrieval_expressions, goal: plan.goal } : undefined,
+      learning: currentLearning ? { status: String(currentLearning.stop_reason), resultAvailable: Boolean(learnedResult(state)),
+        scopeCount: currentLearning.corpus_records, sampledCount: currentLearning.teacher_unique_records,
+        trainingCount: currentLearning.training_records, auditCount: currentLearning.audit_records,
+        quality: currentLearning.quality as LearnedResult['quality'] | undefined } : undefined,
+    },
     usage: { outputTokens: mainOutputTokens + expertOutputTokens + operatorOutputTokens, mainOutputTokens, expertOutputTokens, operatorOutputTokens,
+      inputTokens: measuredInput !== undefined && expertReceiptsComplete && operatorUsage?.accounting_complete !== false
+        ? measuredInput + expertInput + Number(operatorUsage?.reported_prompt_tokens ?? 0) : null,
+      mainMeasuredInputTokens: measuredInput ?? null, expertInputTokens: expertInput,
       operatorUsage,
       modelRequests: (state.budget?.modelStepsUsed ?? 0) + (state.expertTasks ?? []).reduce((total, t) => total + (t.modelSteps ?? 0), 0) + Number(operatorUsage?.llm_adapter_calls ?? 0),
       experts: (state.expertTasks ?? []).map(t => ({ id: t.id, title: domains.find(d => d.id === t.domainId)?.description ?? t.domainId,
@@ -37,7 +56,7 @@ export function projectOrchestration(state: RetrievalState) {
       running: !terminal && !state.executionClock?.waitingSince },
     inputGeneration: generation, startedAt: state.createdAt, updatedAt: state.updatedAt, stage, terminal, fastQueryComplete: Boolean(state.lastPage),
     outcome: state.termination, stopExplanation: state.stopExplanation, blockers, operation, waitingForInput: state.termination === 'needs_clarification',
-    counts: { candidates: state.candidates.length, inspected: inspected.size, confirmed: state.selectedCandidateRefs.length,
+    counts: { candidates: state.candidates.length, inspected: inspected.size, confirmed: confirmedCount(state),
       experts: tasks.length, completedExperts: tasks.filter(t => t.status === 'completed').length },
     catalog: { status: state.knowledgeCatalog?.status ?? 'preparing', releaseId: state.knowledgeCatalog?.releaseId,
       domains: domains.map(d => ({ id: d.id, title: d.description, entryCount: d.entryIds.length })) },

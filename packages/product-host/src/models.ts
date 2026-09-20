@@ -40,7 +40,16 @@ export class WorkbenchModels {
   }
   current(agent: Agent) { return this.selections.get(agent)?.current }
   private async validateSelection(selection: ModelSelectionRef, agent: Agent) {
-    if (await this.available(selection.current)) return
+    if (await this.available(selection.current)) {
+      const current = selection.current!
+      const info = await this.ctx.llm.resolveModelInfo(current.provider, current.model)
+      // off 是启动种子的常见值；未声明推理档位的自定义模型需要省略该参数。
+      if (current.reasoningEffort === 'off' && !info.reasoning?.efforts.some(e => e.id === 'off')) {
+        selection.current = { provider: current.provider, model: current.model }
+        this.notices.set(agent, '该模型未声明 off 推理档位，按供应商默认参数运行。')
+      }
+      return
+    }
     const fallback = this.ctx.agentDefaultModel.currentSelection()
     const old = selection.current
     selection.current = await this.available(fallback) ? fallback : undefined

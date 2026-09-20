@@ -38,6 +38,21 @@ describe('A4 phase8 judgment citation projection', () => {
 })
 
 describe('A14 phase 5 delivery boundaries', () => {
+  it('keeps every cited source fragment supporting a report example, including later decisive facts', () => {
+    const base = retrievalState(), c = base.candidates[0]!
+    const evidence = ['原业务状态', '到期时间', '到期后转为新的计费方式'].map((text, i) => ({
+      evidenceId: TicketEvidenceId(`report-e${i}`), candidateRef: c.ref, displayId: c.displayId,
+      sourceVersion: c.sourceVersion, contentHash: c.contentHash, field: 'problemDescription', text,
+      start: i * 30, end: i * 30 + text.length, estimatedTokens: text.length,
+      trust: 'untrusted_ticket_evidence' as const, truncated: false,
+    }))
+    const state = { ...base, promotedEvidence: evidence, modelVisibleEvidenceIds: evidence.map(e => e.evidenceId),
+      judgments: [{ candidateRef: c.ref, verdict: 'accept' as const, evidenceRefs: evidence.map(e => e.evidenceId), reason: '三段共同支持状态变化' }] }
+    const report = createRetrievalReport(state, [])
+    expect(report.citations.map(citation => citation.text)).toEqual(evidence.map(e => e.text))
+    expect(report.examples[0]!.citations).toEqual(evidence.map(e => e.evidenceId))
+  })
+
   it('streams complete controlled JSONL fields and refuses undeclared Provider payloads', async () => {
     const base = retrievalState()
     const state = { ...base, snapshot: { ...base.snapshot!, fieldCatalog: [{ key: 'body', label: '正文', valueKind: 'text' as const, accessLevel: 'L3' as const, filterOperators: [], sensitivity: 'source_controlled' as const }, { key: 'raw', label: 'raw', valueKind: 'raw_json' as const, accessLevel: 'L3' as const, filterOperators: [], sensitivity: 'source_controlled' as const }] } }

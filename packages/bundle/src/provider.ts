@@ -163,6 +163,22 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
   readEvidence(principal: TrustedPrincipalContext, request: EvidenceReadRequest, options?: ProviderCallOptions): Promise<TicketEvidenceResult> { return this.provider.readEvidence(principal, request, options) }
   readDetails(principal: TrustedPrincipalContext, request: DetailReadRequest, options?: ProviderCallOptions): Promise<TicketDetailResult> { return this.provider.readDetails(principal, request, options) }
   override readFeatures: NonNullable<import('@retrieval-agent/contracts').TicketRetrievalProvider['readFeatures']> = (...args) => this.provider.readFeatures?.(...args) ?? Promise.resolve([])
+  override featureBlock: NonNullable<TicketRetrievalProvider['featureBlock']> = (...args) => {
+    if (!this.provider.featureBlock) throw new Error('Provider does not support numeric blocks')
+    return this.provider.featureBlock(...args)
+  }
+  override resolveFeatureIds: NonNullable<TicketRetrievalProvider['resolveFeatureIds']> = (...args) => {
+    if (!this.provider.resolveFeatureIds) throw new Error('Provider does not support numeric IDs')
+    return this.provider.resolveFeatureIds(...args)
+  }
+  override scanFeatures: NonNullable<import('@retrieval-agent/contracts').TicketRetrievalProvider['scanFeatures']> = (...args) => {
+    if (!this.provider.scanFeatures) throw new Error('Provider does not support corpus features')
+    return this.provider.scanFeatures(...args)
+  }
+  override readCandidates: NonNullable<import('@retrieval-agent/contracts').TicketRetrievalProvider['readCandidates']> = (...args) => {
+    if (!this.provider.readCandidates) throw new Error('Provider does not support corpus candidates')
+    return this.provider.readCandidates(...args)
+  }
   async status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus> {
     await this.preparation
     if (this.preparationError !== undefined) {

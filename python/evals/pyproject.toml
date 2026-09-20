@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "External deterministic evaluation contracts and scorers for CaseWeave"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["httpx==0.28.1", "inspect-ai==0.3.263"]
 
 [dependency-groups]
 dev = ["pytest==8.4.2"]
@@ -14,7 +14,7 @@ requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/retrieval_agent_evals"]
+packages = ["src/retrieval_agent_evals", "caseweave_sets"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

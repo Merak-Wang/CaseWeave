@@ -71,7 +71,24 @@ export function isReadableTicketField(field: Pick<TicketFieldDescriptor, 'access
 
 /** Every data-bearing method receives the trusted principal again. */
 export interface TicketRetrievalProvider {
+  /** 预处理数值列块；不携带正文或逐行向量 JSON。ids 属于不可变索引代次。 */
+  featureBlock?(principal: TrustedPrincipalContext, request: {
+    readonly snapshotId: TicketSnapshotId; readonly limit: number; readonly cursor?: string;
+    readonly ids?: readonly number[]; readonly refs?: readonly import('./brand.js').TicketCandidateRef[];
+    readonly filters?: readonly import('./types.js').TicketFilter[];
+  }, options?: ProviderCallOptions): Promise<NumericFeatureBlock>
+  resolveFeatureIds?(principal: TrustedPrincipalContext, request: { readonly snapshotId: TicketSnapshotId;
+    readonly ids: readonly number[] }, options?: ProviderCallOptions): Promise<readonly import('./types.js').TicketCandidate[]>
   readonly providerId: string
+  /** 授权全库按块读取既有特征；不受搜索候选窗口限制，不生成新向量。 */
+  scanFeatures?(principal: TrustedPrincipalContext,
+    request: { readonly snapshotId: TicketSnapshotId; readonly cursor?: string; readonly limit: number },
+    options?: ProviderCallOptions): Promise<{ readonly rows: readonly { readonly ref: string; readonly version: string;
+      readonly content_hash: string; readonly embedding_id: string; readonly vectors: readonly (readonly number[])[] }[];
+      readonly nextCursor?: string; readonly total?: number }>
+  readCandidates?(principal: TrustedPrincipalContext,
+    request: { readonly snapshotId: TicketSnapshotId; readonly candidateRefs: readonly TicketCandidateRef[] },
+    options?: ProviderCallOptions): Promise<readonly import('./types.js').TicketCandidate[]>
   /** Read existing index features only. Missing vectors never trigger re-embedding. */
   readFeatures?(principal: TrustedPrincipalContext,
     request: { readonly snapshotId: TicketSnapshotId; readonly candidateRefs: readonly TicketCandidateRef[] },
@@ -96,4 +113,10 @@ export interface TicketRetrievalProvider {
     options?: ProviderCallOptions,
   ): Promise<TicketDetailResult>
   status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus>
+}
+
+export interface NumericFeatureBlock {
+  readonly ids: readonly number[]; readonly dense: string; readonly dimensions: number;
+  readonly available: string; readonly feature_id: string; readonly next_cursor?: string | null;
+  readonly sparse?: { readonly data: string; readonly indices: string; readonly indptr: string; readonly columns: number }
 }

@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createPool, type Pool, type PoolConnection, type RowDataPacket } from 'mysql2/promise'
 import { RetrievalError, makeRetrievalEvent, type RetrievalState, type RetrievalDomainEvent, type RetrievalEventType,
-  type RetrievalEventDataMap, type RetrievalId, type TrustedPrincipalContext } from '@retrieval-agent/contracts'
-import { RetrievalController, migrateProjectionState, recoverExecutionClock, type RetrievalEventJournal, type RetrievalClarificationAnswer } from '@retrieval-agent/domain'
+  type RetrievalEventDataMap, type RetrievalId, type TrustedPrincipalContext,
+  type CandidateDetailReadReceipt, type TicketDetailResult } from '@retrieval-agent/contracts'
+import { RetrievalController, createRetrievalStatePatch, migrateProjectionState, recoverExecutionClock, type RetrievalEventJournal, type RetrievalClarificationAnswer } from '@retrieval-agent/domain'
 import { ARTIFACT_DDL, externalizeArtifacts, hydrateArtifacts, artifactIdentities } from './artifact-store.js'
+import { SEMANTIC_RESULT_DDL, MySqlSemanticResultStore } from './semantic-result-store.js'
 
 export type TaskCommand = { kind: 'query'; text: string }
   | { kind: 'supplement'; text: string; information: RetrievalClarificationAnswer }
@@ -45,6 +47,7 @@ export class TaskJournal implements RetrievalEventJournal {
 }
 
 const DDL = [
+  SEMANTIC_RESULT_DDL,
   ...ARTIFACT_DDL,
   `CREATE TABLE IF NOT EXISTS ra_task (id VARCHAR(64) PRIMARY KEY, session_id VARCHAR(191) NOT NULL, owner_hash CHAR(64) NOT NULL, original_query TEXT NOT NULL, event_seq BIGINT NOT NULL DEFAULT 0, input_revision INT NOT NULL DEFAULT 0, semantic_revision INT NOT NULL DEFAULT 0, query_revision INT NOT NULL DEFAULT 0, state_json JSON NULL, failure TEXT NULL, created_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3), updated_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3))`,
   `CREATE TABLE IF NOT EXISTS ra_task_event (task_id VARCHAR(64) NOT NULL, seq BIGINT NOT NULL, kind VARCHAR(100) NOT NULL, data_json JSON NOT NULL, PRIMARY KEY(task_id,seq))`,
@@ -59,9 +62,12 @@ const DDL = [
 export class MySqlTaskStore {
   readonly pool: Pool
   readonly ready: Promise<void>
-  constructor(url = process.env.RETRIEVAL_AGENT_MYSQL_URL ?? 'mysql://root@127.0.0.1:13306/retrieval_agent', readonly learningEnabled = false) {
+  readonly semanticResults: MySqlSemanticResultStore
+  // 独立产品实例可共享只读工单库，但各自的任务队列必须与 Session 目录对应。
+  constructor(url = process.env.RETRIEVAL_AGENT_TASK_MYSQL_URL || process.env.RETRIEVAL_AGENT_MYSQL_URL || 'mysql://root@127.0.0.1:13306/retrieval_agent', readonly learningEnabled = false) {
     this.pool = createPool({ uri: url, connectionLimit: 8, charset: 'utf8mb4_bin', timezone: 'Z' })
     this.ready = this.migrate()
+    this.semanticResults = new MySqlSemanticResultStore(this.pool, this.ready)
   }
   private async migrate(): Promise<void> {
     for (const ddl of DDL) await this.pool.query(`${ddl} CHARACTER SET utf8mb4 COLLATE utf8mb4_bin`)
@@ -199,10 +205,47 @@ export class MySqlTaskStore {
     const events = (await this.rows<{ seq: number; kind: string; data_json: unknown }>('SELECT seq,kind,data_json FROM ra_task_event WHERE task_id=? AND seq>? ORDER BY seq LIMIT ?', [id, after, limit])).map(e => ({ seq: e.seq, kind: e.kind, data: e.data_json }))
     return await hydrateArtifacts((sql, values) => this.pool.query(sql, values), id, events) as TaskEvent[]
   }
-  async commit(base: TaskRecord, state: RetrievalState, events: readonly RetrievalDomainEvent[], job?: TaskJob, semantic = true): Promise<TaskRecord> {
+  async recordUserRead(base: TaskRecord, receipt: CandidateDetailReadReceipt, result: TicketDetailResult): Promise<TaskRecord> {
+    return this.transaction(async c => {
+      const task = (await this.hydrateTask(await this.lock(c, base.id), c))!
+      if (task.input_revision !== base.input_revision) throw staleTask()
+      // Provider 已在事务外读取；锁内仅将阅读证据合入最新状态，普通进度不会使其失效。
+      const journal = new TaskJournal([], await this.domainEventCount(task.id, c))
+      const controller = new RetrievalController({} as ConstructorParameters<typeof RetrievalController>[0], journal)
+      task.state_json = controller.recordDetailRead(task.state_json!, receipt, result)
+      journal.append(task.state_json.retrievalId, 'retrieval/detail-read', { receipt })
+      for (const event of journal.pending) await this.append(c, task, event.type, event)
+      await this.save(c, task)
+      return task
+    })
+  }
+  async commit(base: TaskRecord, state: RetrievalState, events: readonly RetrievalDomainEvent[], job?: TaskJob, semantic = true, mergeUserReads = false): Promise<TaskRecord> {
     return this.transaction(async c => {
       const task = await this.lock(c, base.id)
-      if (task.input_revision !== base.input_revision || task.state_json?.stateId !== base.state_json?.stateId) throw staleTask()
+      if (task.input_revision !== base.input_revision) throw staleTask()
+      if (task.state_json?.stateId !== base.state_json?.stateId) {
+        if (!mergeUserReads || task.semantic_revision !== base.semantic_revision) throw staleTask()
+        // 慢检索期间只合并独立详情读取；条件、授权及其他并发操作仍由旧状态检查拒绝。
+        const changes = await this.rows<{ kind: string }>('SELECT kind FROM ra_task_event WHERE task_id=? AND seq>?', [task.id, base.event_seq], c)
+        if (!changes.some(e => e.kind === 'retrieval/detail-read') || changes.some(e => ![
+          'retrieval/evidence-promoted', 'retrieval/state-patched', 'retrieval/detail-read',
+        ].includes(e.kind))) throw staleTask()
+        const current = (await this.hydrateTask(task, c))!.state_json!
+        const evidence = new Map(state.promotedEvidence.map(e => [e.evidenceId, e]))
+        for (const item of current.promotedEvidence.filter(e => e.readers?.includes('user'))) {
+          const existing = evidence.get(item.evidenceId)
+          evidence.set(item.evidenceId, existing ? { ...existing, readers: [...new Set([...(existing.readers ?? []), 'user' as const])] } : item)
+        }
+        const readRefs = new Set([...evidence.values()].filter(e => e.evidenceLevel === 'L2').map(e => e.candidateRef))
+        state = { ...state, previousStateId: current.stateId, revision: current.revision + 1,
+          promotedEvidence: [...evidence.values()], candidates: state.candidates.map(candidate => readRefs.has(candidate.ref)
+            ? { ...candidate, evidenceLevel: 'L2' as const } : candidate) }
+        // 中间计算沿旧基线产生；提交时保留业务事件，并把最终状态增量接到已保存的用户阅读之后。
+        events = [...events.filter(e => e.type !== 'retrieval/state-patched'), makeRetrievalEvent({
+          eventId: randomUUID(), retrievalId: state.retrievalId, sequence: 0, occurredAt: new Date().toISOString(),
+          type: 'retrieval/state-patched', data: { patch: createRetrievalStatePatch(current, state) },
+        })]
+      }
       if (job) await this.assertLease(c, job)
       task.state_json = state
       if (semantic) task.semantic_revision++

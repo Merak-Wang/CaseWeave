@@ -42,7 +42,7 @@ class Provider extends TicketRetrievalProviderService {
 }
 
 // Controlled model only determines fixture semantics; real DSH, Python, Provider and tools execute.
-async function fixture(options: { derived?: 'sem_topk' | 'sem_agg' | 'sem_extract' | 'sem_join'; sourceRequired?: boolean; readSource?: boolean; recordCount?: number; repeatDerived?: number } = {}) {
+async function fixture(options: { derived?: 'sem_agg' | 'sem_extract'; sourceRequired?: boolean; readSource?: boolean; recordCount?: number; repeatDerived?: number } = {}) {
   const ctx = new Context(), searches: string[] = [], errors: string[] = [], requests: GenerateOptions[] = []
   const records = Array.from({ length: options.recordCount ?? 2 }, (_, i) => ['宽带停机案例', '副卡解绑案例'][i % 2]!).map((summary, i) => normalizeFixtureTicket({
     ticketId: `r${i}`, displayId: `R-${i}`, tenantId: 'operators', allowedSubjectIds: [], requiredAttributes: {}, sourceVersion: 'v1',
@@ -63,7 +63,8 @@ async function fixture(options: { derived?: 'sem_topk' | 'sem_agg' | 'sem_extrac
   new Principal(ctx); new Provider(ctx, new LocalTicketProvider(records, { ranker, defaultMode: 'hybrid' }))
   const app = new RetrievalAgentService(ctx)
   const bridge = new PythonOperatorBridge(process.cwd(), resolve('.cache/semantic-operators', `fixture-${randomUUID()}.sqlite`), undefined, '')
-  const ops = new SemanticOperators(ctx, app, undefined, process.cwd(), bridge)
+  // 这些回归验证定向取证和派生算子；全库学习另用具备特征扫描的公开 DSH 纵切。
+  const ops = new SemanticOperators(ctx, app, undefined, process.cwd(), bridge, { algorithm: 'baseline' })
   installAutomaticRetrievalStart(ctx, app, { analyzer: { async analyze() { throw new Error('legacy compiler must not run') } } })
   installRetrievalTools(ctx, app); installRetrievalRuntimeBudget(ctx, app)
   ctx.on('tools/result', (_exec, result) => { if (result.isError) errors.push(JSON.stringify(result.content)) })
@@ -78,8 +79,6 @@ async function fixture(options: { derived?: 'sem_topk' | 'sem_agg' | 'sem_extrac
         payload = { keywords: [revised ? '副卡' : '宽带'], instruction: revised ? '只纳入副卡解绑案例' : '只纳入宽带停机案例', retrieval_expressions: [],
           goal: { mode: 'adaptive', count: null }, steps: [{ id: 'review', op: 'sem_filter', inputs: ['$source'], instruction: '复核场景',
             params: options.sourceRequired ? { require_source: true } : {} }] }
-      } else if (operator && request.system?.includes('当前操作：sem_topk_compare')) {
-        payload = { winner: 'left', citations: [data.left, data.right].map(r => ({ ref: r.ref, passage_id: 'summary', quote: r.passages.find((p: any) => p.id === 'summary').text })) }
       } else if (operator && request.system?.includes('当前操作：sem_agg')) {
         payload = { status: 'ok', text: '这批候选涉及宽带和副卡。', source_ids: data.sources.map((s: any) => s.id) }
       } else if (operator && request.system?.includes('当前操作：sem_extract')) {
@@ -99,7 +98,7 @@ async function fixture(options: { derived?: 'sem_topk' | 'sem_agg' | 'sem_extrac
         } else if (options.derived && derivedSubmitted < (options.repeatDerived ?? 1)) {
           derivedSubmitted++; name = options.derived
           payload = { candidate_aliases: s.candidates.map(c => `c${s.candidateHistory.findIndex(h => h.ref === c.ref) + 1}`), instruction: '辅助当前检索复核',
-            ...(name === 'sem_topk' ? { k: 1 } : name === 'sem_join' ? { blocking_field: 'summary' } : name === 'sem_extract'
+            ...(name === 'sem_extract'
               ? { output_schema: { type: 'object', $defs: { text: { type: 'string' } }, properties: { summary: { $ref: '#/$defs/text' } }, required: ['summary'] } } : {}) }
         } else {
           name = 'ticket_decide'
@@ -150,16 +149,7 @@ it('O4 fetches required dialogue before the first filter request and replays the
   } finally { await f.close() }
 }, 60000)
 
-it('O2 retains the actual comparison manifests on public sem_topk artifacts', async () => {
-  const f = await fixture({ derived: 'sem_topk' })
-  try {
-    await f.input('查找宽带停机案例，并排序')
-    const s = f.app.current(f.agent), a = s.operatorArtifacts?.find(a => a.operation === 'sem_topk')
-    console.log('O2', JSON.stringify({ errors: f.errors, artifacts: s.operatorArtifacts?.map(a => ({ operation: a.operation, manifestIds: a.manifestIds })), operations: s.contextManifests?.map(m => m.operator?.operation) }))
-    expect(f.errors).toEqual([]); expect(a).toBeDefined()
-    expect(a!.manifestIds.length).toBeGreaterThan(0)
-  } finally { await f.close() }
-}, 60000)
+
 
 it('reuses valid extraction through the public tool with the original batch receipt', async () => {
   const f = await fixture({ derived: 'sem_extract', repeatDerived: 2 })
@@ -173,16 +163,7 @@ it('reuses valid extraction through the public tool with the original batch rece
   } finally { await f.close() }
 }, 60000)
 
-it('finishes an empty indexed join without claiming complete pair recall or a model call', async () => {
-  const f = await fixture({ derived: 'sem_join' })
-  try {
-    await f.input('查找摘要相同的工单关系')
-    expect(f.errors).toEqual([])
-    const artifact = f.app.current(f.agent).operatorArtifacts!.find(a => a.operation === 'sem_join')!
-    expect(artifact.manifestIds).toHaveLength(0)
-    expect(artifact.events).toEqual([{ type: 'join_summary', candidate_pairs: 0, strategy: 'indexed_blocking', blocking_recall: 'not_established' }])
-  } finally { await f.close() }
-}, 60000)
+
 
 it('O3 retains candidate/source identity in actual sem_agg manifests', async () => {
   const f = await fixture({ derived: 'sem_agg' })

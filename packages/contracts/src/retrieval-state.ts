@@ -218,6 +218,8 @@ export interface FrozenEvidencePack {
  * current candidates. Unjudged candidates belong only to the progress projection.
  */
 export interface TicketResultCollection {
+  /** 全集句柄是权威成员集合；tickets 只包含已水合的证据窗口。 */
+  readonly learnedSet?: import('./semantic-operators.js').LearnedResult
   readonly type: 'ticket_collection'
   readonly schemaVersion: 2
   readonly retrievalId: RetrievalId

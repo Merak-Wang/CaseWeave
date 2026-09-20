@@ -66,6 +66,7 @@ export async function executeTaskJob(application: DurableRetrievalAgentService, 
     }
     signal.addEventListener('abort', abort, { once: true })
     let failed: { code?: string; status?: number } | undefined
+    const previousEvents = agent.session.snapshotEvents().length
     const detachFailure = agent.ctx.on('agent/request-error', (event, next) => { failed = event.failure; return next() })
     try {
       agent.followup(createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
@@ -74,6 +75,12 @@ export async function executeTaskJob(application: DurableRetrievalAgentService, 
       signal.throwIfAborted()
       await application.loadTask(agent)
       const after = application.currentOrUndefined(agent)
+      // 请求装配错误发生在 llm/stream 之前；从 DSH 终态取出真实原因，不能只报“未提交完成”。
+      if (!failed) {
+        const end = agent.session.snapshotEvents().slice(previousEvents).findLast(e => e.type === 'turn/end')
+        const reason = end?.data as { reason?: { kind: string; error?: { code?: string } } } | undefined
+        if (reason?.reason?.kind === 'error') failed = reason.reason.error
+      }
       if (after?.phase === 'awaiting_clarification') await application.coordinator?.settlePending?.(agent, signal)
       if (after && after.phase !== 'stopped' && after.phase !== 'awaiting_clarification') {
         await application.stopIncomplete(agent, failed ? modelFailure(failed).publicMessage : '模型执行已结束但未提交可校验的完成判断，任务尚未完成；已保存查询条件和候选。')

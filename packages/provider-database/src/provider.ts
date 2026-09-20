@@ -279,6 +279,91 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     })
   }
 
+  async scanFeatures(principal: TrustedPrincipalContext,
+    request: { snapshotId: TicketSnapshotId; cursor?: string; limit: number }, options?: ProviderCallOptions) {
+    const entry = await this.#entry(principal, request.snapshotId), current = await this.db.publication(this.datasetId)
+    const scope = await this.#query.scope(entry.source.id, current.source.id, principal, all, entry.source.fields_json)
+    const records = await this.db.rows<{ ticket_id: string; source_version: string; content_hash: string }>(
+      `SELECT t.ticket_id,t.source_version,t.content_hash FROM ${scope.from} WHERE ${scope.where} AND t.ticket_id>? ORDER BY t.ticket_id LIMIT ?`,
+      [...scope.params, request.cursor ?? '', request.limit])
+    const ids = records.map(r => r.ticket_id), byId = new Map(records.map(r => [r.ticket_id, r]))
+    const features = new Map<string, { sum: number[]; parts: number }>()
+    if (entry.index) for (const v of await this.milvus.ticketVectors(entry.index.collection_name, ids, options?.signal)) {
+      const r = byId.get(v.ticket_id)
+      if (!r || r.content_hash !== v.content_hash || r.source_version !== v.source_version) throw new RetrievalError('SNAPSHOT_INVALID', '全库特征版本与工单不一致。')
+      const aggregate = features.get(v.ticket_id)
+      if (aggregate) { for (let i = 0; i < v.vector.length; i++) aggregate.sum[i]! += v.vector[i]!; aggregate.parts++ }
+      else features.set(v.ticket_id, { sum: [...v.vector], parts: 1 })
+    }
+    await this.#query.validate(entry.source.id, (await this.db.publication(this.datasetId)).source.id, ids, principal)
+    // 相同的分片均值在 Provider 内聚合；跨进程每条只传一个向量，Python 再做 L2 归一化。
+    const featureId = entry.index ? sha256(stableJson({ embedding: entry.index.identity_json, projection: 'mean-chunks-l2-v1' })) : ''
+    const rows = records.map(r => {
+      const feature = features.get(r.ticket_id)
+      return { ref: shortOpaque('cand', request.snapshotId, r.ticket_id), version: r.source_version,
+        content_hash: r.content_hash, embedding_id: featureId, vectors: feature ? [feature.sum.map(v => v / feature.parts)] : [] }
+    })
+    if (rows.length) await this.db.pool.query('INSERT IGNORE INTO ra_provider_candidate(snapshot_id,candidate_ref,ticket_id,source_hash) VALUES ?',
+      [rows.map((r, i) => [request.snapshotId, r.ref, ids[i], r.content_hash])])
+    return { rows, ...(!request.cursor ? { total: await this.#query.count(scope) } : {}),
+      ...(records.length === request.limit ? { nextCursor: ids.at(-1)! } : {}) }
+  }
+  async featureBlock(principal: TrustedPrincipalContext,
+    request: Parameters<NonNullable<TicketRetrievalProvider['featureBlock']>>[1], options?: ProviderCallOptions) {
+    options?.signal?.throwIfAborted()
+    const entry = await this.#entry(principal, request.snapshotId), current = await this.db.publication(this.datasetId)
+    if (!entry.index) throw new RetrievalError('PROVIDER_UNAVAILABLE', '数值索引未准备；不会全库逐条强判。')
+    const scope = await this.#query.scope(entry.source.id, current.source.id, principal,
+      filters({ filters: request.filters ?? [] } as unknown as TicketRetrievalSpec), entry.source.fields_json)
+    const refIds = request.refs ? [...(await this.#references(entry, principal, request.refs)).values()] : undefined
+    const selector = request.ids ? 'f.ordinal IN (?)' : refIds ? 'f.ticket_id IN (?)' : 'f.ordinal>?'
+    if (request.ids?.length === 0 || refIds?.length === 0) return { ids: [], dense: '', available: '', dimensions: entry.index.identity_json.dimensions, feature_id: entry.index.id, next_cursor: null }
+    const rows = await this.db.rows<{ ordinal: number; ticket_id: string; vector_blob: Buffer | null }>(
+      `SELECT f.ordinal,f.ticket_id,f.vector_blob FROM ${scope.from} JOIN ra_numeric_feature f ON f.index_id=? AND f.ticket_id=t.ticket_id WHERE ${scope.where} AND ${selector} ORDER BY f.ordinal LIMIT ?`,
+      // scope 的 FROM 参数在 JOIN 参数之前，WHERE 参数在之后。
+      [...(current.source.id === entry.source.id ? [] : [current.source.id]), entry.index.id,
+        ...scope.params.slice(current.source.id === entry.source.id ? 0 : 1), request.ids ?? refIds ?? Number(request.cursor ?? -1), request.limit])
+    const byId = new Map(rows.map(r => [Number(r.ordinal), r]))
+    const ordered = request.ids ? request.ids.map(id => byId.get(id)!) : rows
+    if (ordered.some(r => !r)) throw new RetrievalError('UNAUTHORIZED', '数值 ID 不属于授权查询范围。')
+    if (!request.cursor && !request.ids && !request.refs) {
+      const prepared = await this.db.rows<{ n: number }>('SELECT COUNT(*) n FROM ra_numeric_feature WHERE index_id=?', [entry.index.id])
+        if (Number(prepared[0]?.n) !== Number(entry.source.record_count)) throw new RetrievalError('PROVIDER_UNAVAILABLE', '数值索引不完整，请重新执行索引准备。')
+    }
+    const dimensions = entry.index.identity_json.dimensions
+    return { ids: ordered.map(r => Number(r.ordinal)), dimensions,
+      dense: Buffer.concat(ordered.map(r => r.vector_blob ?? Buffer.alloc(dimensions * 4))).toString('base64'),
+      available: Buffer.from(ordered.map(r => r.vector_blob ? 1 : 0)).toString('base64'), feature_id: entry.index.id,
+      next_cursor: !request.ids && !request.refs && rows.length === request.limit ? String(rows.at(-1)!.ordinal) : null }
+  }
+  async resolveFeatureIds(principal: TrustedPrincipalContext,
+    request: Parameters<NonNullable<TicketRetrievalProvider['resolveFeatureIds']>>[1], options?: ProviderCallOptions) {
+    const entry = await this.#entry(principal, request.snapshotId)
+    if (!request.ids.length) return []
+    const rows = await this.db.rows<{ ordinal: number; ticket_id: string; content_hash: string }>(
+      'SELECT f.ordinal,f.ticket_id,t.content_hash FROM ra_numeric_feature f JOIN ra_ticket t ON t.generation=? AND t.ticket_id=f.ticket_id WHERE f.index_id=? AND f.ordinal IN (?)',
+      [entry.source.id, entry.index?.id, request.ids])
+    await this.#query.validate(entry.source.id, (await this.db.publication(this.datasetId)).source.id, rows.map(r => r.ticket_id), principal)
+    const refs = new Map(rows.map(r => [Number(r.ordinal), TicketCandidateRef(shortOpaque('cand', request.snapshotId, r.ticket_id))]))
+    if (rows.length !== new Set(request.ids).size) throw new RetrievalError('UNAUTHORIZED', '数值 ID 不属于当前索引。')
+    await this.db.pool.query('INSERT IGNORE INTO ra_provider_candidate(snapshot_id,candidate_ref,ticket_id,source_hash) VALUES ?',
+      [rows.map(r => [request.snapshotId, refs.get(Number(r.ordinal)), r.ticket_id, r.content_hash])])
+    return this.readCandidates(principal, { snapshotId: request.snapshotId, candidateRefs: request.ids.map(id => refs.get(id)!) }, options)
+  }
+  async readCandidates(principal: TrustedPrincipalContext,
+    request: { snapshotId: TicketSnapshotId; candidateRefs: readonly TicketCandidateRef[] }, options?: ProviderCallOptions) {
+    options?.signal?.throwIfAborted()
+    const entry = await this.#entry(principal, request.snapshotId), refs = await this.#references(entry, principal, request.candidateRefs)
+    if (refs.size !== new Set(request.candidateRefs).size) throw new RetrievalError('UNAUTHORIZED', '工单不属于授权全库。')
+    const records = new Map((await this.#query.records(entry.source.id, [...refs.values()], false)).map(r => [r.ticketId as string, r]))
+    return request.candidateRefs.map(ref => {
+      const r = records.get(refs.get(ref)!)!
+      return { ref, displayId: r.displayId, sourceVersion: r.sourceVersion, contentHash: r.contentHash,
+        snapshotId: request.snapshotId, evidenceLevel: 'L1' as const, projectionVersion: 2 as const, rank: 0,
+        title: r.title, summary: r.summary, summaryOrigin: overviewOrigin(r, 'summary'), titleOrigin: overviewOrigin(r, 'title'),
+        l0: candidateL0(r), matchFragments: [], matchSignals: { channels: [], keywordTerms: [] } }
+    })
+  }
   async readEvidence(principal: TrustedPrincipalContext, request: EvidenceReadRequest, options?: ProviderCallOptions) {
     options?.signal?.throwIfAborted()
     if (!Number.isSafeInteger(request.tokenBudget) || request.tokenBudget < 1) throw new RetrievalError('INVALID_REQUEST', '证据 token 预算无效。')

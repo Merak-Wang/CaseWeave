@@ -5,9 +5,12 @@
 满足结合律或事实一定正确。
 """
 from __future__ import annotations
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+import math
 from typing import AsyncIterable
-from .model import Runtime
+from .runtime import Runtime, records_from
+from .features import decode_block
+import numpy as np
 from .types import Record, Citation, ProtocolError, digest, utf16len
 
 AGG_SCHEMA = {"type": "object", "additionalProperties": False,
@@ -24,14 +27,38 @@ class Summary:
     leaves: int
     complete: bool
     manifest_id: str | None = None
+    parent_ids: tuple[str, ...] = ()
+    statistics: dict = field(default_factory=dict)
 
 
-async def sem_agg(runtime: Runtime, source: AsyncIterable[Record], instruction: str, *, fan_in: int = 8) -> Summary:
+async def sem_agg(runtime: Runtime, source: AsyncIterable[Record], instruction: str, *, fan_in: int = 8, numeric_fields=(), evidence_window=None, population_count=None) -> Summary:
     if type(fan_in) is not int or fan_in < 2: raise ValueError("fan_in must be at least 2")
+    if evidence_window is not None:
+        # Host 限定此池为已确认的命名记录；窗口只控制解说正文，绝不重写 filter 结果。
+        pool = [r async for r in source]
+        features = await runtime.resources("evidence.features", {"refs": [r.ref for r in pool]})
+        block = decode_block(features)
+        if not block.available.all(): raise ValueError("Evidence diversity needs prepared features for the supplied pool")
+        by_ref = {r.ref: r for r in pool}
+        selected = mmr_evidence(block.dense, np.ones(len(block.ids)), evidence_window)
+        source = records_from([by_ref[features["refs"][int(i)]] for i in selected])
     # 每一层保存尚未凑满扇入的节点，行为类似进位树，空间随层数增长。
     levels: list[list[Summary]] = []
     total_leaves = 0
     reduction_failed = False
+    lineage = "sem_agg:"+runtime.predicate_key(instruction)
+
+    def combine(items):
+        result = {"records": sum(i.leaves for i in items), "coverage": "selected_evidence_only" if evidence_window else "supplied_records_only",
+                  "population_count": population_count, "fields": {}}
+        for name in numeric_fields:
+            parts = [i.statistics["fields"][name] for i in items]
+            present, missing = sum(p["present"] for p in parts), sum(p["missing"] for p in parts)
+            total = sum(p["observed_sum"] for p in parts)
+            result["fields"][name] = {"present": present, "missing": missing, "observed_sum": total,
+                "exact": missing == 0, "sum": total if missing == 0 else None,
+                "mean": total/present if present and not missing else None}
+        return result
 
     async def reduce(items: list[Summary]) -> Summary:
         nonlocal reduction_failed
@@ -46,14 +73,14 @@ async def sem_agg(runtime: Runtime, source: AsyncIterable[Record], instruction: 
                 row["passages"].append({"id": c.passage_id, "field": c.field, "text": c.quote, "start": c.start, "origin": c.origin})
             return list(rows.values())
         for item in items:
-            # 叶子按段落提供独立引用 ID；中间摘要则保留其清单和全部叶子引文。
+            # 叶子按段落提供引用 ID；中间摘要只传自身清单身份。
             if item.manifest_id is None:
                 for citation in item.citations:
                     ident = digest(asdict(citation))
                     source_index[ident] = (citation,)
                     sources.append({"id": ident, "text": citation.quote, "origin": citation.origin, "records": records((citation,))})
             else:
-                source_index[item.id] = item.citations
+                source_index[item.id] = item.id
                 sources.append({"id": item.id, "text": item.text, "origin": "derived_summary", "complete": item.complete,
                                 "source_manifest_id": item.manifest_id})
         def validate(value):
@@ -61,18 +88,19 @@ async def sem_agg(runtime: Runtime, source: AsyncIterable[Record], instruction: 
             if len(ids) != len(set(ids)) or any(i not in source_index for i in ids):
                 raise ProtocolError("Aggregation cited an unsupplied source")
         result = await runtime.call("sem_agg", instruction+" 只概括给定来源，source_ids引用输入id，不伪造精确计数；归并摘要不是新的原始证据。",
-             {"sources": sources, "input_record_count": sum(i.leaves for i in items)}, AGG_SCHEMA, validate=validate,
+             {"sources": sources, "input_record_count": sum(i.leaves for i in items), "code_statistics": combine(items)}, AGG_SCHEMA, validate=validate,
              cache_if=lambda v: v['status'] == 'ok' and bool(v['text'].strip()) and bool(v['source_ids']))
         value = result.payload
         ids = value["source_ids"]
         # 模型只能引用本轮提供的唯一来源 ID，拒绝虚构来源和重复灌水。
         ok = value["status"] == "ok" and bool(value["text"].strip()) and bool(ids)
         reduction_failed |= not ok
-        # 将被选中的摘要来源重新展开成叶子引文，并按内容摘要去重。
-        by_key = {digest(asdict(c)): c for i in ids for c in source_index[i]}
+        # 节点只保存直接叶证据与父 ID；不会向上复制全部叶原文。
+        parents = tuple(source_index[i] for i in ids if isinstance(source_index[i], str))
+        by_key = {digest(asdict(c)): c for i in ids if not isinstance(source_index[i], str) for c in source_index[i]}
         output = Summary(digest([result.manifest_id, value]), value["text"] if ok else "",
-            tuple(by_key.values()), sum(i.leaves for i in items), ok and all(i.complete for i in items), result.manifest_id)
-        runtime.store.save(runtime.scope.key, "sem_agg:"+runtime.predicate_key(instruction), output.id, asdict(output))
+            tuple(by_key.values()), sum(i.leaves for i in items), ok and all(i.complete for i in items), result.manifest_id, parents, combine(items))
+        runtime.store.save(runtime.scope.key, lineage, output.id, asdict(output))
         return output
 
     async def push(item: Summary, level: int):
@@ -89,7 +117,14 @@ async def sem_agg(runtime: Runtime, source: AsyncIterable[Record], instruction: 
         # 每条原始记录先转成只含真实段落全文的叶子节点，空段落不生成引文。
         citations = tuple(Citation(record.ref, record.version, record.content_hash, p.id, p.field,
                                   p.start, p.start+utf16len(p.text), p.text, p.origin) for p in record.passages if p.text)
-        leaf = Summary(record.identity, "", citations, 1, bool(citations))
+        fields = {}
+        for name in numeric_fields:
+            parts = [p for p in record.passages if p.field == name and p.origin == "source"]
+            try: value = float(parts[0].text) if len(parts) == 1 else None
+            except ValueError: value = None
+            available = value is not None and math.isfinite(value)
+            fields[name] = {"present": int(available), "missing": int(not available), "observed_sum": value if available else 0.}
+        leaf = Summary(record.identity, "", citations, 1, bool(citations), statistics={"fields": fields})
         await push(leaf, 0)
     if total_leaves == 0:
         return Summary(digest([runtime.scope.key, "empty"]), "", (), 0, True)
@@ -101,5 +136,28 @@ async def sem_agg(runtime: Runtime, source: AsyncIterable[Record], instruction: 
     result = next(item for level in levels for item in level)
     await runtime.scope.check()
     # 任一中间归并未决都会向最终结果传播 complete=False。
-    return Summary(result.id, result.text, result.citations, total_leaves,
-                   result.complete and not reduction_failed, result.manifest_id)
+    citations, pending, visited = {}, [result.id], set()
+    while pending:
+        ident = pending.pop()
+        if ident in visited: continue
+        visited.add(ident)
+        node = runtime.store.output(runtime.scope.key, lineage, ident)
+        for c in node["citations"]: citations[digest(c)] = Citation(**c)
+        pending.extend(node["parent_ids"])
+    return Summary(result.id, result.text, tuple(citations.values()), total_leaves,
+                   result.complete and not reduction_failed, result.manifest_id, result.parent_ids, result.statistics)
+
+
+def mmr_evidence(X, relevance, k, relevance_weight=.7):
+    """归一化特征；仅保存冗余度向量，空间 O(n)，不构建 n×n 矩阵。"""
+    if k < 1 or not 0 <= relevance_weight <= 1:
+        raise ValueError("Invalid evidence window")
+    relevance = np.asarray(relevance)
+    redundancy, available = np.full(len(X), -np.inf), np.ones(len(X), dtype=bool)
+    chosen = []
+    for step in range(min(k, len(X))):
+        priority = relevance if step == 0 else relevance_weight*relevance-(1-relevance_weight)*redundancy
+        index = int(np.argmax(np.where(available, priority, -np.inf)))
+        chosen.append(index); available[index] = False
+        redundancy = np.maximum(redundancy, X @ X[index])
+    return np.asarray(chosen, dtype=np.int64)

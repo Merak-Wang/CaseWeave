@@ -1,6 +1,13 @@
 import { RetrievalError } from '@retrieval-agent/contracts'
 import type { RetrievalState, TicketCandidate, TicketResultCollection } from '@retrieval-agent/contracts'
 
+export function learnedResult(state: RetrievalState): import('@retrieval-agent/contracts').LearnedResult | undefined {
+  const learning = state.budget.operatorUsage?.learning as { input_revision?: number; stop_reason?: string; result_set?: import('@retrieval-agent/contracts').LearnedResult } | undefined
+  return learning?.input_revision === (state.inputGeneration ?? 0) && learning.stop_reason === 'quality_passed'
+    && !['permission_blocked', 'snapshot_invalid'].includes(state.termination) ? learning.result_set : undefined
+}
+export const confirmedCount = (state: RetrievalState): number => learnedResult(state)?.returned ?? state.selectedCandidateRefs.length
+
 /** One confirmation allowlist for reports, downloads and replay. History is never eligible. */
 export function confirmedTickets(state: RetrievalState): TicketCandidate[] {
   if (['permission_blocked', 'snapshot_invalid'].includes(state.termination)) return []
@@ -33,6 +40,7 @@ export function createTicketResultCollection(state: RetrievalState): TicketResul
   const byRef = new Map(tickets.map(candidate => [candidate.ref, candidate]))
   return {
     type: 'ticket_collection',
+    ...(learnedResult(state) ? { learnedSet: learnedResult(state)! } : {}),
     schemaVersion: 2,
     retrievalId: state.retrievalId,
     resultRevision: state.frozenEvidence?.packId ?? state.stateId,

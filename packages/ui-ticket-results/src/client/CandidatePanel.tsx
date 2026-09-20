@@ -306,7 +306,7 @@ export function AuthorizedCandidatePanel({ node, sessionId, accessPending = fals
         <div className={css.context} aria-label="检索上下文">
           <span>{boundaryText(data)}</span>
           {data.result === undefined ? null : <span>
-            已确认 {data.result.tickets.length} 条 · 待判定 {data.candidates.filter(candidate => !data.result!.tickets.some(ticket => ticket.ref === candidate.ref)).length} 条
+            已确认 {data.result.learnedSet?.returned ?? data.result.tickets.length} 条 · 当前窗口待判定 {data.candidates.filter(candidate => !data.result!.tickets.some(ticket => ticket.ref === candidate.ref)).length} 条
           </span>}
         </div>
       </button>

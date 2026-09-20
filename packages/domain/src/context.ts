@@ -1,3 +1,4 @@
+import { confirmedCount } from './result.js'
 import {
   RetrievalError,
   type EvidenceContextSelection,
@@ -104,6 +105,12 @@ export class EvidenceContextPolicy {
       retrievalLogic: state.query.contract?.logic,
       queryPlan: state.query.spec.queryPlan,
       semanticPlan: state.query.contract?.semanticPlan,
+      learning: (() => {
+        const value = state.budget.operatorUsage?.learning as Record<string, unknown> | undefined
+        if (!value) return undefined
+        const { training_ids, selection_ids, audit_ids, result_set, ...summary } = value
+        return summary
+      })(),
       operatorArtifacts: state.operatorArtifacts?.filter(a => a.inputGeneration === (state.inputGeneration ?? 0)).map(a => ({
         id: a.id, operation: a.operation, inputCount: a.candidateRefs.length, eventCount: a.events.length,
         status: 'derived_artifact_not_confirmation',
@@ -132,6 +139,7 @@ export class EvidenceContextPolicy {
     }
     const evidenceWindow = { offset: evidenceWindowOffset, maximumSegments: evidenceWindowEnd - evidenceWindowOffset,
       availableSegments: orderedEvidence.length, moreUnseenEvidence: this.nextEvidenceWindowOffset(state) >= 0,
+      meaning: 'moreUnseenEvidence describes visibility in this Agent context, not missing operator judgments or corpus coverage.',
       nextWindowAction: 'inspect next_window', priority: 'latest_inspection_then_current_candidates' }
     const alias = (ref: string): string => aliases.get(ref as TicketCandidate['ref']) ?? evidenceAliases.get(ref) ?? ref
     const pageBoundary = state.lastPage?.boundary
@@ -167,7 +175,7 @@ export class EvidenceContextPolicy {
       inspectFields: state.snapshot?.fieldCatalog.filter(field => ['L1', 'L2', 'L3'].includes(field.accessLevel) && field.valueKind !== 'raw_json').map(field => field.key) ?? [],
     }
     const history = { judgmentCount: state.judgments?.length ?? 0,
-      accepted: state.selectedCandidateRefs.length, excluded: state.excludedCandidateRefs.length,
+      accepted: confirmedCount(state), excluded: state.excludedCandidateRefs.length,
       lookup: `${this.#expert ? 'inspect' : 'inspect history'} with candidate_aliases; fields=[] reloads L1, declared fields reload source spans`,
       recent: state.judgments?.slice(-4).map(j => ({ indexCard: { projection: 'L0', candidateAlias: alias(j.candidateRef),
         displayId: state.candidateHistory.find(c => c.ref === j.candidateRef)?.displayId,
@@ -235,7 +243,9 @@ export class EvidenceContextPolicy {
         },
         evidenceState: {
           reviewBatchSize: this.maxCandidates,
-          readingPolicy: 'Judge received titles/summaries with cN first. Raw text is optional and reserved for a named missing fact, conflict, or a user request for source/processing verification. Never inspect every keyword hit. Review bounded windows; persist each batch of judgments.',
+          readingPolicy: state.budget.operatorUsage?.learning
+            ? 'Use the current learning summary and authoritative judgments. Operator-reviewed and checked proxy results do not require per-row rereading by the main Agent. More unseen evidence only describes this context window. Target unresolved records, contradictions or missing business facts; do not reread every stored passage to exhaust a window.'
+            : 'Judge received titles/summaries with cN first. Raw text is optional and reserved for a named missing fact, conflict, or a user request for source/processing verification. Never inspect every keyword hit. Review bounded windows; persist each batch of judgments.',
           ...evidenceNavigation,
           activeCandidateCount: state.candidates.length,
           evidenceWindow,

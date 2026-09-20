@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import { compileSql } from './sql.js'
 import { fieldCapabilities, ticketChunks } from './projection.js'
-import { normalizeFixtureTicket } from '@retrieval-agent/provider-local'
+import { normalizeFixtureTicket, normalizePublicSnapshotTicket } from '@retrieval-agent/provider-local'
 const fields = fieldCapabilities([])
 describe('SQL compiler boundary', () => {
+  it('advertises source dialogue under the same name used by evidence reads', () => {
+    const record = normalizePublicSnapshotTicket({ ticket_id: 'dialogue', source_dataset: 'deepseek-ai/ESFT', source_version: 'v1',
+      source_kind: 'public_research_corpus', title: '定位标题', summary: '上游摘要', pii_redaction_status: 'redacted',
+      raw_dialogue: [{ speaker: 'customer', text: '宽带尚未装好' }] },
+    { tenantId: 'demo', allowedSubjectIds: [], requiredAttributes: {} })
+    const fields = fieldCapabilities([record])
+    expect(fields.find(f => f.key === 'source.raw_dialogue')).toMatchObject({ availability: 'available', searchable: true })
+    expect(fields.find(f => f.key === 'conversationOrUpdates')).toMatchObject({ availability: 'unavailable' })
+  })
   it('binds SQL-looking input and preserves scalar NULL under NOT', () => {
     const value = "上海' OR 1=1 --"
     const result = compileSql({ kind: 'not', child: { kind: 'field', field: 'region', op: 'eq', values: [value] } }, fields)

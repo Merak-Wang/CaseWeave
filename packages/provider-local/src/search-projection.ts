@@ -1,6 +1,7 @@
 import type { QueryDocument } from '@retrieval-agent/contracts'
 import type { NormalizedTicketRecord, TicketFilter, TicketL0 } from '@retrieval-agent/contracts'
 import type { RankingDocument } from '@retrieval-agent/model-service-client/ranking'
+import { LEGACY_FIELD_CATALOG, evidenceFieldValues } from './fields.js'
 
 /** Versioned local-provider projection shared by online ranking and the development index builder. */
 export function rankingDocuments(records: readonly NormalizedTicketRecord[]): RankingDocument[] {
@@ -106,6 +107,12 @@ export function queryDocument(record: NormalizedTicketRecord): QueryDocument {
       ...record.searchText ?? [], ...rawStrings].filter((s): s is string => s !== undefined))],
   }
   for (const [key, values] of Object.entries(record.additionalEvidence ?? {})) texts[key] = values
+  // 原文读取与搜索能力使用相同字段名；不能把实际可读的对话目录标成 unavailable。
+  for (const field of LEGACY_FIELD_CATALOG) {
+    if (field.valueKind !== 'text') continue
+    const values = evidenceFieldValues(record, field.key)
+    if (values.length) texts[field.key] = values
+  }
   const fields: Record<string, string | readonly string[] | null> = { ...record.filterValues }
   for (const key of ['displayId', 'region', 'status', 'product', 'component', 'type', 'category', 'priority', 'language', 'createdAt', 'updatedAt', 'resolvedAt', 'errorCodes'] as const) {
     fields[key] = record[key] ?? null

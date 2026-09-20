@@ -17,22 +17,24 @@ function enabled(value) {
 
 /** Build the development-admin, unfiltered corpus matrix before Web accepts traffic. */
 export async function prepareDevelopmentIndex(options = {}) {
-  const configured = resolveIndexPreparationConfig(options.environment ?? process.env)
-  const manifest = (await loadModelDependencyManifest(root, process.env)).roles
+  const environment = options.environment ?? process.env
+  const configured = resolveIndexPreparationConfig(environment)
+  const manifest = (await loadModelDependencyManifest(root, environment)).roles
   const datasetManifest = JSON.parse(await readFile(join(bundledFixtureRoot(), 'manifest.json'), 'utf8'))
   const profile = datasetManifest.ticketProfiles[datasetManifest.defaultTicketProfile]
-  const records = (await Promise.all(bundledDefaultTicketPaths()
+  const dataPath = options.dataPath ?? environment.RETRIEVAL_AGENT_DATA_PATH
+  const records = (await Promise.all((dataPath ? [resolve(dataPath)] : bundledDefaultTicketPaths())
     .map(async path => parseTicketDatasetJsonl(await readFile(path, 'utf8'))))).flat()
-  if (records.length !== profile.recordCount) {
+  if (!dataPath && records.length !== profile.recordCount) {
     throw new Error(`development corpus manifest expected ${profile.recordCount} records, got ${records.length}`)
   }
 
   const baseUrl = options.modelServiceBaseUrl
-    ?? process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL
+    ?? environment.RETRIEVAL_AGENT_MODEL_SERVICE_URL
     ?? 'http://127.0.0.1:8012'
   const cacheDir = options.cacheDir ?? developmentVectorCacheDir
   const rerankerEnabled = options.rerankerEnabled
-    ?? enabled(process.env.RETRIEVAL_AGENT_RERANKER_ENABLED)
+    ?? enabled(environment.RETRIEVAL_AGENT_RERANKER_ENABLED)
   const engine = new HybridRankingEngine({
     baseUrl,
     embeddingIdentity: {
@@ -55,7 +57,7 @@ export async function prepareDevelopmentIndex(options = {}) {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
   })
-  return { ...prepared, cacheDir, datasetId: datasetManifest.defaultTicketProfile, rerankerEnabled, modelServiceBaseUrl: baseUrl }
+  return { ...prepared, cacheDir, datasetId: dataPath ? environment.RETRIEVAL_AGENT_DATASET_ID ?? 'custom' : datasetManifest.defaultTicketProfile, rerankerEnabled, modelServiceBaseUrl: baseUrl }
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

@@ -36,6 +36,7 @@ const state = {
   phase: 'stopped',
   task: { target: 'ranked_cases', countPolicy: 'adaptive' },
   gaps: [],
+  budget: {},
   query: { original: '隔离服务导出', confirmedConstraints: [] },
   snapshot: {
     snapshotId: 'snapshot-isolated-1', shortId: 'snap-isolated',

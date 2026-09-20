@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { RetrievalError, isReadableTicketField, type RetrievalState } from '@retrieval-agent/contracts'
-import { createTicketResultCollection } from '@retrieval-agent/domain/result'
+import { createTicketResultCollection, confirmedCount, learnedResult } from '@retrieval-agent/domain/result'
 
 export interface ReportCitation {
   id: string; candidateRef: string; displayId: string; sourceVersion: string; contentHash: string;
@@ -8,6 +8,7 @@ export interface ReportCitation {
 }
 export interface ReportNarrative { paragraphs: { text: string; citations: string[] }[] }
 export interface RetrievalReport {
+  learning?: { modelId: string; featureId: string; quality: import('@retrieval-agent/contracts').LearnedResult['quality']; hashBasis: string }
   schemaVersion: 1; taskId: string; resultRevision: string; generatedAt: string; audience: 'operator' | 'handoff';
   confirmedCount: number; confirmedSetSha256: string; conclusion: string;
   scope: { originalQuery: string; inputs: readonly { kind: string; text?: string }[]; conditions: unknown;
@@ -30,7 +31,8 @@ export function createRetrievalReport(state: RetrievalState, inputs: RetrievalRe
     const judgment = result.judgments.find(j => j.candidateRef === c.ref)
     const selected = result.evidence.filter(e => e.candidateRef === c.ref && judgment?.evidenceRefs.includes(e.evidenceId)
       && (judgment?.basis === 'proxy' || state.modelVisibleEvidenceIds?.includes(e.evidenceId) || state.contextManifests?.some(m => m.inputGeneration === (state.inputGeneration ?? 0)
-        && m.measurement === 'dsh_request' && m.evidenceIds.includes(e.evidenceId)))).slice(0, 2)
+        && m.measurement === 'dsh_request' && m.evidenceIds.includes(e.evidenceId))))
+    // 保留该判断实际引用的全部片段，避免按读取顺序截断后丢失决定性事实。
     for (const e of selected) citations.push({ id: e.evidenceId, candidateRef: c.ref, displayId: c.displayId,
       sourceVersion: c.sourceVersion, contentHash: c.contentHash, field: e.field, text: e.text.slice(0, 1600),
       start: e.start, end: e.start + Math.min(1600, e.text.length), origin: e.origin ?? { kind: 'unknown' } })
@@ -44,8 +46,11 @@ export function createRetrievalReport(state: RetrievalState, inputs: RetrievalRe
   })
   const s = state.snapshot
   return { schemaVersion: 1, taskId: state.retrievalId, resultRevision: result.resultRevision,
-    generatedAt: new Date().toISOString(), audience, confirmedCount: result.tickets.length,
-    confirmedSetSha256: createHash('sha256').update(JSON.stringify(result.tickets.map(c => [c.ref, c.displayId, c.sourceVersion, c.contentHash]))).digest('hex'),
+    ...(learnedResult(state) ? { learning: { modelId: learnedResult(state)!.model_id, featureId: learnedResult(state)!.feature_id,
+      quality: learnedResult(state)!.quality, hashBasis: String(learnedResult(state)!.metadata.hash_basis) } } : {}),
+    generatedAt: new Date().toISOString(), audience, confirmedCount: confirmedCount(state),
+    confirmedSetSha256: learnedResult(state) ? String(learnedResult(state)!.metadata.result_set_sha256)
+      : createHash('sha256').update(JSON.stringify(result.tickets.map(c => [c.ref, c.displayId, c.sourceVersion, c.contentHash]))).digest('hex'),
     conclusion: result.explanation ?? (result.tickets.length ? '本轮已确认以下工单。' : '本次尚无可确认结果。'),
     scope: { originalQuery: state.query.original, inputs: inputs.map(i => ({ kind: i.kind, ...(i.text === undefined ? {} : { text: i.text }) })), conditions: state.query.confirmedConstraints, unresolved: state.query.unresolvedConstraints,
       snapshot: s ? { shortId: s.shortId, providerId: s.providerId, sourceVersion: s.sourceVersion, indexVersion: s.indexVersion, createdAt: s.createdAt } : null,
@@ -95,6 +100,9 @@ export function reportMarkdown(r: RetrievalReport): string {
     '', '## 覆盖与停止', '',
     `停止性质：${{ satisfied: 'Agent 判定本轮要求已满足', no_result: '本轮无可确认结果', incomplete: '本轮未完成' }[r.coverage.semanticStatus]}；当前表达式取完：${r.coverage.resultPagesExhausted ? '是' : '否'}。`,
     r.coverage.semanticRecallKnown ? '已记录语义覆盖判断。' : '未建立全库语义召回率；不能据此宣称找全。',
+    ...(r.learning ? [`模型集合：${md(r.learning.modelId)}；特征代次：${md(r.learning.featureId)}。`,
+      `相对抽验标签的集合下界：Precision=${r.learning.quality.precision_lower}，Recall=${r.learning.quality.recall_lower}。这依赖固定总体、独立抽验及参考标签可靠性，不是业务真值保证。`,
+      `集合指纹口径：${md(r.learning.hashBasis)}。`] : []),
     ...(r.coverage.assessment ? [`已核查：${md(r.coverage.assessment.checked.join('；'))}`, `剩余范围：${md(r.coverage.assessment.remaining.join('；') || '无另列范围')}`,
       `下一动作：${md(r.coverage.assessment.nextAction)}；预期价值：${md(r.coverage.assessment.nextActionValue)}`] : []),
     ...r.coverage.gaps.map(g => `- ${md(g.description.replace('semanticRecallKnown=false；', '尚无全库语义覆盖结论；'))}`), '', '## 依据解释', '',

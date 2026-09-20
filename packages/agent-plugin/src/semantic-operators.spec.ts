@@ -1,3 +1,4 @@
+import { confirmedCount, learnedResult } from '@retrieval-agent/domain/result'
 import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
@@ -13,8 +14,8 @@ import { expect, it, vi } from 'vitest'
 import { LocalTicketProvider, normalizeFixtureTicket } from '@retrieval-agent/provider-local'
 import { buildSemanticTicketRequest } from '@retrieval-agent/query-understanding'
 import { admitOperatorDecisions, foldRetrievalEvents, validateOperatorRecords } from '@retrieval-agent/domain'
-import { admitDecision } from '../../domain/src/decision.js'
-import { candidateEvidence, createRetrievalReport, CandidateExportService, InMemoryExportAuditSink } from '@retrieval-agent/product-api'
+import { admitDecision, finishReason } from '../../domain/src/decision.js'
+import { candidateEvidence, createRetrievalReport, CandidateExportService, InMemoryExportAuditSink, learnedResultWindow, materializeLearnedRefs } from '@retrieval-agent/product-api'
 import { readRetrievalSessionEvents } from '@retrieval-agent/dsh-compat'
 import type { RetrievalRanker } from '@retrieval-agent/model-service-client/ranking'
 import type { OperatorRecord, TicketCandidateRef, TicketRetrievalProvider } from '@retrieval-agent/contracts'
@@ -40,6 +41,10 @@ class Provider extends TicketRetrievalProviderService {
   readEvidence: TicketRetrievalProvider['readEvidence'] = (...a) => this.port.readEvidence(...a)
   readDetails: TicketRetrievalProvider['readDetails'] = (...a) => this.port.readDetails(...a)
   override readFeatures: NonNullable<TicketRetrievalProvider['readFeatures']> = (...a) => this.port.readFeatures?.(...a) ?? Promise.resolve([])
+  override featureBlock: NonNullable<TicketRetrievalProvider['featureBlock']> = (...a) => this.port.featureBlock!(...a)
+  override resolveFeatureIds: NonNullable<TicketRetrievalProvider['resolveFeatureIds']> = (...a) => this.port.resolveFeatureIds!(...a)
+  override scanFeatures: NonNullable<TicketRetrievalProvider['scanFeatures']> = (...a) => this.port.scanFeatures!(...a)
+  override readCandidates: NonNullable<TicketRetrievalProvider['readCandidates']> = (...a) => this.port.readCandidates!(...a)
   status: TicketRetrievalProvider['status'] = (...a) => this.port.status(...a)
 }
 
@@ -54,20 +59,74 @@ it('retains failed callback metering and the original error instead of treating 
   } finally { bridge.close() }
 }, 30000)
 
-it.each([2, 24, 1536])('runs public DSH input through Python filtering for %i rows with incremental commits and replay', async (count) => {
+it('returns control after one example review window and leaves unresolved rows for directed inspection', async () => {
+  const ctx = new Context(), judged: string[][] = [], unresolvedIssues: (string | undefined)[][] = []
+  let dispose: (() => Promise<void>) | undefined
+  try {
+    await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime); await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)
+    const records = Array.from({ length: 40 }, (_, i) => normalizeFixtureTicket({ ticketId: `example-${i}`, displayId: `E-${i}`,
+      tenantId: 'operators', allowedSubjectIds: [], requiredAttributes: {}, sourceVersion: 'v1', title: '副卡问题', summary: '缺少解绑状态',
+      problemDescription: '尚待核实解绑状态', resolutionSteps: [], conversationOrUpdates: [], errorCodes: [], piiRedactionStatus: 'not_applicable' }))
+    const ranker: RetrievalRanker = { profileVersion: 'example-window', capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
+      rank: async (documents, query) => ({ hits: documents.map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1, channels: [{ channel: 'vector' as const, rank: i + 1, score: 1 }] })),
+        execution: { requestedMode: query.mode, executedMode: query.mode, strategyVersion: 'fixture', channels: [] },
+        scanned: documents.length, keywordEligible: documents.length, rankedHits: documents.length, warnings: [] }) }
+    new Principal(ctx); new Provider(ctx, new LocalTicketProvider(records, { ranker }))
+    const app = new RetrievalAgentService(ctx, { searchTopK: 40, reviewBatchSize: 8 })
+    const operators = new SemanticOperators(ctx, app, undefined, process.cwd(),
+      new PythonOperatorBridge(process.cwd(), resolve('.cache/semantic-operators', `window-${randomUUID()}.sqlite`)))
+    class WindowAdapter extends LlmAdapter {
+      override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        const data = JSON.parse(options.messages[0]!.content.flatMap(b => b.type === 'text' ? [b.text] : []).join(''))
+        const planning = options.system?.includes('当前操作：query_plan')
+        if (!planning) {
+          judged.push(data.records.map((r: any) => r.ref))
+          unresolvedIssues.push(data.records.map((r: any) => r.attributes.unresolved_issue))
+        }
+        const payload = planning ? { keywords: ['副卡'], instruction: '找3条解绑已完成的副卡工单', retrieval_expressions: [],
+          goal: { mode: 'examples', count: 3 }, steps: [{ id: 'filter', op: 'sem_filter', inputs: ['$source'], instruction: '核实解绑状态', params: {} }] }
+          : { rows: data.records.map((r: any) => ({ ref: r.ref, label: 'undetermined', citations: [], knowledge_ids: [], reason: '缺少解绑完成事实。' })) }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(randomUUID()), name: 'submit_result', arguments: JSON.stringify(payload) } }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      }
+    }
+    ctx.llm.registerAdapter(['example-window'], new WindowAdapter())
+    await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+    const handle = await ctx.agents.create({ sessionId: SessionId(randomUUID()), agentOptions: { provider: 'example-window', model: 'scripted' } })
+    dispose = handle.dispose
+    const agent = handle.agent
+    await app.start(agent, buildSemanticTicketRequest('找3条解绑已完成的副卡工单'))
+    await operators.filter(agent)
+    expect(app.current(agent).judgments).toHaveLength(8)
+    expect(app.current(agent).phase).not.toBe('stopped')
+    await operators.filter(agent)
+    expect(app.current(agent).judgments).toHaveLength(16)
+    expect(judged).toHaveLength(2)
+    const ref = app.current(agent).judgments![0]!.candidateRef
+    await operators.filter(agent, [ref])
+    expect(judged).toHaveLength(3)
+    expect(unresolvedIssues.at(-1)).toEqual(['缺少解绑完成事实。'])
+    expect(app.current(agent).judgments).toHaveLength(16)
+    expect(app.current(agent).selectedCandidateRefs).toEqual([])
+  } finally { await dispose?.(); await ctx.fiber.dispose() }
+}, 60000)
+
+it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for %i rows with incremental commits and replay', async (count) => {
+  const active = count === 2048
   const ctx = new Context(), searches: string[] = [], requests: GenerateOptions[] = []
   const ranker: RetrievalRanker = { profileVersion: 'operator-fixture', capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
     readFeatures: async documents => ({ embedding_id: 'synthetic-operator-fixture', rows: documents.map(d => ({ id: d.id,
       vector: Number(d.id.slice(1)) % 2 ? [0, 1] : [1, 0] })) }),
     rank: async (documents, query) => {
       searches.push(query.semanticText ?? query.text)
-      return { hits: documents.map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1, channels: [{ channel: 'vector', rank: i + 1, score: 1 }] })),
+      return { hits: (active ? documents.slice(0, 12) : documents).map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1, channels: [{ channel: 'vector', rank: i + 1, score: 1 }] })),
         execution: { requestedMode: query.mode, executedMode: query.mode, strategyVersion: 'fixture', channels: [{ channel: 'vector', implementation: 'fixture', version: '1', resultCount: documents.length, elapsedMs: 0 }] },
-        scanned: documents.length, keywordEligible: 0, rankedHits: documents.length, warnings: [] }
+        scanned: documents.length, keywordEligible: 0, rankedHits: active ? 12 : documents.length, warnings: [] }
     } }
   const records = Array.from({ length: count }, (_, i) => i % 2 ? '解绑已经完成，后续仅咨询账单。' : '解绑仍受阻，尚未完成。').map((summary, i) => normalizeFixtureTicket({
     ticketId: `r${i}`, displayId: `R-${i}`, tenantId: 'operators', allowedSubjectIds: [], requiredAttributes: {}, sourceVersion: 'v1', title: '副卡解绑', summary,
-    problemDescription: summary, resolutionSteps: [], conversationOrUpdates: [], errorCodes: [], piiRedactionStatus: 'not_applicable',
+    problemDescription: summary, resolutionSteps: [], conversationOrUpdates: [summary], errorCodes: [], piiRedactionStatus: 'not_applicable',
   }))
   let agent: Agent | undefined, dispose: (() => Promise<void>) | undefined
   try {
@@ -92,7 +151,7 @@ it.each([2, 24, 1536])('runs public DSH input through Python filtering for %i ro
         return { ...page, rows: page.rows.map(row => ({ ...row, ...features.find(f => f.ref === row.ref) })) }
       }, result, signal)
     }
-    new SemanticOperators(ctx, app, undefined, process.cwd(), bridge)
+    new SemanticOperators(ctx, app, undefined, process.cwd(), bridge, active ? { options: { validation_size: 384 } } : { algorithm: 'baseline' })
     installAutomaticRetrievalStart(ctx, app, { analyzer: { async analyze() { throw new Error('legacy compiler must not run') } } })
     installRetrievalTools(ctx, app); installRetrievalRuntimeBudget(ctx, app)
     const errors: string[] = []
@@ -105,22 +164,31 @@ it.each([2, 24, 1536])('runs public DSH input through Python filtering for %i ro
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
         requests.push(options)
         const data = options.sessionId?.startsWith('operator-') ? JSON.parse(options.messages[0]!.content.flatMap(b => b.type === 'text' ? [b.text] : []).join('') || '{}') : {}
+        const revised = active && (app.currentOrUndefined(agent!)?.inputGeneration ?? 0) > 0
         let name = 'submit_result', payload: unknown
         if (options.sessionId?.startsWith('operator-')) {
           if (options.system?.includes('当前操作：query_plan')) {
             expect(searches.length).toBeGreaterThan(0)
-            payload = { keywords: ['副卡', '解绑'], instruction: '查找仍受阻的副卡解绑，排除已完成解绑。', retrieval_expressions: [], goal: { mode: 'adaptive', count: null },
-              steps: [{ id: 'review', op: 'sem_filter', inputs: ['$source'], instruction: '核对完成状态', params: {} }] }
+            payload = { keywords: active ? [] : ['副卡', '解绑'], instruction: revised ? '只纳入已经完成解绑，排除尚未完成。' : '查找仍受阻的副卡解绑，排除已完成解绑。', retrieval_expressions: [], goal: { mode: active ? 'all' : 'adaptive', count: null },
+              steps: [{ id: 'review', op: 'sem_filter', inputs: ['$source'], instruction: '核对完成状态', params: active ? { required_fields: ['conversationOrUpdates'] } : {} }] }
+          } else if (options.system?.includes('当前操作：sem_agg')) {
+            payload = { status: 'ok', text: '受控的典型案例说明', source_ids: data.sources.map((s: any) => s.id) }
           } else {
-            payload = { rows: data.records.map((r: any) => ({ ref: r.ref, label: r.passages.find((p: any) => p.id === 'summary').text.includes('尚未完成') ? 'accept' : 'exclude',
-              citations: [{ ref: r.ref, passage_id: 'summary', quote: r.passages.find((p: any) => p.id === 'summary').text }], knowledge_ids: [], reason: '依据会话结束时的解绑状态。' })) }
+            payload = { rows: data.records.map((r: any) => ({ ref: r.ref, label: r.passages.find((p: any) => active ? p.field === 'conversationOrUpdates' : p.id === 'summary').text.includes(revised ? '已经完成' : '尚未完成') ? 'accept' : 'exclude',
+              citations: [{ ref: r.ref, passage_id: r.passages.find((p: any) => active ? p.field === 'conversationOrUpdates' : p.id === 'summary').id,
+                quote: r.passages.find((p: any) => active ? p.field === 'conversationOrUpdates' : p.id === 'summary').text }], knowledge_ids: [], reason: '依据会话结束时的解绑状态。' })) }
           }
         } else {
           name = 'ticket_decide'
           const state = app.current(agent!)
-          expect(state.selectedCandidateRefs).toHaveLength(count / 2)
+          expect(confirmedCount(state)).toBe(count / 2)
           payload = { state_id: state.stateId, judgments: [], semantic_gaps: [], action: { kind: 'finish', reason: 'satisfied',
             explanation: '当前案例覆盖所需的解绑受阻边界。', coverage: { checked: ['结束时的状态'], remaining: [], nextAction: '无需继续', nextActionValue: 'none' } } }
+          if (active && !state.operatorArtifacts?.some(a => a.inputGeneration === (state.inputGeneration ?? 0))) {
+            name = 'sem_agg'
+            payload = { candidate_aliases: state.selectedCandidateRefs.slice(0, 8).map(ref => `c${state.candidateHistory.findIndex(c => c.ref === ref)+1}`),
+              instruction: '用不同案例说明，窗口不改变全集成员', evidence_window: 3 }
+          }
         }
         yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(randomUUID()), name, arguments: JSON.stringify(payload) } }
         yield { type: 'usage', usage: { inputTokens: 100, cacheReadTokens: 20, outputTokens: 80 } }
@@ -141,18 +209,63 @@ it.each([2, 24, 1536])('runs public DSH input through Python filtering for %i ro
     expect(state.phase, JSON.stringify({ candidates: state.candidates.length, judgments: state.judgments?.length,
       selected: state.selectedCandidateRefs.length, activity: state.operatorActivity, stop: state.stopExplanation,
       filterRequests: requests.filter(r => r.system?.includes('当前操作：sem_filter')).length })).toBe('stopped')
-    expect(state.candidates.filter(c => state.selectedCandidateRefs.includes(c.ref)).map(c => c.displayId).sort()).toEqual(
+    if (!active) expect(state.candidates.filter(c => state.selectedCandidateRefs.includes(c.ref)).map(c => c.displayId).sort()).toEqual(
       records.filter((_, i) => i % 2 === 0).map(r => r.displayId).sort())
     expect(state.query.spec.queryPlan).toBeUndefined()
-    expect(state.query.contract?.semanticPlan?.goal.mode).toBe('adaptive')
+    expect(state.query.contract?.semanticPlan?.goal.mode).toBe(active ? 'all' : 'adaptive')
+    expect(state.contextManifests!.filter(m => m.operator?.operation === 'query_plan').every(m => !m.operator?.metrics)).toBe(true)
     const filtering = state.contextManifests!.filter(m => m.operator?.operation === 'sem_filter')
-    if (count !== 1536) {
-      expect(filtering).toHaveLength(Math.ceil(count / 8))
+    if (count !== 1536 && !active) {
+      // 每批初判与独立缺项复核各留一份清单，只提交复核后的判断。
+      expect(filtering).toHaveLength(2 * Math.ceil(count / 8))
       expect(commits.mock.calls).toHaveLength(Math.ceil(count / 8))
       expect(state.judgments!.every(j => j.basis === 'model')).toBe(true)
     }
     const registrations = updates.mock.calls.filter(([, , update]) => update.kind === 'manifest' && update.manifest.operator?.operation === 'sem_filter')
     expect(registrations).toHaveLength(filtering.length)
+    if (active) {
+      const learning = state.budget.operatorUsage?.learning as Record<string, any>
+      expect(learning.feature_records).toBe(count)
+      expect(learning.fit_count).toBeGreaterThan(0)
+      expect(learning.predicted_records).toBe(count)
+      expect(learning.fit_count).toBe(4)
+      expect(learning.teacher_unique_records).toBeLessThan(count)
+      expect(learning.stop_reason).toBe('quality_passed')
+      expect(learning.quality.recall_lower).toBeGreaterThanOrEqual(.95)
+      expect(learning.unresolved).toBe(0)
+      const summary = (state.operatorArtifacts!.find(a => a.operation === 'sem_agg')!.events[0] as { value: { leaves: number; statistics: { population_count: number } } }).value
+      expect(summary.leaves).toBe(3)
+      expect(summary.statistics.population_count).toBe(count/2)
+      expect(() => finishReason({ ...state, task: { ...state.task, countPolicy: 'adaptive' }, budget: { ...state.budget,
+        operatorUsage: { learning: { ...learning, stop_reason: 'quality_not_met', result_set: undefined } } } },
+      { kind: 'finish', reason: 'satisfied', explanation: '搜索页末并非质量验收' })).toThrow('未通过集合质量验收')
+      const principal = await app.principal(agent, 'detail_read')
+      const allRefs: string[] = []; let cursor: string | undefined
+      do {
+        const page = await learnedResultWindow(state, ctx.ticketRetrievalProvider, principal, app.semanticResults, cursor, 31)
+        allRefs.push(...page.items.map(c => c.displayId)); cursor = page.nextCursor
+      } while (cursor)
+      expect(allRefs.sort()).toEqual(records.filter((_, i) => i % 2 === 0).map(r => r.displayId).sort())
+      const page = await learnedResultWindow(state, ctx.ticketRetrievalProvider, principal, app.semanticResults, undefined, 200)
+      const proxy = page.judgments.find(j => j.basis === 'proxy')!
+      const resolved = await materializeLearnedRefs(state, ctx.ticketRetrievalProvider, principal, app.semanticResults, [proxy.candidateRef as TicketCandidateRef])
+      expect(candidateEvidence(resolved, proxy.candidateRef).citations).toEqual([])
+      const hydrated = await app.hydrateResultCandidates(agent, [proxy.candidateRef as TicketCandidateRef])
+      expect(hydrated.candidates.some(c => c.ref === proxy.candidateRef)).toBe(true)
+      expect(confirmedCount(hydrated)).toBe(count/2)
+      expect(learnedResult({ ...state, inputGeneration: (state.inputGeneration ?? 0) + 1 })).toBeUndefined()
+      expect(createRetrievalReport(state, []).confirmedCount).toBe(count / 2)
+      const exporter = new CandidateExportService(ctx.ticketRetrievalProvider, new InMemoryExportAuditSink(), { semanticResults: app.semanticResults })
+      const rows: string[] = []
+      await exporter.stream(await app.principal(agent, 'export'), state, { format: 'jsonl', template: 'summary' }, async row => { rows.push(row) })
+      expect(rows.join('').split('\n').filter(Boolean)).toHaveLength(count / 2)
+      const oldStrong = state.judgments!.find(j => j.operatorManifestId)!
+      const oldManifest = state.contextManifests!.find(m => m.id === oldStrong.operatorManifestId)!
+      const changed = admitDecision({ ...state, phase: 'assessed' }, { stateId: state.stateId, judgments: [{ ...oldStrong,
+        verdict: oldStrong.verdict === 'accept' ? 'exclude' : 'accept' }], gaps: [], action: { kind: 'inspect', fields: [] } }, oldManifest.roleId)
+      expect(changed.judgments!.some(j => j.basis === 'proxy')).toBe(false)
+      expect((changed.budget!.operatorUsage!.learning as Record<string, unknown>).stop_reason).toBe('strong_label_corrected')
+    }
     if (count === 1536) {
       const proxies = state.judgments!.filter(j => j.basis === 'proxy')
       const seenByModel = new Set(filtering.flatMap(m => m.candidateRefs))
@@ -167,7 +280,7 @@ it.each([2, 24, 1536])('runs public DSH input through Python filtering for %i ro
       const report = createRetrievalReport(state, [])
       expect(report.confirmedCount).toBe(count / 2)
       const principal = await app.principal(agent, 'export')
-      const exporter = new CandidateExportService(ctx.ticketRetrievalProvider, new InMemoryExportAuditSink())
+      const exporter = new CandidateExportService(ctx.ticketRetrievalProvider, new InMemoryExportAuditSink(), { semanticResults: app.semanticResults })
       const csv = await exporter.exportCsv(principal, state)
       expect(csv.content).toContain('judgment_basis')
       expect(csv.content).toContain('proxy')
@@ -182,7 +295,7 @@ it.each([2, 24, 1536])('runs public DSH input through Python filtering for %i ro
       expect(changed.judgments!.find(j => j.candidateRef === oldStrong.candidateRef)!.verdict).not.toBe(oldStrong.verdict)
     }
     expect(foldRetrievalEvents(readRetrievalSessionEvents(agent.session))?.selectedCandidateRefs).toEqual(state.selectedCandidateRefs)
-    expect(requests.filter(r => !r.sessionId?.startsWith('operator-'))).toHaveLength(1)
+    expect(requests.filter(r => !r.sessionId?.startsWith('operator-'))).toHaveLength(active ? 2 : 1)
     const manifest = state.contextManifests!.find(m => m.operator?.operation === 'sem_filter')!
     const row = manifest.operator!.records[0]!
     expect(() => validateOperatorRecords(state, [{ ...row, content_hash: 'changed' }])).toThrow('来源版本')
@@ -191,5 +304,17 @@ it.each([2, 24, 1536])('runs public DSH input through Python filtering for %i ro
     expect(() => admitOperatorDecisions({ ...state, phase: 'assessed' }, state.inputGeneration ?? 0, [{ ref: row.ref, label: 'accept', citations: [], knowledge_ids: [],
       basis: 'proxy', reason: '未经校准的代理', manifest_id: manifest.operator!.pythonManifestId }])).toThrow('代理推断')
     expect(buildSemanticTicketRequest('副卡 AND 跨域').filters).toBeUndefined()
+    if (active) {
+      const previous = learnedResult(state)!
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: '改为只找已经完成解绑，排除尚未完成。' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(errors).toEqual([])
+      const revised = app.current(agent)
+      expect(revised.inputGeneration).toBeGreaterThan(state.inputGeneration ?? 0)
+      expect(learnedResult(revised)?.model_id).not.toBe(previous.model_id)
+      expect(confirmedCount(revised)).toBe(count/2)
+      const page = await learnedResultWindow(revised, ctx.ticketRetrievalProvider, await app.principal(agent, 'detail_read'), app.semanticResults, undefined, 200)
+      expect(page.items.every(c => Number(c.displayId.slice(2)) % 2 === 1)).toBe(true)
+    }
   } finally { await dispose?.(); await ctx.fiber.dispose() }
 }, 180000)

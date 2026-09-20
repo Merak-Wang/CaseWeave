@@ -434,6 +434,23 @@ class RetrievalRankingBackend:
                 rows.append({"id": doc["id"], "vector": prepared.vectors[found[0]].tolist()})
         return {"embedding_id": self._cache_key({**identity, "projectionVersion": DENSE_PROJECTION_VERSION}), "rows": rows}
 
+    def read_feature_block(self, documents, raw_profile):
+        """预处理矩阵按授权 ID 取列块，不重复归一化，不展开 JSON 浮点列表。"""
+        import base64
+        identity = self._verify_model_identity(_profile(raw_profile), True)
+        prepared = self.prepared
+        if prepared is None or any(prepared.identity[k] != identity[k] for k in ("model", "revision", "dimensions")):
+            raise ServiceError(409, "INVALID_VECTOR", "Prepared feature generation is unavailable.")
+        matrix = np.zeros((len(documents), identity["dimensions"]), dtype="<f4")
+        available = np.zeros(len(documents), dtype=np.uint8)
+        for i, doc in enumerate(documents):
+            found = prepared.rows.get(doc["id"])
+            if found and found[1] == doc["contentHash"]:
+                matrix[i] = prepared.vectors[found[0]]; available[i] = 1
+        return {"dense": base64.b64encode(matrix.tobytes()).decode(), "dimensions": matrix.shape[1],
+                "available": base64.b64encode(available.tobytes()).decode(),
+                "embedding_id": self._cache_key({**identity, "projectionVersion": DENSE_PROJECTION_VERSION})}
+
     def _vectors(
         self,
         documents: list[dict[str, str]],
