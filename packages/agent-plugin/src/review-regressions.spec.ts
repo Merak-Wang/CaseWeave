@@ -143,9 +143,19 @@ it('O4 fetches required dialogue before the first filter request and replays the
     expect(f.errors).toEqual([])
     expect(s.termination).toBe('top_k_accepted')
     expect(s.selectedCandidateRefs).toHaveLength(1)
-    expect(f.requests.filter(r => r.system?.includes('当前操作：sem_filter'))).toHaveLength(1)
+    const filterInputs = f.requests.filter(r => r.system?.includes('当前操作：sem_filter')).map(request =>
+      JSON.parse(request.messages[0]!.content.flatMap(b => b.type === 'text' ? [b.text] : []).join('')))
+    // 初判与独立复核都必须收到已读原文，新增复核不能跳过取证。
+    expect(filterInputs.map(input => input.review_stage)).toEqual(['initial', 'criterion_gaps'])
+    for (const input of filterInputs) {
+      expect(input.records).toHaveLength(1)
+      expect(input.records[0].passages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ field: 'conversationOrUpdates', origin: 'source', text: '宽带停机案例' }),
+      ]))
+    }
     expect(s.contextManifests?.some(m => m.operator?.operation === 'sem_filter' && m.evidenceIds.length)).toBe(true)
     expect(createTicketResultCollection(s).evidence.some(e => e.field === 'conversationOrUpdates')).toBe(true)
+    expect(foldRetrievalEvents(readRetrievalSessionEvents(f.agent.session))?.selectedCandidateRefs).toEqual(s.selectedCandidateRefs)
   } finally { await f.close() }
 }, 60000)
 
