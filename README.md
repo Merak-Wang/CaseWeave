@@ -69,6 +69,15 @@ bash setup.sh
 
 日常启动复用已有镜像、模型和索引；停止保留数据卷。电脑重启后，先启动 Docker，再启动项目。
 
+修改或更新源码后，`start.cmd` 不会自动构建新镜像。仅更新前端或 TypeScript 应用时，在项目根目录执行：
+
+```sh
+docker compose build app
+docker compose up -d --no-deps --wait app
+```
+
+同时更新 Python 算子时，将两条命令中的服务改为 `app semantic-operators`。上述更新保留原数据卷；后续日常启动仍使用 `start.cmd`。仅执行 `docker compose restart` 会继续运行原容器中的旧代码。模型服务升级及回退见 [部署与运行](docs/DEVELOPMENT.md#mysql--milvus-与持久任务入口)。
+
 ## 数据与运行边界
 
 默认示例数据由 [数据清单](data/manifest.json) 管理，准备后包含 19,587 条工单。该数据缺少日期、地区和状态字段，涉及这些条件时系统会保留未知；生成的摘要和类别也不能替代原文事实。数据来源、字段和准备方法见 [数据说明](data/README.md)。

@@ -103,13 +103,15 @@ def test_output_schema_cannot_resolve_network_resources():
         check_schema({'type': 'object', 'properties': {'item': {'$ref': 'https://example.invalid/schema'}}})
 
 
-def test_invalid_plan_is_not_reused_after_operator_validation_failed():
+def test_invalid_plan_gets_one_feedback_retry_and_model_can_repair():
     class Model:
         identity = 'review-fixture'
         calls = 0
+        requests = []
 
         async def generate(self, request):
             self.calls += 1
+            self.requests.append(request['messages'][0]['content'])
             return ModelReply({
                 'keywords': ['宽带'], 'instruction': '只找宽带案例', 'retrieval_expressions': [],
                 'goal': {'mode': 'adaptive', 'count': 3 if self.calls == 1 else None},
@@ -121,14 +123,39 @@ def test_invalid_plan_is_not_reused_after_operator_validation_failed():
         model, store = Model(), ArtifactStore()
         try:
             runtime = Runtime(Scope('review-task', 0, 'snapshot', 'authorization'), model, store, Knowledge('none'))
+            # 第一次计划未通过校验时同一调用内带反馈重试一次，模型第二次即可修复并返回有效计划
+            plan = await plan_query(runtime, '查找宽带案例')
+            assert model.calls == 2 and plan['goal'] == {'mode': 'adaptive', 'count': None}
+            # 重试请求携带校验原因，模型能看到具体失败原因并纠正
+            assert '未通过计划校验' in model.requests[1]
+        finally:
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_always_invalid_plan_fails_after_exactly_one_feedback_retry():
+    class Model:
+        identity = 'review-fixture'
+        calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            return ModelReply({
+                'keywords': ['宽带'], 'instruction': '只找宽带案例', 'retrieval_expressions': [],
+                'goal': {'mode': 'adaptive', 'count': 3},
+                'steps': [{'id': 'filter', 'op': 'sem_filter', 'inputs': ['$source'],
+                           'instruction': '依据证据判断', 'params': {}}],
+            })
+
+    async def run():
+        model, store = Model(), ArtifactStore()
+        try:
+            runtime = Runtime(Scope('review-task', 0, 'snapshot', 'authorization'), model, store, Knowledge('none'))
+            # 模型始终输出无效计划：只反馈重试一次后如实失败，不无限循环
             with pytest.raises(ProtocolError):
                 await plan_query(runtime, '查找宽带案例')
-            try:
-                await plan_query(runtime, '查找宽带案例')
-            except ProtocolError:
-                pass
-            print({'model_calls_after_two_plan_attempts': model.calls})
-            assert model.calls == 2, 'A rejected plan is served from cache forever; the model cannot repair it'
+            assert model.calls == 2
         finally:
             store.close()
 

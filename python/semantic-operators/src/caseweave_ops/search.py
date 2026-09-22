@@ -92,9 +92,16 @@ async def plan_query(runtime: Runtime, query: str, confirmed_context: str = "") 
         "sem_filter仅允许batch_size、require_source、required_fields参数，不支持field/op/value；语义条件写instruction。"
         "sem_search是基础检索，仅允许keywords/expressions/k；sem_extract必须有output_schema；"
         "sem_agg仅允许fan_in。没有字段产出或问答要求时只执行sem_filter。"
-        "输入从$source开始，按依赖顺序填写steps，每步都必须有params对象。计量不设预算，不生成call/token次数上限。")
+        "输入从$source开始，按依赖顺序填写steps，每步都必须有params对象；params是步骤对象的独立字段，"
+        "不要把JSON结构或转义引号写进instruction等字符串值内。计量不设预算，不生成call/token次数上限。")
     # Runtime 在首次响应和缓存复用时执行校验，返回前再校验一次并复制为规范计划。
-    result = await runtime.call("query_plan", instruction, {"original": query, "confirmed_context": confirmed_context}, PLAN_SCHEMA, validate=validate_plan)
+    # 校验失败多为模型把 JSON 结构写进字符串值；带校验原因重试一次，避免整个检索因一次畸形输出失败。
+    try:
+        result = await runtime.call("query_plan", instruction, {"original": query, "confirmed_context": confirmed_context}, PLAN_SCHEMA, validate=validate_plan)
+    except ProtocolError as exc:
+        feedback = ("上一次输出未通过计划校验：" + str(exc) + "。输出必须是submit_result工具调用的一个JSON对象；"
+            "每个步骤的params是步骤对象内的独立字段，不要把JSON结构或转义引号写进instruction等字符串值内。")
+        result = await runtime.call("query_plan", instruction + feedback, {"original": query, "confirmed_context": confirmed_context}, PLAN_SCHEMA, validate=validate_plan)
     plan = validate_plan(result.payload)
     return {"original": query, **plan, "manifest_id": result.manifest_id}
 
