@@ -116,7 +116,7 @@ export class EvidenceContextPolicy {
         status: 'derived_artifact_not_confirmation',
       })),
       semanticExclusions: state.query.spec.queryPlan?.requirements.filter(r => r.polarity === 'exclude').map(r => ({
-        requirement_id: r.id, source_text: r.span.text, instruction: 'Accept requires exclusion_checks: evaluate this entire condition against received evidence before deciding.' })),
+        requirement_id: r.id, source_text: r.span.text, instruction: 'accept 前在 exclusion_checks 核对完整排除条件。' })),
       searchChannels: state.searchProgress?.channels,
     }
     const evidenceAliases = new Map(state.promotedEvidence.map((evidence, index) => [evidence.evidenceId as string, `e${index + 1}`]))
@@ -139,7 +139,7 @@ export class EvidenceContextPolicy {
     }
     const evidenceWindow = { offset: evidenceWindowOffset, maximumSegments: evidenceWindowEnd - evidenceWindowOffset,
       availableSegments: orderedEvidence.length, moreUnseenEvidence: this.nextEvidenceWindowOffset(state) >= 0,
-      meaning: 'moreUnseenEvidence describes visibility in this Agent context, not missing operator judgments or corpus coverage.',
+      meaning: 'moreUnseenEvidence 只表示上下文尚未展示的证据。',
       nextWindowAction: 'inspect next_window', priority: 'latest_inspection_then_current_candidates' }
     const alias = (ref: string): string => aliases.get(ref as TicketCandidate['ref']) ?? evidenceAliases.get(ref) ?? ref
     const pageBoundary = state.lastPage?.boundary
@@ -162,13 +162,13 @@ export class EvidenceContextPolicy {
     const callableToolsNow = state.phase === 'stopped' ? [] : this.#expert ? ['ticket_expert']
       : state.phase === 'awaiting_clarification' ? [] : ['ticket_read', 'ticket_search', 'ticket_decide', 'ticket_wait']
     const actionState = { callableToolsNow, filterCapabilities,
-      clarificationChannel: this.#expert ? 'ticket_expert report.question is advisory; main resolves ordinary ambiguity and asks only for indispensable user-exclusive information' : 'ticket_decide_then_user_message; ask only for indispensable user-exclusive information. Resolve ordinary business terms from evidence/Wiki and existing answers. For broad topic searches, present a useful relevant set with its interpreted scope instead of asking the user to define common subcategories.',
+      clarificationChannel: this.#expert ? 'ticket_expert report.question 供主 Agent 参考，仅必要且用户独有的信息需提问。' : '通过 ticket_decide 提问，仅限必要且用户独有的信息。',
       ...(!this.#expert ? { finishRequirements: {
         requiredExpertReviews: state.expertTasks?.filter(t => t.inputGeneration === (state.inputGeneration ?? 0) && expertNeedsMainReview(t)).map(t => t.id) ?? [],
-        instruction: 'When finishing, action.coverage.expertReviews must explicitly address each listed taskId with reason and main-visible evidenceRefs. Completed experts can still have unresolved scopes. Keep the review with the final submission; previous attempted finish calls are atomic and do not save it.',
+        instruction: 'finish 时在 coverage.expertReviews 逐项提交 taskId、reason 和主 Agent 已读 evidenceRefs；先前被拒提交未保存。',
       }, toolRepair: {
         consecutiveErrors: state.budget.consecutiveToolErrors ?? 0,
-        nextStep: 'Read the specific validation error and repair the indicated arguments. Use a small independent read when evidence is missing. Do not claim resource exhaustion from validation errors; a successful action resets this diagnostic counter.' } } : {}) }
+        nextStep: '修正报错字段，缺证则读取；参数错误不代表资源耗尽。' } } : {}) }
     const evidenceNavigation = {
       nextPosition: state.evidenceReadPosition ? { candidate_alias: alias(state.evidenceReadPosition.candidateRef),
         field: state.evidenceReadPosition.field, part: state.evidenceReadPosition.part, start: state.evidenceReadPosition.start } : undefined,
@@ -176,7 +176,7 @@ export class EvidenceContextPolicy {
     }
     const history = { judgmentCount: state.judgments?.length ?? 0,
       accepted: confirmedCount(state), excluded: state.excludedCandidateRefs.length,
-      lookup: `${this.#expert ? 'inspect' : 'inspect history'} with candidate_aliases; fields=[] reloads L1, declared fields reload source spans`,
+      lookup: `${this.#expert ? 'inspect' : 'inspect history'} 指定 candidate_aliases；fields=[] 取摘要，声明字段取原文`,
       recent: state.judgments?.slice(-4).map(j => ({ indexCard: { projection: 'L0', candidateAlias: alias(j.candidateRef),
         displayId: state.candidateHistory.find(c => c.ref === j.candidateRef)?.displayId,
         title: state.candidateHistory.find(c => c.ref === j.candidateRef)?.title,
@@ -184,12 +184,12 @@ export class EvidenceContextPolicy {
         evidenceAliases: j.evidenceRefs.map(alias), reason: j.reason, ...exclusionChecks(j) })) }
     const experts = { catalog: state.knowledgeCatalog,
       coordination: { dispatch: 'nonblocking', concurrency: 3,
-        wait: 'ticket_wait(task_ids) suspends until the first listed result. Do independent work first; do not poll or redelegate.',
+        wait: '独立工作完成后用 ticket_wait(task_ids) 等首个结果。',
         unassignedCandidateAliases: state.candidates.filter(c => !state.expertTasks?.some(t => t.inputGeneration === (state.inputGeneration ?? 0)
           && ['pending', 'running'].includes(t.status) && t.candidateRefs.includes(c.ref))
           && !state.judgments?.some(j => j.candidateRef === c.ref && j.verdict !== 'undetermined')).slice(0, this.maxCandidates).map(c => alias(c.ref)) },
       priorWork: state.expertTasks?.filter(t => t.status === 'superseded' && t.finding).slice(-3).map(t => ({
-        scope: t.scope, goal: t.goal, reuse: 'Historical scope; reuse sources to reassess affected judgments against the latest answer. Do not adopt the old finding ID or repeat its full search.',
+        scope: t.scope, goal: t.goal, reuse: '历史范围；复用来源按最新回答重审，不直接采用旧 finding ID。',
         judgments: t.finding!.judgments.slice(0, 20).map(j => ({ candidateAlias: alias(j.candidateRef), verdict: j.verdict,
           reason: j.reason, evidenceAliases: j.evidenceRefs.map(alias), ...exclusionChecks(j) })) })),
       archivedTaskCount: state.expertTasks?.filter(t => t.inputGeneration !== (state.inputGeneration ?? 0) || t.status === 'superseded').length ?? 0,

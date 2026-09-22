@@ -87,7 +87,7 @@ async def sem_agg(runtime: Runtime, source: AsyncIterable[Record], instruction: 
             ids = value["source_ids"]
             if len(ids) != len(set(ids)) or any(i not in source_index for i in ids):
                 raise ProtocolError("Aggregation cited an unsupplied source")
-        result = await runtime.call("sem_agg", instruction+" 只概括给定来源，source_ids引用输入id，不伪造精确计数；归并摘要不是新的原始证据。",
+        result = await runtime.call("sem_agg", instruction+" 仅概括输入来源，source_ids引用输入id；统计用code_statistics，派生摘要不作原文。",
              {"sources": sources, "input_record_count": sum(i.leaves for i in items), "code_statistics": combine(items)}, AGG_SCHEMA, validate=validate,
              cache_if=lambda v: v['status'] == 'ok' and bool(v['text'].strip()) and bool(v['source_ids']))
         value = result.payload

@@ -4,6 +4,12 @@ import { fieldCapabilities, ticketChunks } from './projection.js'
 import { normalizeFixtureTicket, normalizePublicSnapshotTicket } from '@retrieval-agent/provider-local'
 const fields = fieldCapabilities([])
 describe('SQL compiler boundary', () => {
+  it('evaluates a wide OR keyword list within one shared field scan', () => {
+    const result = compileSql({ kind: 'or', children: ['宽带', '到期', 'A%_'].map(text => ({ kind: 'literal', op: 'contains', text })) }, fields, true)
+    expect(result.sql.match(/FROM ra_search_field/g)).toHaveLength(1)
+    expect(result.params).toEqual(['宽带', '到期', 'a%_'])
+    expect(result.sql.match(/LOCATE/g)).toHaveLength(3)
+  })
   it('advertises source dialogue under the same name used by evidence reads', () => {
     const record = normalizePublicSnapshotTicket({ ticket_id: 'dialogue', source_dataset: 'deepseek-ai/ESFT', source_version: 'v1',
       source_kind: 'public_research_corpus', title: '定位标题', summary: '上游摘要', pii_redaction_status: 'redacted',

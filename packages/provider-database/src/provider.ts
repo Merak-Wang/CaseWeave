@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { RetrievalError, assertTrustedPrincipal, validateQueryExpression, TicketSnapshotId, TicketCandidateRef,
+import { RetrievalError, assertTrustedPrincipal, validateQueryExpression, normalizeLiteral, TicketSnapshotId, TicketCandidateRef,
   type DetailReadRequest, type EvidenceReadRequest, type ProviderCallOptions, type TicketRetrievalProvider,
   type TicketRetrievalRequest, type TicketRetrievalSpec, type TicketSearchOptions, type TicketSearchPage,
   type TicketSnapshot, type TrustedPrincipalContext, type QueryExpression } from '@retrieval-agent/contracts'
@@ -10,7 +10,7 @@ import type { ResultSetHeader } from 'mysql2/promise'
 import { TicketDatabase, type Generation, type IndexGeneration } from './store.js'
 import { DatabaseQueryStore } from './query-store.js'
 import { MilvusClient } from './milvus.js'
-import { ticketChunks } from './projection.js'
+import { grams, ticketChunks } from './projection.js'
 
 const PROFILE = 'mysql-milvus-set-vector-v2'
 interface Entry { source: Generation; index?: IndexGeneration; snapshot: TicketSnapshot }
@@ -31,6 +31,7 @@ function filters(spec: TicketRetrievalSpec): QueryExpression {
 export class DatabaseTicketProvider implements TicketRetrievalProvider {
   readonly providerId = 'mysql-milvus-v1'
   readonly #inflight = new Map<string, Promise<Run>>()
+  readonly #queryVectors = new Map<string, Promise<readonly number[]>>()
   readonly #resolver = new LocalTicketProvider([], { defaultMode: 'hybrid' })
   readonly #query: DatabaseQueryStore
   constructor(readonly db: TicketDatabase, readonly milvus: MilvusClient, readonly model: RetrievalModelGateway,
@@ -69,10 +70,42 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
         || index.watermark !== source.source_watermark || index.completed_chunks !== index.total_chunks)) throw new RetrievalError('SNAPSHOT_INVALID', '快照来源或索引已不可用。')
     return { source, ...(index ? { index } : {}), snapshot }
   }
+  async #queryVector(entry: Entry, query: string, options?: ProviderCallOptions,
+    onTiming?: (values: Readonly<Record<string, number>>) => void): Promise<readonly number[]> {
+    options?.signal?.throwIfAborted()
+    const identity = entry.index!.identity_json
+    const cacheIdentity = sha256(stableJson({ model: identity.model, revision: identity.revision,
+      dimensions: identity.dimensions, normalization: identity.normalization, inputType: 'query' }))
+    const textHash = sha256(query), key = `${entry.snapshot.snapshotId}:${cacheIdentity}:${textHash}`
+    let pending = this.#queryVectors.get(key)
+    if (!pending) {
+      pending = (async () => {
+        const cached = (await this.db.rows<{ vector_json: number[] }>(
+          'SELECT vector_json FROM ra_embedding_cache WHERE identity_hash=? AND text_hash=?', [cacheIdentity, textHash]))[0]
+        if (cached) return cached.vector_json
+        const ready = await this.model.ready(options?.signal), active = ready.models.find(m => m.kind === 'embedding')
+        if (active?.model !== identity.model || active.revision !== identity.revision || active.dimensions !== identity.dimensions) throw new Error('Query model and published index identities differ')
+        const [vector] = await this.model.embed({ texts: [query], inputType: 'query', requireCompleteInput: true,
+          ...(onTiming ? { onTiming } : {}), ...(options?.signal ? { signal: options.signal } : {}) })
+        if (!vector || vector.length !== identity.dimensions) throw new Error('Embedding/index dimension mismatch')
+        await this.db.pool.query('INSERT IGNORE INTO ra_embedding_cache(identity_hash,text_hash,vector_json) VALUES (?,?,?)',
+          [cacheIdentity, textHash, JSON.stringify(vector)])
+        return vector
+      })()
+      this.#queryVectors.set(key, pending)
+    }
+    try { const vector = await pending; options?.signal?.throwIfAborted(); return vector }
+    catch (error) {
+      // 取消或失败只撤销本快照的待计算项；后续恢复可重新读取或计算。
+      if (this.#queryVectors.get(key) === pending) this.#queryVectors.delete(key)
+      throw error
+    }
+  }
   async search(principal: TrustedPrincipalContext, snapshotId: TicketSnapshot['snapshotId'], spec: TicketRetrievalSpec, options: TicketSearchOptions): Promise<TicketSearchPage> {
     if (!Number.isInteger(options.topK) || options.topK < 1 || options.topK > 100 || !Number.isSafeInteger(options.maxScan) || options.maxScan < 1) throw new RetrievalError('INVALID_REQUEST', '单页数量必须为 1–100，读取批次容量必须为正整数。')
     options.signal?.throwIfAborted()
-    const entry = await this.#entry(principal, snapshotId), key = sha256(stableJson({ snapshotId, spec, profile: PROFILE }))
+    const entry = await this.#entry(principal, snapshotId), key = sha256(stableJson({ snapshotId, spec, profile: PROFILE,
+      vectorRecall: { minimum: this.denseTopK, threshold: .75, expressions: spec.semanticHints } }))
     let pending = this.#inflight.get(key)
     if (!pending) {
       pending = this.db.exclusiveSearch(key, async () => {
@@ -162,6 +195,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     const notify = () => {
       tail = tail.then(async () => {
         options.signal?.throwIfAborted(); run.timings.elapsedMs = performance.now() - started
+        run.total = Number((await this.db.rows<{ n: number }>('SELECT COUNT(*) n FROM ra_search_candidate WHERE run_id=?', [key]))[0]!.n)
         await this.db.pool.query('UPDATE ra_search_run SET status_json=? WHERE id=?', [JSON.stringify(run), key])
         if (options.onProgress) {
           const { cursor: _cursor, ...first } = options
@@ -197,36 +231,46 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     const outcomes = await Promise.allSettled([
       work(0, async () => {
         const at = performance.now()
-        for await (const ids of this.#query.ids(keywordScope, Math.min(500, options.maxScan), options.signal)) {
-          run.timings.sqlFirstBatchMs ??= performance.now() - started
-          await add(ids, 'keyword'); run.channels[0]!.count += ids.length; run.channels[0]!.cursor = ids.at(-1)!
-          await notify()
-        }
+        // 字面匹配在 SQL 内一次生成 ID 集合，不按 500 条重跑谓词，也不搬运全部正文。
+        await this.db.pool.query(`INSERT INTO ra_search_candidate(run_id,ticket_id,keyword_hit,fused_score)
+          SELECT ?,t.ticket_id,TRUE,1.0/61 FROM ${keywordScope.from} WHERE ${keywordScope.where}
+          ON DUPLICATE KEY UPDATE keyword_hit=TRUE,fused_score=1.0/61+IF(vector_rank IS NULL,0,1.0/(60+vector_rank))`, [key, ...keywordScope.params])
+        run.channels[0]!.count = Number((await this.db.rows<{ n: number }>('SELECT COUNT(*) n FROM ra_search_candidate WHERE run_id=? AND keyword_hit=TRUE', [key]))[0]!.n)
+        await this.db.pool.query(`INSERT INTO ra_search_hit(run_id,ticket_id,channel,rank_no,score,source_hash,detail_json)
+          SELECT ?,c.ticket_id,'keyword',1,1,t.content_hash,NULL FROM ra_search_candidate c
+          JOIN ra_ticket t ON t.generation=? AND t.ticket_id=c.ticket_id WHERE c.run_id=? AND c.keyword_hit=TRUE
+          ON DUPLICATE KEY UPDATE rank_no=1,score=1,detail_json=NULL`, [key, entry.source.id, key])
+        run.timings.sqlFirstBatchMs = performance.now() - started
         run.timings.sqlMs = performance.now() - at
       }),
       work(1, async () => {
         if (!entry.index) throw new Error('No index published for this SQL generation')
-        const ready = await this.model.ready(options.signal), identity = ready.models.find(m => m.kind === 'embedding')
-        if (identity?.model !== entry.index.identity_json.model || identity.revision !== entry.index.identity_json.revision || identity.dimensions !== entry.index.identity_json.dimensions) throw new Error('Query model and published index identities differ')
+        const expressions = [...new Set([options.stage === 'repair_search' ? spec.semanticQuery ?? spec.normalizedQuery : spec.queryPlan?.vector.text ?? spec.fastQuery?.vector.text ?? spec.originalQuery,
+          ...(options.stage === 'repair_search' ? spec.semanticHints : [])])]
+        const seen = new Set<string>()
+        for (const expression of expressions) {
         const at = performance.now()
-        const [vector] = await this.model.embed({ texts: [options.stage === 'repair_search' ? spec.semanticQuery ?? spec.normalizedQuery : spec.queryPlan?.vector.text ?? spec.fastQuery?.vector.text ?? spec.originalQuery], inputType: 'query', requireCompleteInput: true,
-          onTiming: values => { run.timings.embeddingQueueMs = values.queueMs ?? 0; run.timings.embeddingComputeMs = values.computeMs ?? 0 }, ...(options.signal ? { signal: options.signal } : {}) })
-        if (!vector || vector.length !== entry.index.identity_json.dimensions) throw new Error('Embedding/index dimension mismatch')
-        run.timings.embeddingMs = performance.now() - at
+        const vector = await this.#queryVector(entry, expression, options,
+          values => { run.timings.embeddingQueueMs = values.queueMs ?? 0; run.timings.embeddingComputeMs = values.computeMs ?? 0 })
+        run.timings.embeddingMs = (run.timings.embeddingMs ?? 0) + performance.now() - at
         const ann = performance.now()
-        const found = eligible === entry.source.record_count
-          ? await this.milvus.searchCollection(entry.index.collection_name, vector, this.denseTopK, options.signal)
-          : await this.milvus.searchBatches(entry.index.collection_name, vector, this.#query.ids(eligibleScope, Math.min(1000, options.maxScan), options.signal), this.denseTopK, options.signal)
-        run.timings.milvusMs = performance.now() - ann
+        const found = await this.milvus.searchBatches(entry.index.collection_name, vector,
+          this.#query.ids(eligibleScope, Math.min(1000, options.maxScan), options.signal), this.denseTopK, options.signal, .75)
+        run.timings.milvusMs = (run.timings.milvusMs ?? 0) + performance.now() - ann
         const ids = found.map(h => h.ticket_id)
         await this.#query.validate(entry.source.id, (await this.db.publication(this.datasetId)).source.id, ids, principal)
         const records = new Map((await this.#query.records(entry.source.id, ids, true)).map(r => [r.ticketId as string, r]))
         for (const hit of found) {
+          if (seen.has(hit.ticket_id)) continue
           const record = records.get(hit.ticket_id)
           if (!record || record.contentHash !== hit.content_hash || record.sourceVersion !== hit.source_version) throw new Error('Milvus source identity mismatch')
           const chunk = ticketChunks(record, entry.index.identity_json.chunkChars).find(c => c.id === hit.id)
           if (!chunk || chunk.textHash !== hit.text_hash || chunk.field !== hit.field || chunk.part !== Number(hit.part) || chunk.start !== Number(hit.start) || chunk.end !== Number(hit.end)) throw new Error('Milvus fragment identity mismatch')
           await add([hit.ticket_id], 'vector', ++run.channels[1]!.count, hit.distance, hit)
+          seen.add(hit.ticket_id)
+        }
+        // 原句命中即可交给采样；改写表达继续召回，不挡住分类学习。
+        await notify()
         }
       }),
     ])
@@ -331,9 +375,39 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
         if (Number(prepared[0]?.n) !== Number(entry.source.record_count)) throw new RetrievalError('PROVIDER_UNAVAILABLE', '数值索引不完整，请重新执行索引准备。')
     }
     const dimensions = entry.index.identity_json.dimensions
+    let scores: number[] | undefined
+    if (request.rankingQuery && ordered.length) {
+      const queryGrams = grams(request.rankingQuery), normalized = normalizeLiteral(request.rankingQuery)
+      if (!queryGrams.length && normalized) queryGrams.push(normalized)
+      const ids = ordered.map(r => r.ticket_id)
+      const indexed = entry.source.grams_ready && Array.from(normalized).length > 1
+      const [vector, matched] = await Promise.all([
+        this.#queryVector(entry, request.rankingQuery, options),
+        queryGrams.length ? this.db.rows<{ ticket_id: string; n: number }>(indexed
+          ? 'SELECT ticket_id,COUNT(*) n FROM ra_gram WHERE generation=? AND ticket_id IN (?) AND gram IN (?) GROUP BY ticket_id'
+          : `SELECT s.ticket_id,COUNT(DISTINCT q.gram) n FROM ra_search_field s
+            JOIN JSON_TABLE(?,'$[*]' COLUMNS(gram VARCHAR(8) PATH '$')) q
+            ON LOCATE(CAST(q.gram AS BINARY),CAST(s.text_value AS BINARY))>0
+            WHERE s.generation=? AND s.ticket_id IN (?) GROUP BY s.ticket_id`,
+        indexed ? [entry.source.id, ids, queryGrams] : [JSON.stringify(queryGrams), entry.source.id, ids]) : [],
+      ])
+      const overlap = new Map(matched.map(r => [r.ticket_id, Number(r.n)])), queryNorm = Math.hypot(...vector)
+      // SQL 只返回每条工单的 gram 覆盖数；既有数值向量在本块内计算真实 cosine。
+      scores = ordered.map(row => {
+        let dot = 0, norm = 0
+        if (row.vector_blob) for (let j = 0; j < dimensions; j++) {
+          const value = row.vector_blob.readFloatLE(j * 4)
+          dot += value * vector[j]!; norm += value * value
+        }
+        const cosine = norm && queryNorm ? Math.max(0, Math.min(1, dot / Math.sqrt(norm) / queryNorm)) : 0
+        const coverage = queryGrams.length ? (overlap.get(row.ticket_id) ?? 0) / queryGrams.length : 0
+        return (coverage + cosine) / 2
+      })
+    }
     return { ids: ordered.map(r => Number(r.ordinal)), dimensions,
       dense: Buffer.concat(ordered.map(r => r.vector_blob ?? Buffer.alloc(dimensions * 4))).toString('base64'),
       available: Buffer.from(ordered.map(r => r.vector_blob ? 1 : 0)).toString('base64'), feature_id: entry.index.id,
+      ...(scores ? { scores } : {}),
       next_cursor: !request.ids && !request.refs && rows.length === request.limit ? String(rows.at(-1)!.ordinal) : null }
   }
   async resolveFeatureIds(principal: TrustedPrincipalContext,

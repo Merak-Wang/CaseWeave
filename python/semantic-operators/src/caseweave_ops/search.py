@@ -1,6 +1,7 @@
 """现有 Host 的一次查询理解与并行搜索；数据和 embedding 均回调既有 Provider。"""
 from __future__ import annotations
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, AsyncIterable, AsyncIterator, Protocol
@@ -17,6 +18,9 @@ PLAN_SCHEMA = {"type": "object", "additionalProperties": False,
         "keywords": {"type": "array", "items": {"type": "string"}},
         "instruction": {"type": "string"},
         "retrieval_expressions": {"type": "array", "items": {"type": "string"}},
+        "knowledge_routes": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "required": ["entry_id", "reason"], "properties": {
+                "entry_id": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}}},
         "goal": {"type": "object", "additionalProperties": False, "required": ["mode", "count"],
                  "properties": {"mode": {"enum": ["adaptive", "examples", "all"]}, "count": {"type": ["integer", "null"]}}},
         "steps": {"type": "array", "items": {"type": "object", "additionalProperties": False,
@@ -76,33 +80,46 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
 async def plan_query(runtime: Runtime, query: str, confirmed_context: str = "") -> dict[str, Any]:
     if not query.strip():
         raise ValueError("Query is empty")
-    instruction = ("理解用户要检索的业务集合，给出关键词列表、完整自然语言判据和核心算子计划。"
-        "不生成关键词AND/OR/NOT树；词表只是宽召回线索。复杂逻辑保留在instruction中交给算子执行。"
-        "保留主体、时间、已完成与待办理、纳入与排除边界，不凭空增加字段筛选。"
-        "业务判据只重述原句及用户补充中的要求。Wiki、检索假设和常见核查建议只能帮助理解与取证，不能升级为用户未提出的必要条件或排除项。"
-        "例如用户要相关工单时，不额外要求特定角色确认、账单凭证或争议状态；说明依据不等于必须提供用户未要求的证明材料。"
-        "不要提问，不要要求用户标注。首轮计划保持直接，仅选本次需要的算子。"
-        "少量retrieval_expressions是检索先验，不是事实或标签。"
-        "未明确指定案例数量时使用all且count=null，进入全集学习和独立抽验。"
-        "all的count必须为null；examples是用户明确要求的案例数量，不是页面大小。"
-        "仅核实指定工单ID时keywords只填完整ID，retrieval_expressions可为空；instruction限定该工单，不以主题近似替代ID。"
-        "普通检索只需一个sem_filter步骤。需要原始对话时params为{\"require_source\":true,\"required_fields\":[\"source.raw_dialogue\"]}；若来源只有conversationOrUpdates则使用该字段。按evidence_fields选择实际对话字段。"
-        "required_fields只选实际可用的原文字段，不选summary/title等摘要或生成字段，不选availability=unavailable字段。有原始对话时优先只要求对话，不同时要求重复的派生摘要或空字段。"
-        "核实其他原文字段时在required_fields中填写字段名。require_source表示引文必须是来源事实，required_fields独立约束实际读到并引用的字段；摘要不能替代对话。缺少原文返回未决，主Agent定向读取后再过滤。"
-        "sem_filter仅允许batch_size、require_source、required_fields参数，不支持field/op/value；语义条件写instruction。"
-        "sem_search是基础检索，仅允许keywords/expressions/k；sem_extract必须有output_schema；"
-        "sem_agg仅允许fan_in。没有字段产出或问答要求时只执行sem_filter。"
-        "输入从$source开始，按依赖顺序填写steps，每步都必须有params对象；params是步骤对象的独立字段，"
-        "不要把JSON结构或转义引号写进instruction等字符串值内。计量不设预算，不生成call/token次数上限。")
+    context = json.loads(confirmed_context) if confirmed_context else {}
+    catalog = context.get("knowledge_catalog")
+    schema = deepcopy(PLAN_SCHEMA)
+    if catalog is not None:
+        schema["required"].append("knowledge_routes")
+    available = {entry["id"] for domain in catalog or [] for entry in domain["entries"]}
+    evidence_fields = context.get("evidence_fields")
+    readable_names = {field["key"] for field in evidence_fields or []}
+
+    def validate_routing(value):
+        plan = validate_plan(value)
+        if catalog is not None and "knowledge_routes" not in plan:
+            raise ProtocolError("Select knowledge_routes explicitly; use [] for zero-shot judgment")
+        ids = [route["entry_id"] for route in plan.get("knowledge_routes", [])]
+        if len(ids) != len(set(ids)) or any(id not in available for id in ids):
+            raise ProtocolError("Knowledge routes must select unique IDs from knowledge_catalog")
+        for step in plan["steps"]:
+            missing = set(step["params"].get("required_fields", [])) - readable_names
+            if evidence_fields is not None and missing:
+                raise ProtocolError(f"Unknown evidence fields: {sorted(missing)}; select required_fields only from evidence_fields: {sorted(readable_names)}")
+        return plan
+
+    instruction = ("规划工单检索：返回宽召回关键词、少量语义改写、完整业务判据和算子步骤。"
+        "判据只来自原句与用户补充，保留对象、状态、时序及纳入/排除关系；知识不能添加条件。"
+        "未指定数量用all、count=null；明确要若干案例才用examples。指定工单ID时keywords只放完整ID。"
+        "knowledge_routes仅选目录内相关entry_id并简述reason，无适用知识用[]。"
+        "普通检索只用一个sem_filter，从$source开始，每步填写params。"
+        "sem_filter参数限batch_size、require_source、required_fields；业务条件写instruction。"
+        "仅需原文核实时设置require_source和required_fields；字段须取evidence_fields中可用的原文字段，不能用search_fields或摘要替代。"
+        "需要对话时只选实际对话字段，如source.raw_dialogue或conversationOrUpdates。"
+        "sem_search参数限keywords/expressions/k，sem_extract须有output_schema，sem_agg只设fan_in。"
+        "按schema提交对象，params独立于instruction，不生成调用或token预算。")
     # Runtime 在首次响应和缓存复用时执行校验，返回前再校验一次并复制为规范计划。
     # 校验失败多为模型把 JSON 结构写进字符串值；带校验原因重试一次，避免整个检索因一次畸形输出失败。
     try:
-        result = await runtime.call("query_plan", instruction, {"original": query, "confirmed_context": confirmed_context}, PLAN_SCHEMA, validate=validate_plan)
+        result = await runtime.call("query_plan", instruction, {"original": query, "confirmed_context": confirmed_context}, schema, validate=validate_routing)
     except ProtocolError as exc:
-        feedback = ("上一次输出未通过计划校验：" + str(exc) + "。输出必须是submit_result工具调用的一个JSON对象；"
-            "每个步骤的params是步骤对象内的独立字段，不要把JSON结构或转义引号写进instruction等字符串值内。")
-        result = await runtime.call("query_plan", instruction + feedback, {"original": query, "confirmed_context": confirmed_context}, PLAN_SCHEMA, validate=validate_plan)
-    plan = validate_plan(result.payload)
+        feedback = "计划校验失败：" + str(exc) + "。按schema重交submit_result对象，params为独立字段。"
+        result = await runtime.call("query_plan", instruction + feedback, {"original": query, "confirmed_context": confirmed_context}, schema, validate=validate_routing)
+    plan = validate_routing(result.payload)
     return {"original": query, **plan, "manifest_id": result.manifest_id}
 
 

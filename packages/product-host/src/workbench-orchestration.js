@@ -6,6 +6,20 @@ const statusNames = { pending: '等待开始', running: '正在核查', complete
 const workNames = { starting: '正在阅读领域知识', inspect: '正在核对工单原文', search: '正在补充搜索', report: '正在整理核查发现' }
 const stages = [['search', '理解与召回'], ['review', '语义筛选'], ['experts', '专项核查'], ['synthesis', '结果交付']]
 
+/** 连续重复事件折成一个进度项；保留次数与所有原始事件供展开追溯。 */
+export function activityGroups(items) {
+  const groups = []
+  for (const item of items) {
+    const last = groups.at(-1)
+    if (last && last.actor === item.actor && last.kind === 'judgment' && item.kind === 'judgment') {
+      last.count++; last.records += item.records
+      last.text = `已写入 ${last.records} 条样本判断`
+    } else if (last && last.actor === item.actor && last.kind === item.kind && last.text === item.text) last.count++
+    else groups.push({ ...item, count: 1 })
+  }
+  return groups
+}
+
 /** Reveal only newly committed public text; restored history is rendered immediately. */
 export function revealText(el, value, animate = false) {
   if (el.dataset.fullText === value) return
@@ -18,7 +32,8 @@ export function revealText(el, value, animate = false) {
 export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, showView, expertDetail }) {
   let epoch = 0, current, library, libraryRelease, libraryPending = false, filter = '', cardKeys = new Map(), initialized = false
   let lastActivity = '', returnFocus, returnScroll, knowledgeRequest = 0, disconnected = false
-  const logKeys = new Set()
+  const logKeys = new Map()
+  const activityRecords = new Map()
   let activityAfter = 0, activityRevision = -1, activityLoading = false
   const valid = (e, s) => e === epoch && s === getSnapshot()?.orchestration?.inputGeneration
   const usedBy = reference => (current?.experts ?? []).filter(e => e.knowledge.some(k => k.reference === reference && k.used))
@@ -36,7 +51,7 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
   function reset(preserveHistory = false) {
     epoch++; current = undefined; library = undefined; libraryRelease = undefined; libraryPending = false; initialized = false
     cardKeys.clear(); lastActivity = ''; filter = ''; closeKnowledge()
-    if (!preserveHistory) { logKeys.clear(); activityAfter = 0; $('activity-log').replaceChildren() }
+    if (!preserveHistory) { logKeys.clear(); activityRecords.clear(); activityAfter = 0; $('activity-log').replaceChildren(); $('activity-history-log').replaceChildren(); $('activity-history').hidden = true }
     activityRevision = -1; activityLoading = false
     for (const id of ['expert-lanes', 'knowledge-list', 'domain-filters', 'stage-rail', 'live-metrics']) $(id).replaceChildren()
     $('live-work').dataset.state = 'running'; $('live-title').textContent = '正在准备检索'; delete $('live-title').dataset.fullText; $('elapsed').textContent = ''
@@ -44,9 +59,14 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
     delete $('stage-rail').dataset.key; delete $('domain-filters').dataset.key; delete $('expert-lanes').dataset.key
   }
   function appendActivity(id, actor, title, kind, fresh) {
-    if (logKeys.has(id)) return
-    logKeys.add(id)
+    if (logKeys.has(id)) {
+      const row = logKeys.get(id)
+      row.querySelector('small').textContent = actor
+      revealText(row.querySelector('p'), title, false)
+      return
+    }
     const row = make('article', '', 'activity-item'), dot = make('span', '', 'activity-dot')
+    logKeys.set(id, row)
     const paths = { user: '<circle cx="12" cy="8" r="3"/><path d="M6 20v-2a6 6 0 0 1 12 0v2"/>',
       search: '<circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/>', inspect: '<path d="M5 3h10l4 4v14H5zM9 11h6M9 15h6"/>',
       delegate: '<circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M12 7v5M5 17v-5h14v5"/>',
@@ -68,9 +88,20 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
       do {
         page = await api(endpoint + '/' + id + '/activity?after=' + activityAfter)
         if (ownEpoch !== epoch || id !== getTaskId()) return
-        for (const a of page.items) appendActivity(a.id, a.actor, a.text, a.kind, !initial)
+        for (const a of page.items) activityRecords.set(a.id, a)
         activityAfter = page.after
       } while (page.more)
+      const groups = activityGroups([...activityRecords.values()]), recent = groups.slice(-8), older = groups.slice(0, -8)
+      for (const group of groups) appendActivity(group.id, group.actor, group.text + (group.count > 1 && group.kind !== 'judgment' ? `（累计 ${group.count} 次）` : ''), group.kind, !initial && recent.includes(group))
+      // 同一 DOM 节点移动到历史区，展开状态与焦点不随轮询重置。
+      const liveIds = new Set(groups.map(g => g.id))
+      for (const [key, row] of logKeys) if (!liveIds.has(key)) { row.remove(); logKeys.delete(key) }
+      for (const [parent, entries] of [[$('activity-history-log'), older], [$('activity-log'), recent]]) entries.forEach((group, i) => {
+        const row = logKeys.get(group.id)
+        if (parent.children[i] !== row) parent.insertBefore(row, parent.children[i] ?? null)
+      })
+      $('activity-history').hidden = !older.length
+      $('activity-history-caption').textContent = `查看较早记录（${older.length} 项）`
       activityRevision = s.eventSeq
     } catch { if (ownEpoch === epoch) $('activity-caption').textContent = '轨迹暂时无法读取，连接恢复后重试' }
     finally { if (ownEpoch === epoch) activityLoading = false }
@@ -79,25 +110,26 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
     const meter = $('context-meter'), label = $('context-label'), fill = $('context-fill')
     const tokens = context?.measuredInputTokens ?? context?.estimatedInputTokens
     const percent = context?.limit && tokens !== undefined ? Math.min(100, Math.round(tokens / context.limit * 100)) : undefined
-    label.textContent = percent === undefined ? '待测量' : percent + '%'
+    label.textContent = percent === undefined ? tokens === undefined ? '待测量' : '约 ' + tokens.toLocaleString() : percent + '%'
     fill.setAttribute('stroke-dasharray', `${(percent ?? 0) * 56.55 / 100} 56.55`)
     meter.dataset.pressure = percent >= 80 ? 'high' : 'normal'
     const stats = context?.compression, last = stats?.last
     const compression = stats ? `工作上下文整理 ${stats.workingSetCount} 次 · 容量压缩 ${stats.capacityCount} 次` : `历史整理/压缩 ${context?.compactionCount ?? 0} 次（旧记录未区分原因）`
     const trigger = last ? `\n最近一次：${{ working_set: '工作集达到整理阈值', window_pressure: '完整请求接近模型窗口', provider_overflow: '供应商返回上下文容量错误' }[last.reason]}；触发前约 ${last.beforeTokens.toLocaleString()} tokens${last.reason === 'provider_overflow' ? '' : '，阈值 ' + last.thresholdTokens.toLocaleString()}。` : ''
-    const description = percent === undefined ? '上下文用量将在第一次模型请求后显示。' : `${context.measuredInputTokens === undefined ? '估算输入' : '实际输入'} ${tokens.toLocaleString()} / ${context.limit.toLocaleString()} tokens（${percent}%）\n输出与协议预留 ${context.reservedTokens.toLocaleString()} tokens\n${compression}${trigger}\n工作集整理不表示模型窗口已满。原始轨迹与来源保留，接近容量限制时压缩后继续。`
+    const description = context?.source === 'operator' ? `最近一次语义算子请求：${context.operation}${context.model ? ' · ' + context.model : ''}\n${context.measuredInputTokens === undefined ? '估算输入' : '实际输入'} ${tokens.toLocaleString()} tokens${context.limit ? ' / 配置窗口 ' + context.limit.toLocaleString() + '（' + percent + '%）' : '；历史记录未保存模型窗口大小'}\n算子按批次独立请求，此处显示单次窗口占用；累计用量见输出统计。`
+      : percent === undefined ? '上下文用量将在第一次模型请求后显示。' : `${context.measuredInputTokens === undefined ? '估算输入' : '实际输入'} ${tokens.toLocaleString()} / ${context.limit.toLocaleString()} tokens（${percent}%）\n输出与协议预留 ${context.reservedTokens.toLocaleString()} tokens\n${compression}${trigger}\n工作集整理不表示模型窗口已满。原始轨迹与来源保留，接近容量限制时压缩后继续。`
     meter.title = description; meter.setAttribute('aria-label', description)
     $('context-description').textContent = description
     const usage = current?.usage
     $('output-usage').textContent = usage ? `输出 ${usage.outputTokens.toLocaleString()} tokens` : '输出待计量'
-    $('usage-description').textContent = usage ? `累计输出 ${usage.outputTokens.toLocaleString()} tokens\n主 Agent：${usage.mainOutputTokens.toLocaleString()}\n专家合计：${usage.expertOutputTokens.toLocaleString()}\n语义算子：${(usage.operatorOutputTokens ?? 0).toLocaleString()}\n模型请求：${usage.modelRequests} 次\n` + usage.experts.map(e => `${e.title}（第 ${e.inputGeneration + 1} 轮）：${e.outputTokens.toLocaleString()}`).join('\n') : '收到模型用量回执后更新。'
+    $('usage-description').textContent = usage ? `累计输出 ${usage.outputTokens.toLocaleString()} tokens\n主 Agent：${usage.mainOutputTokens.toLocaleString()}\n专家合计：${usage.expertOutputTokens.toLocaleString()}\n语义算子：${(usage.operatorOutputTokens ?? 0).toLocaleString()}\n模型请求：${usage.modelRequests} 次（整个任务累计）\n主 Agent ${usage.mainRequests ?? '—'} 次 · 专家 ${usage.expertRequests ?? '—'} 次 · 语义算子 ${usage.operatorRequests ?? '—'} 次\n` + Object.entries(usage.operatorUsage?.calls_by_operation ?? {}).map(([op, count]) => `${{ query_plan: '检索规划', sem_filter: '样本判断与抽验', sem_agg: '证据汇总', sem_extract: '事实提取' }[op] ?? op}：${count} 次`).join('\n') + '\n聚类采样和分类模型训练在 Python 本地执行，不调用大模型。\n' + usage.experts.map(e => `${e.title}（第 ${e.inputGeneration + 1} 轮）：${e.outputTokens.toLocaleString()}`).join('\n') : '收到模型用量回执后更新。'
   }
   function update(s, offline = false) {
     disconnected = offline
     const o = s.orchestration, wasInitialized = initialized
     current = o
     const unavailable = Boolean(s.failure) || ['error', 'permission_blocked', 'snapshot_invalid'].includes(s.node?.status)
-    if (['permission_blocked', 'snapshot_invalid'].includes(s.node?.status)) { closeKnowledge(); library = undefined; $('knowledge-list').replaceChildren(); $('expert-lanes').replaceChildren(); $('activity-log').replaceChildren() }
+    if (['permission_blocked', 'snapshot_invalid'].includes(s.node?.status)) { closeKnowledge(); library = undefined; $('knowledge-list').replaceChildren(); $('expert-lanes').replaceChildren(); $('activity-log').replaceChildren(); $('activity-history-log').replaceChildren(); $('activity-history').hidden = true }
     const busy = !unavailable && !o?.terminal && !s.node?.result && (!s.question || o?.experts.some(e => ['pending', 'running'].includes(e.status)))
     $('live-work').dataset.state = unavailable ? 'error' : disconnected ? 'offline' : busy ? 'running' : o?.terminal ? ['top_k_accepted', 'no_result'].includes(o.outcome) ? 'done' : 'stopped' : 'waiting'
     const working = o?.experts.filter(e => e.status === 'running') ?? []
@@ -113,7 +145,7 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
     if (stoppedReason || limitation || last) revealText(note, stoppedReason || limitation || last.text, wasInitialized)
     const learning = o?.retrieval?.learning
     $('live-metrics').replaceChildren(...(o ? [['已召回线索', o.counts.candidates], ...(typeof learning?.scopeCount === 'number' ? [['筛选范围', learning.scopeCount]] : [['已读原文', o.counts.inspected]]), ['已确认', o.counts.confirmed]].map(([label, count]) => { const e = make('span'); e.append(make('strong', Number(count).toLocaleString()), make('small', label)); return e }) : []))
-    const active = stages.findIndex(([key]) => key === o?.stage), done = o?.terminal && ['top_k_accepted', 'no_result'].includes(o.outcome)
+    const active = stages.findIndex(([key]) => key === (['planning', 'coverage'].includes(o?.stage) ? 'search' : o?.stage)), done = o?.terminal && ['top_k_accepted', 'no_result'].includes(o.outcome)
     const railKey = [o?.stage, done, unavailable, o?.counts.experts, o?.counts.completedExperts, o?.counts.confirmed, learning?.status, o?.fastQueryComplete, disconnected].join(':')
     if ($('stage-rail').dataset.key !== railKey) {
       $('stage-rail').dataset.key = railKey
@@ -127,7 +159,7 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
     }
     clock()
     contextMeter(o?.context)
-    $('activity-caption').textContent = busy ? '随检索持续更新' : '已保存的执行记录'
+    $('activity-caption').textContent = busy ? '最近进展 · 同类批次合并更新' : '已保存的执行记录'
     $('activity-log').dataset.busy = String(busy && !disconnected)
     // Initial history is not replayed as fresh generation and never forces scrolling.
     void refreshActivity(s)

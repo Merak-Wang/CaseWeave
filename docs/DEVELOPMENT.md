@@ -8,6 +8,12 @@
 
 默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 使用 Provider 的 `featureBlock` 扫描对齐 ID 与连续数值块，共享样本拟合 LR/SVM/MLP/HGB，再独立抽验集合 P/R。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。缺特征计入遗漏上界，不自动逐条强判全库。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验与显式旧 baseline 命令见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
 
+从旧版算法升级 Docker 部署时，构建应用、算子和排名服务：`docker compose build app semantic-operators model-service`，再执行 `docker compose up -d --no-deps --wait model-service semantic-operators app`。旧算子镜像不认识新筛选参数时可能返回 `ProtocolError`。若旧数据库尚无数值特征，执行 `docker compose exec app node scripts/database.mjs index --dataset=esft-development`，复用已有向量和索引检查点补齐；自定义数据集替换名称。日常 `start.cmd` 不承担这些升级步骤。
+
+语言模型标注的并发与每次样本数由 `RETRIEVAL_AGENT_FILTER_CONFIG` 配置。例如在 `.env` 设置 `RETRIEVAL_AGENT_FILTER_CONFIG={"batchSize":4,"options":{"concurrency":32,"precision_target":0.9,"recall_target":0.9}}`，表示最多同时执行 32 个样本判断请求，每个请求包含至多 4 条工单，并要求独立抽验的精度/召回率下界均不低于 0.90；尾批及命中复核可能少于 4 条。它不改变抽样总数、Agent 证据窗口或分类器训练并行度。修改后执行 `docker compose up -d --no-deps --wait app`，未取消的后台任务在原任务内恢复。
+
+选择样本覆盖不足时，后续筛选复用同一查询、来源及配置下的有界随机 ID 池、已判断标签和已训练模型，只补充独立选择样本；训练标签更正后重新拟合。原文及证据要求未变化的未决样本沿用原结论，不重复请求模型。工作台显示复用与续补进度。批量判断可减少请求和重复提示开销，实际费用仍取决于样本正文、复核和抽验数量。
+
 完整容器部署适合单机试用；源码入口供开发、集成与排障使用。产品概览见 [README](../README.md)，测试范围见 [评测与验收](EVALUATION_STRATEGY.md)。
 
 默认数据库工作台位于 `/retrieval`。MySQL 保存任务、命令、事件与结果版本，DSH 执行主 Agent 和领域专家。关闭浏览器不取消后台任务；再次连接时重新校验访问资格。

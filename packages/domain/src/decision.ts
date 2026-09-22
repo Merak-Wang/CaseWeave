@@ -48,7 +48,7 @@ export function admitDecision(state: RetrievalState, decision: RetrievalDecision
     .flatMap(j => [j.candidateRef, ...j.evidenceRefs]), roleId)
   const candidates = new Map(state.candidates.map(c => [c.ref, c]))
   const evidence = new Map<string, RetrievalState['promotedEvidence'][number]>(state.promotedEvidence.map(e => [e.evidenceId, e]))
-  const planFields = operatorRequiredFields(state.query.contract?.semanticPlan)
+  const planFields = operatorRequiredFields(state.query.contract?.semanticPlan, state.snapshot?.fieldCatalog)
   const incoming = new Set<string>()
   for (const judgment of decision.judgments) {
     if (incoming.has(judgment.candidateRef)) throw new RetrievalError('INVALID_REQUEST', '同一次判断中候选重复。')

@@ -59,8 +59,9 @@ it('retains failed callback metering and the original error instead of treating 
   } finally { bridge.close() }
 }, 30000)
 
-it('returns control after one example review window and leaves unresolved rows for directed inspection', async () => {
+it.each([true, false])('routes knowledge in planning (selected=%s), then judges one review window with only selected bodies', async (selectKnowledge) => {
   const ctx = new Context(), judged: string[][] = [], unresolvedIssues: (string | undefined)[][] = []
+  let selectedId = '', selectedBody = ''
   let dispose: (() => Promise<void>) | undefined
   try {
     await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime); await ctx.plugin(ToolRuntime)
@@ -74,17 +75,33 @@ it('returns control after one example review window and leaves unresolved rows f
         scanned: documents.length, keywordEligible: documents.length, rankedHits: documents.length, warnings: [] }) }
     new Principal(ctx); new Provider(ctx, new LocalTicketProvider(records, { ranker }))
     const app = new RetrievalAgentService(ctx, { searchTopK: 40, reviewBatchSize: 8 })
-    const operators = new SemanticOperators(ctx, app, undefined, process.cwd(),
+    const operators = new SemanticOperators(ctx, app, resolve('wiki'), process.cwd(),
       new PythonOperatorBridge(process.cwd(), resolve('.cache/semantic-operators', `window-${randomUUID()}.sqlite`)))
     class WindowAdapter extends LlmAdapter {
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
         const data = JSON.parse(options.messages[0]!.content.flatMap(b => b.type === 'text' ? [b.text] : []).join(''))
         const planning = options.system?.includes('当前操作：query_plan')
+        const knowledge = JSON.parse(options.system!.split('\n相关Wiki：')[1]!)
+        if (planning) {
+          const catalog = JSON.parse(data.confirmed_context).knowledge_catalog
+          expect(catalog.length).toBeGreaterThan(0)
+          expect(knowledge.entries).toEqual([])
+          const entry = catalog.flatMap((d: any) => d.entries).at(-1)
+          expect(entry.bodyMarkdown).toBeUndefined()
+          selectedId = entry.id
+        } else {
+          expect(knowledge.entries.map((e: any) => e.id)).toEqual(selectKnowledge ? [selectedId] : [])
+          if (selectKnowledge) {
+            expect(knowledge.entries[0].bodyMarkdown.length).toBeGreaterThan(0)
+            selectedBody = knowledge.entries[0].bodyMarkdown
+          }
+        }
         if (!planning) {
           judged.push(data.records.map((r: any) => r.ref))
           unresolvedIssues.push(data.records.map((r: any) => r.attributes.unresolved_issue))
         }
         const payload = planning ? { keywords: ['副卡'], instruction: '找3条解绑已完成的副卡工单', retrieval_expressions: [],
+          knowledge_routes: selectKnowledge ? [{ entry_id: selectedId, reason: '测试 Agent 选择这条业务知识' }] : [],
           goal: { mode: 'examples', count: 3 }, steps: [{ id: 'filter', op: 'sem_filter', inputs: ['$source'], instruction: '核实解绑状态', params: {} }] }
           : { rows: data.records.map((r: any) => ({ ref: r.ref, label: 'undetermined', citations: [], knowledge_ids: [], reason: '缺少解绑完成事实。' })) }
         yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(randomUUID()), name: 'submit_result', arguments: JSON.stringify(payload) } }
@@ -98,6 +115,9 @@ it('returns control after one example review window and leaves unresolved rows f
     const agent = handle.agent
     await app.start(agent, buildSemanticTicketRequest('找3条解绑已完成的副卡工单'))
     await operators.filter(agent)
+    expect(app.current(agent).query.contract?.semanticPlan?.knowledge_routes).toEqual(selectKnowledge
+      ? [{ entry_id: selectedId, reason: '测试 Agent 选择这条业务知识', title: expect.any(String) }] : [])
+    if (selectKnowledge) expect(selectedBody).not.toBe('')
     expect(app.current(agent).judgments).toHaveLength(8)
     expect(app.current(agent).phase).not.toBe('stopped')
     await operators.filter(agent)
@@ -133,10 +153,29 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
     await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime); await ctx.plugin(ToolRuntime)
     await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)
     new Principal(ctx); new Provider(ctx, new LocalTicketProvider(records, { ranker, defaultMode: 'hybrid' }))
+    const featureBlock = ctx.ticketRetrievalProvider.featureBlock!.bind(ctx.ticketRetrievalProvider)
+    const numericReads = vi.spyOn(ctx.ticketRetrievalProvider, 'featureBlock').mockImplementation(async (...args) => {
+      const block = await featureBlock(...args)
+      return { ...block, scores: block.ids.map(id => id / count) }
+    })
     const app = new RetrievalAgentService(ctx)
     const updates = vi.spyOn(app, 'updateExpert')
     const commits = vi.spyOn(app, 'acceptOperatorResults')
     const bridge = new PythonOperatorBridge(process.cwd(), resolve('.cache/semantic-operators', `test-${randomUUID()}.sqlite`))
+    let pausedStages = 0, selectionResumes = 0
+    if (active) {
+      const run = bridge.run.bind(bridge)
+      bridge.run = async (input, callback, result, signal) => {
+        // 模拟发现与选择缺类回执，验证公开入口都能直接继续有剩余样本的窗口。
+        if (input.op === 'sem_filter' && pausedStages < 2) {
+          await callback('learning.update', { input_revision: input.scope.input_revision,
+            stop_reason: pausedStages++ === 0 ? 'needs_coverage' : 'needs_selection_coverage',
+            discovery_remaining_records: 256, selection_remaining_records: 256 })
+          return {}
+        }
+        return run(input, callback, result, signal)
+      }
+    }
     // Keep a real checked-cluster integration case alongside the strict default.
     // The fixture supplies its numeric features through the same Provider port.
     if (count === 1536) {
@@ -151,7 +190,7 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
         return { ...page, rows: page.rows.map(row => ({ ...row, ...features.find(f => f.ref === row.ref) })) }
       }, result, signal)
     }
-    new SemanticOperators(ctx, app, undefined, process.cwd(), bridge, active ? { options: { validation_size: 384 } } : { algorithm: 'baseline' })
+    new SemanticOperators(ctx, app, undefined, process.cwd(), bridge, active ? { batchSize: 4, options: { concurrency: 32, validation_size: 384 } } : { algorithm: 'baseline' })
     installAutomaticRetrievalStart(ctx, app, { analyzer: { async analyze() { throw new Error('legacy compiler must not run') } } })
     installRetrievalTools(ctx, app); installRetrievalRuntimeBudget(ctx, app)
     const errors: string[] = []
@@ -181,6 +220,12 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
         } else {
           name = 'ticket_decide'
           const state = app.current(agent!)
+          if (['needs_coverage', 'needs_selection_coverage'].includes((state.budget.operatorUsage?.learning as { stop_reason?: string } | undefined)?.stop_reason ?? '')) {
+            expect(++selectionResumes).toBeLessThanOrEqual(2)
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(randomUUID()), name: 'sem_filter', arguments: '{}' } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }
+            return
+          }
           expect(confirmedCount(state)).toBe(count / 2)
           payload = { state_id: state.stateId, judgments: [], semantic_gaps: [], action: { kind: 'finish', reason: 'satisfied',
             explanation: '当前案例覆盖所需的解绑受阻边界。', coverage: { checked: ['结束时的状态'], remaining: [], nextAction: '无需继续', nextActionValue: 'none' } } }
@@ -225,10 +270,17 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
     expect(registrations).toHaveLength(filtering.length)
     if (active) {
       const learning = state.budget.operatorUsage?.learning as Record<string, any>
+      const rankedReads = numericReads.mock.calls.filter(([, request]) => request.rankingQuery !== undefined)
+      expect(rankedReads.length).toBeGreaterThan(1)
+      expect(rankedReads.every(([, request]) => request.rankingQuery === query)).toBe(true)
+      expect(learning.sampling_method).toBe('ngram_vector_desc')
       expect(learning.feature_records).toBe(count)
       expect(learning.fit_count).toBeGreaterThan(0)
       expect(learning.predicted_records).toBe(count)
       expect(learning.fit_count).toBe(4)
+      expect(learning.batch_size).toBe(4)
+      expect(learning.concurrency).toBe(32)
+      expect(filtering.every(m => m.operator!.records.length <= 4)).toBe(true)
       expect(learning.teacher_unique_records).toBeLessThan(count)
       expect(learning.stop_reason).toBe('quality_passed')
       expect(learning.quality.recall_lower).toBeGreaterThanOrEqual(.95)
@@ -295,7 +347,8 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
       expect(changed.judgments!.find(j => j.candidateRef === oldStrong.candidateRef)!.verdict).not.toBe(oldStrong.verdict)
     }
     expect(foldRetrievalEvents(readRetrievalSessionEvents(agent.session))?.selectedCandidateRefs).toEqual(state.selectedCandidateRefs)
-    expect(requests.filter(r => !r.sessionId?.startsWith('operator-'))).toHaveLength(active ? 2 : 1)
+    // 全集分支分别续跑发现和选择两个窗口，随后汇总并结束。
+    expect(requests.filter(r => !r.sessionId?.startsWith('operator-'))).toHaveLength(active ? 4 : 1)
     const manifest = state.contextManifests!.find(m => m.operator?.operation === 'sem_filter')!
     const row = manifest.operator!.records[0]!
     expect(() => validateOperatorRecords(state, [{ ...row, content_hash: 'changed' }])).toThrow('来源版本')
@@ -305,6 +358,7 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
       basis: 'proxy', reason: '未经校准的代理', manifest_id: manifest.operator!.pythonManifestId }])).toThrow('代理推断')
     expect(buildSemanticTicketRequest('副卡 AND 跨域').filters).toBeUndefined()
     if (active) {
+      expect(selectionResumes).toBe(2)
       const previous = learnedResult(state)!
       agent.followup(createUserMessage({ content: [{ type: 'text', text: '改为只找已经完成解绑，排除尚未完成。' }], source: { kind: 'user' } }))
       await agent.whenIdle()

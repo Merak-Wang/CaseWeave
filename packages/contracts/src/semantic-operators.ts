@@ -5,6 +5,7 @@ export interface SemanticQueryPlan {
   readonly instruction: string
   readonly keywords: readonly string[]
   readonly retrieval_expressions: readonly string[]
+  readonly knowledge_routes?: readonly { readonly entry_id: string; readonly reason: string; readonly title?: string }[]
   readonly goal: { readonly mode: 'adaptive' | 'examples' | 'all'; readonly count: number | null }
   readonly steps: readonly { readonly id: string; readonly op: SemanticOperator; readonly inputs: readonly string[];
     readonly instruction: string; readonly params: Readonly<Record<string, unknown>> }[]

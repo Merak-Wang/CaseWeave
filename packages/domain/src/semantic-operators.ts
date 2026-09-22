@@ -65,7 +65,7 @@ export function admitOperatorDecisions(state: RetrievalState, generation: number
   const fallbackRows = new Map(operatorRecords(state, decisions.filter(d => d.basis === 'proxy' || d.basis === 'unresolved')
     .flatMap(d => { const c = candidates.get(d.ref as TicketCandidateRef); return c ? [c] : [] })).map(r => [r.ref, r]))
   const evidence = new Map<string, TicketEvidenceSegment>(state.promotedEvidence.map(e => [e.evidenceId, e]))
-  const planFields = operatorRequiredFields(state.query.contract?.semanticPlan)
+  const planFields = operatorRequiredFields(state.query.contract?.semanticPlan, state.snapshot?.fieldCatalog)
   const judgments: import('@retrieval-agent/contracts').RetrievalCandidateJudgment[] = []
   const seen = new Set<string>()
   for (const d of decisions) {

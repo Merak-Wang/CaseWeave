@@ -21,71 +21,71 @@ const CHANGE = { oneOf: [
 ] } as const
 
 export const DECISION_PARAMETERS = {
-  state_id: { type: 'string', required: true, description: 'Copy the complete current knowledgeState.stateId exactly, including its revision suffix. A task ID or a shortened state ID is invalid.' },
+  state_id: { type: 'string', required: true, description: '原样填写最新 knowledgeState.stateId（含版本）。' },
   judgments: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
     candidate_alias: { type: 'string', required: true }, verdict: { type: 'string', required: true, enum: ['accept', 'exclude', 'undetermined'] },
-    exclusion_checks: { type: 'array', description: 'Before accept, evaluate EVERY semanticExclusions item from the current query, using received summaries or source as needed. Omit when none. Preserve the complete condition, each OR alternative, operation and timeline. Evaluate exclusion before the inclusion conclusion. yes or uncertain cannot accompany accept.', items: { type: 'object', additionalProperties: false, properties: {
-      requirement_id: { type: 'string', required: true }, source_text: { type: 'string', required: true, description: 'Copy the full source_text exactly from semanticExclusions; do not paraphrase or omit alternatives.' },
+    exclusion_checks: { type: 'array', description: 'accept 前逐项核对 semanticExclusions，保留完整条件与或/且、时序；yes/uncertain 不得 accept，无排除项可省略。', items: { type: 'object', additionalProperties: false, properties: {
+      requirement_id: { type: 'string', required: true }, source_text: { type: 'string', required: true, description: '原样复制 semanticExclusions 的完整 source_text。' },
       applies: { type: 'string', required: true, enum: ['yes', 'no', 'uncertain'] },
-      reason: { type: 'string', required: true, description: 'Identify the observed operation, what was already completed and what remains, or the relevant cause. Evaluate the entire exclusion. Distinct operations are not one merely because they involve the same product or account. A later explicit correction overrides an earlier tentative paraphrase.' },
-      evidence_aliases: { ...STRINGS, required: true, description: 'Use this judgment\'s received cN/eN evidence. No extra read is required if it is sufficient.' },
+      reason: { type: 'string', required: true, description: '简述实际操作、已完成/待办事项与排除条件的关系；明确后续纠正优先。' },
+      evidence_aliases: { ...STRINGS, required: true, description: '引用本条已收到的 cN/eN，证据充分无需重读。' },
     } } },
-    evidence_aliases: { ...STRINGS, required: true, description: 'Default to this ticket\'s received cN title/summary when it settles relevance. Raw source reads are only for concrete missing facts or conflicts, not mandatory for accept/exclude. Nonempty for every judgment. For candidate_alias c2, ["c2"] cites its overview; ["c1"] is invalid.' }, reason: { type: 'string', required: true, description: 'Give the decisive fact and its relation to the user scope. When an explicit exclusion could apply, first identify the complete exclusion and test every OR alternative against the observed operation and timeline; only then conclude. Do not silently omit an alternative or rename distinct business objects as one relationship. A supported exclusion overrides a similar inclusion feature. No source copying or extra fields.' },
-    adopted_finding_id: { type: 'string', description: 'Optional: adopt this exact finding\'s verdict for the same candidate, citing only its listed evidenceAliases. When making your own judgment or adding your own evidence, omit this field and cite evidence the main Agent received.' },
-    conflict_resolution: { type: 'object', additionalProperties: false, description: 'Required to accept OR exclude a candidate with an open expert conflict. Put the actual resolution here, not only in reason or semantic_gaps. Cite main-visible source eN; the same ticket cN may be included but a summary alone is insufficient.', properties: {
+    evidence_aliases: { ...STRINGS, required: true, description: '必填本条已收到的 cN/eN；例如 c2 可引用 c2，不能用 c1 的摘要。' }, reason: { type: 'string', required: true, description: '简述决定性事实，核对完整排除条件，不复制原文。' },
+    adopted_finding_id: { type: 'string', description: '仅直接采用同候选专家结论时填写，并只用该结论的引用；自行判断则省略。' },
+    conflict_resolution: { type: 'object', additionalProperties: false, description: '有未解决专家分歧时，accept/exclude 必填；引用主 Agent 已读原文 eN，摘要不够。', properties: {
       kind: { type: 'string', required: true, enum: ['fact', 'business_scope', 'knowledge_conflict', 'coverage', 'source_conflict'] },
       reason: { type: 'string', required: true }, evidence_aliases: { ...STRINGS, required: true },
     } },
   } } },
   semantic_gaps: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
     kind: { type: 'string', required: true, enum: ['coverage', 'constraint', 'depth', 'boundary', 'ambiguity', 'conflict', 'version_or_prior'] },
-    status: { type: 'string', required: true, enum: ['open', 'resolved', 'not_applicable', 'unknown'], description: 'Assess a substantive user requirement. Unknown global recall alone is not an open task gap. When the requested set is evidence-supported, mark its coverage resolved; retain global recall limitations in the explanation.' },
+    status: { type: 'string', required: true, enum: ['open', 'resolved', 'not_applicable', 'unknown'], description: '针对实际用户要求；范围满足则 coverage=resolved，未知全局召回写入说明。' },
     evidence_aliases: { ...STRINGS, required: true }, description: { type: 'string', required: true },
   } } },
   action: { oneOf: [
     { type: 'object', additionalProperties: false, properties: {
-      kind: { type: 'string', const: 'delegate', required: true }, assignments: { type: 'array', required: true, description: 'Delegate independent scopes together to run in parallel. Reuse shared evidence. Do not create a duplicate assignment to wait for an existing expert; completed reports are already in expertState.', items: {
+      kind: { type: 'string', const: 'delegate', required: true }, assignments: { type: 'array', required: true, description: '并行委派独立范围，复用共享证据，不重复委派等待中的专家。', items: {
         type: 'object', additionalProperties: false, properties: { domain_id: { type: 'string', required: true },
-          goal: { type: 'string', required: true }, scope: { type: 'string', required: true, description: 'Required: the distinct unresolved question this expert owns. Prefer received titles/summaries; inspect source only for named missing facts. Leave other independent work to the main Agent.' },
-          candidate_aliases: { ...STRINGS, required: true }, knowledge_ids: { ...STRINGS, description: 'Optional: omit to retrieve domain knowledge automatically. If present use up to 3 exact entryIds from this domain only.' } },
+          goal: { type: 'string', required: true }, scope: { type: 'string', required: true, description: '该专家负责的独立未决问题。' },
+          candidate_aliases: { ...STRINGS, required: true }, knowledge_ids: { ...STRINGS, description: '省略则自动选知识；填写时限本领域至多3个真实 entryId。' } },
       } },
     } },
     { type: 'object', additionalProperties: false, properties: {
       kind: { type: 'string', const: 'search', required: true },
-      continue_ranking: { type: 'boolean', const: true, required: true, description: 'Fetch the next Provider page of the unchanged current query. Use alone, only when nextPageAvailable is true.' },
+      continue_ranking: { type: 'boolean', const: true, required: true, description: '仅 nextPageAvailable=true 时单独使用，继续当前查询。' },
     } },
     { type: 'object', additionalProperties: false, properties: {
       kind: { type: 'string', const: 'search', required: true }, mode: { type: 'string', enum: ['keyword', 'dense'] },
-      changes: { type: 'array', items: CHANGE, required: true, description: 'Apply a nonempty atomic set of keyword or structured-filter changes. Do not combine with query or continue_ranking.' },
+      changes: { type: 'array', items: CHANGE, required: true, description: '非空的关键词/字段变更，不与 query 或 continue_ranking 混用。' },
     } },
     { type: 'object', additionalProperties: false, properties: {
       kind: { type: 'string', const: 'search', required: true },
-      mode: { type: 'string', const: 'dense', description: 'Optional explicit semantic mode, consistent with ticket_search.' },
-      query: { type: 'string', required: true, description: 'A new semantic expression for vector search. Do not combine with changes or continue_ranking.' },
+      mode: { type: 'string', const: 'dense', description: '语义检索模式。' },
+      query: { type: 'string', required: true, description: '新的语义检索表达，不与 changes 或 continue_ranking 混用。' },
     } },
     { type: 'object', additionalProperties: false, properties: {
-      kind: { type: 'string', const: 'inspect', required: true }, next_window: { type: 'boolean', const: true, required: true, description: 'Use alone: {kind:"inspect",next_window:true}. Moves the context window over already retrieved evidence or candidate summaries; never combine with candidate_aliases, fields, level or position.' },
+      kind: { type: 'string', const: 'inspect', required: true }, next_window: { type: 'boolean', const: true, required: true, description: '单独翻阅已检索候选/证据，不与 candidate_aliases、fields、position 混用。' },
     } },
     { type: 'object', additionalProperties: false, properties: {
       kind: { type: 'string', const: 'inspect', required: true },
-      candidate_aliases: { ...STRINGS, required: true }, fields: { ...STRINGS, required: true, description: 'Use exact evidenceState.inspectFields names, not queryPlan search field names. Read visible cN candidates to resolve missing facts; no synthetic semantic_gap is required. history=true, fields=[] reopens an overview. Omit next_window for this source-read form. To continue a long field, copy its returned continuation into position.' }, token_budget: { type: 'integer' },
+      candidate_aliases: { ...STRINGS, required: true }, fields: { ...STRINGS, required: true, description: '字段取 evidenceState.inspectFields；history=true 且 fields=[] 重载摘要，续读用返回的 position。' }, token_budget: { type: 'integer' },
       history: { type: 'boolean' }, level: { type: 'string', enum: ['L2', 'L3'] },
       position: { type: 'object', additionalProperties: false, properties: { candidate_alias: { type: 'string', required: true },
         field: { type: 'string', required: true }, part: { type: 'integer', required: true }, start: { type: 'integer', required: true } } },
     } },
     { type: 'object', additionalProperties: false, properties: {
-      kind: { type: 'string', const: 'clarify', required: true }, question: { type: 'string', required: true, description: 'Ask only when indispensable user-exclusive information is missing after reviewing available evidence, knowledge and prior answers. Common business definitions, topical categories and ordinary retrieval sufficiency are your responsibility. For a broad topic request, produce a useful relevant set with a brief scope explanation; do not force the user to choose your taxonomy or repeat an answered question.' },
+      kind: { type: 'string', const: 'clarify', required: true }, question: { type: 'string', required: true, description: '仅询问必要且用户独有的缺失信息，复用已有回答。' },
       candidate_aliases: { ...STRINGS, required: true }, evidence_aliases: { ...STRINGS, required: true },
       facet: { type: 'string' }, options: STRINGS,
     } },
     { type: 'object', additionalProperties: false, properties: {
-      kind: { type: 'string', const: 'finish', required: true }, reason: { type: 'string', required: true, enum: ['satisfied', 'no_result', 'incomplete'], description: 'satisfied requires at least one accepted ticket and the requested count/scope met. no_result means the checked scope has no qualifying tickets: current pages exhausted, all candidates excluded, no unresolved requirements. A completed check with zero matches uses no_result, not satisfied. incomplete reports actual remaining requirements. Choose one enum value.' },
-      explanation: { type: 'string', required: true, description: 'Briefly explain the actual stopping assessment. Required even for incomplete; do not place explanation outside action.' },
-      coverage: { type: 'object', additionalProperties: false, description: 'Required after the knowledge catalog is loaded, including an empty catalog. Remaining means substantive unresolved user requirements, not merely semanticRecallKnown=false (unknown global recall). Page exhaustion is not execution resource exhaustion. Judge further search value honestly; explicitly review any failed or unresolved expert scope with evidence.', properties: {
+      kind: { type: 'string', const: 'finish', required: true }, reason: { type: 'string', required: true, enum: ['satisfied', 'no_result', 'incomplete'], description: 'satisfied：有确认结果且数量/范围满足；no_result：范围已核实、候选均排除且无缺口；incomplete：仍未完成。' },
+      explanation: { type: 'string', required: true, description: '在 action 内简述实际停止原因。' },
+      coverage: { type: 'object', additionalProperties: false, description: '知识目录加载后必填。remaining 只写实际缺口；评估下一动作价值，未知全局召回或翻页结束不代表资源耗尽。', properties: {
         checked: { ...STRINGS, required: true }, remaining: { ...STRINGS, required: true },
         nextAction: { type: 'string', required: true }, nextActionValue: { type: 'string', required: true, enum: ['useful', 'low', 'none'] },
-        expertReviews: { type: 'array', description: 'Include each taskId listed in actionState.finishRequirements.requiredExpertReviews, even if the branch completed. Explain the actual source-based resolution; do not omit earlier scopes when adding a new review.', items: { type: 'object', additionalProperties: false, properties: {
-          taskId: { type: 'string', required: true }, reason: { type: 'string', required: true }, evidenceRefs: { ...STRINGS, required: true, description: 'Main-visible cN/eN aliases supporting the scope review.' },
+        expertReviews: { type: 'array', description: '逐项覆盖 requiredExpertReviews 的 taskId，写明依据和处理结论。', items: { type: 'object', additionalProperties: false, properties: {
+          taskId: { type: 'string', required: true }, reason: { type: 'string', required: true }, evidenceRefs: { ...STRINGS, required: true, description: '主 Agent 已收到的 cN/eN。' },
         } } },
       } },
     } },
@@ -102,19 +102,19 @@ export function exclusionChecksFromArguments(state: RetrievalState, checks: Deci
 export function decisionArgumentRepair(input: unknown, message: string): string {
   const record = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
   const args = record(input), action = record(args.action)
-  const atomic = 'The rejected atomic call saved none of its judgments. Resubmit valid judgments with the corrected action; do not reread valid evidence.'
-  if (typeof args.action === 'string') return `action must be a JSON object, not a quoted JSON string. Send its kind and fields directly inside action:{...}; do not JSON.stringify nested objects or arrays. ${atomic}`
-  if (/judgments\[|semantic_gaps\[/u.test(message)) return `Fix the exact nested field named in the error. conflict_resolution only accepts kind, reason, evidence_aliases; explanations belong in reason, never invented note fields. ${atomic}`
-  if (!action.kind) return `action.kind is required: delegate, inspect, search, clarify, or finish. Put the intended kind inside action. ${atomic}`
+  const atomic = '本次判断未保存；修正动作后一起重交，已有有效证据无需重读。'
+  if (typeof args.action === 'string') return `action 必须为对象 {kind,...}，不要序列化成字符串。 ${atomic}`
+  if (/judgments\[|semantic_gaps\[/u.test(message)) return `修正报错字段；conflict_resolution 仅填 kind、reason、evidence_aliases。 ${atomic}`
+  if (!action.kind) return `action.kind 必填：delegate、inspect、search、clarify 或 finish。 ${atomic}`
   if (action.kind === 'delegate') {
     const missing = Array.isArray(action.assignments) ? action.assignments.flatMap((v, i) => ['domain_id', 'goal', 'scope', 'candidate_aliases']
       .filter(key => record(v)[key] === undefined).map(key => `action.assignments[${i}].${key}`)) : ['action.assignments']
-    return `Delegate requires assignments with domain_id, goal, scope, candidate_aliases. ${missing.length ? `Missing: ${missing.join(', ')}.` : 'Use the declared field types.'} knowledge_ids is optional; omit it for automatic Wiki selection, or use exact IDs from the selected domain. ${atomic}`
+    return `assignments 每项填写 domain_id、goal、scope、candidate_aliases。 ${missing.length ? `Missing: ${missing.join(', ')}.` : '按声明类型填写。'} knowledge_ids 可省略自动选择，或填本领域真实 ID。 ${atomic}`
   }
-  if (action.kind === 'finish') return `Finish requires kind="finish", one reason value (satisfied, no_result, or incomplete), explanation inside action, and coverage with checked, remaining, nextAction, nextActionValue (one of low, none, useful). satisfied needs accepted tickets; a fully checked scope with all candidates excluded uses no_result, not satisfied. Include expertReviews when required by current actionState. ${atomic}`
-  if (action.kind === 'inspect') return `Use {kind:"inspect",next_window:true} OR {kind:"inspect",candidate_aliases:["c1"],fields:[]}. Never mix the two. fields=[] reads titles/summaries; declared source fields require a concrete missing fact. ${atomic}`
-  if (action.kind === 'search') return `Search uses continue_ranking:true alone, query for dense retrieval, OR changes:[{type:"replace_terms",terms:["literal"],operator:"or"}]. Never mix forms. ${atomic}`
-  return `Repair the specific field in the error using the declared schema. ${atomic}`
+  if (action.kind === 'finish') return `finish 填 reason（satisfied/no_result/incomplete）、explanation、coverage（checked/remaining/nextAction/nextActionValue）。nextActionValue 取 low/none/useful；满足且有确认结果才用 satisfied，核实后均排除用 no_result；按 actionState 填 expertReviews。 ${atomic}`
+  if (action.kind === 'inspect') return `inspect 二选一：{kind:"inspect",next_window:true} 或 {kind:"inspect",candidate_aliases:["c1"],fields:[]}；空字段读摘要，补证选实际原文字段。 ${atomic}`
+  if (action.kind === 'search') return `search 三选一：continue_ranking:true、query 语义表达、changes:[{type:"replace_terms",terms:["词"],operator:"or"}]。 ${atomic}`
+  return `按 schema 修正报错字段。 ${atomic}`
 }
 
 export function activeRef(state: RetrievalState, alias: string) {

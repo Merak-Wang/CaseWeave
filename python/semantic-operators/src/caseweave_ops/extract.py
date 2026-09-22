@@ -41,7 +41,7 @@ async def _transform(runtime: Runtime, source: AsyncIterable[Record], instructio
     check_schema(output_schema)
     op = "sem_extract"
     schema = result_schema(output_schema)
-    actual_instruction = instruction + " 每个非空输出字段必须在field_citations中列出本记录的原文引文；无依据字段返回null或未决。"
+    actual_instruction = instruction + " 非空字段须有本条原文field_citations；缺证返回null或未决。"
     progress = op + ":" + runtime.predicate_key(actual_instruction) + ":" + digest(output_schema)
     reused = set()
     async for rows in batches(source, batch_size):

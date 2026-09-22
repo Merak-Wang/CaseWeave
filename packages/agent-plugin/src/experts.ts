@@ -28,24 +28,24 @@ interface Branch { parent: Agent; task: ExpertTask; refs: TicketCandidateRef[]; 
   candidateWindowRefs?: readonly TicketCandidateRef[] | undefined;
   evidencePosition?: EvidencePosition | undefined; evidenceIds?: readonly TicketEvidenceId[] | undefined; evidenceWindowOffset?: number | undefined }
 interface ExpertBatch { generation: number; runs: Map<string, Promise<void>>; changed: Set<() => void>; abort: AbortController }
-const EXPERT_POLICY = '你是工单检索领域专家。只执行分配目标与 scope；原始用户要求优先。先依据已收到的 cN 标题、摘要和结构化字段判断相关性，足以判断就直接 report；不要把每个候选升级为原文核查。只有具体事实缺失、来源矛盾或用户要求核实处理过程时才定向读取最小字段，复用主 Agent 已共享的 cN/eN。不同业务操作不可因相似障碍混同；知识用于解释业务，不能替代工单证据或更改用户要求。report 集中提交本领域逐条判断、简短事实理由、实际 cN/eN 引用及剩余缺口，不重复粘贴原文。摘要是 L1，不能冒充已核实原文。无法判断时返回 undetermined 并说明缺什么；常见业务含义自行判断，question 仅供主 Agent 处理确实依赖用户独有信息的缺口，无问题时省略。不要投票或发布最终结果，不得调用其他工具或创建子专家。'
+const EXPERT_POLICY = '你是工单领域专家，只处理分配的 goal 和 scope。用 ticket_expert 取证、搜索或 report。report 提交判断、简短理由、cN/eN 引用、缺口和 next_action。question 仅用于必要且用户独有的信息，无问题时省略。主 Agent 负责最终综合；不创建子专家。'
 
 const { required: _judgmentsRequired, ...expertJudgments } = DECISION_PARAMETERS.judgments
 const { required: _gapsRequired, ...expertGaps } = DECISION_PARAMETERS.semantic_gaps
 const EXPERT_PARAMETERS = {
         action: { type: 'string', required: true, enum: ['inspect', 'search', 'report'] },
-        candidate_aliases: { type: 'array', items: { type: 'string' }, description: 'Required for inspect unless next_window=true. Use assigned or search-result cN aliases.' },
-        fields: { type: 'array', items: { type: 'string' }, description: 'Only evidenceState.inspectFields are readable. fields=[] reloads L1; title is already in L1 and is not a source field.' },
-        next_window: { type: 'boolean', description: 'inspect only: show the next unseen candidate window, then already-read evidence for this branch; to fetch unread source use position from evidenceState.nextPosition.' },
+        candidate_aliases: { type: 'array', items: { type: 'string' }, description: 'inspect 指定本分支 cN；next_window=true 时省略。' },
+        fields: { type: 'array', items: { type: 'string' }, description: '字段取 evidenceState.inspectFields；fields=[] 重载标题/摘要。' },
+        next_window: { type: 'boolean', description: 'inspect 翻阅本分支候选及已读证据；续读原文用 nextPosition。' },
         query: { type: 'string' }, mode: { type: 'string', enum: ['keyword', 'dense'] },
-        operator: { type: 'string', enum: ['or', 'and'], description: 'keyword only: space-separated terms match any term by default; and requires every term.' },
-        search_key: { type: 'string', description: 'Continue the stored search returned previously, using its exact key.' },
+        operator: { type: 'string', enum: ['or', 'and'], description: '仅 keyword：默认 or，and 要求全部词命中。' },
+        search_key: { type: 'string', description: '续查时原样使用已返回的搜索键。' },
         position: { type: 'object', additionalProperties: false, properties: { candidate_alias: { type: 'string', required: true },
           field: { type: 'string', required: true }, part: { type: 'integer', required: true }, start: { type: 'integer', required: true } } },
-        judgments: { ...expertJudgments, description: 'Required for report. Omit for inspect/search; those actions only retrieve evidence.' },
-        semantic_gaps: { ...expertGaps, description: 'Required for report; use [] when no substantive gap remains. Omit for inspect/search.' },
-        counter_evidence_aliases: { type: 'array', items: { type: 'string' } }, next_action: { type: 'string', description: 'Required for report, even when this scope is complete: briefly say ready for main synthesis or identify the actual remaining action. Omit for inspect/search. Do not omit this field to signal completion.' },
-        question: { type: 'string', description: 'Optional advisory question only if essential user-exclusive information is missing. Omit this field entirely when no question is needed; do not write none/无. Resolve ordinary business meanings from titles, summaries, Wiki and existing answers yourself.' },
+        judgments: { ...expertJudgments, description: 'report 必填，inspect/search 省略。' },
+        semantic_gaps: { ...expertGaps, description: 'report 必填，无缺口用[]；inspect/search 省略。' },
+        counter_evidence_aliases: { type: 'array', items: { type: 'string' } }, next_action: { type: 'string', description: 'report 必填：说明可综合或下一步动作。' },
+        question: { type: 'string', description: '仅缺必要且用户独有的信息时填写，无问题则省略。' },
         disagreement_kind: { type: 'string', enum: ['fact', 'business_scope', 'knowledge_conflict', 'coverage', 'source_conflict'] },
       } as const
 type ExpertArguments = InferValue<{ type: 'object'; additionalProperties: false; properties: typeof EXPERT_PARAMETERS }>
@@ -119,7 +119,7 @@ export class ExpertCoordinator {
       const count = previous?.reply === reply ? previous.count + 1 : 1
       this.repeatedReplies.set(agent, { reply, count })
       if (count >= 3) return
-      const text = '尚未提交专家产物。请继续使用 ticket_expert：缺少事实就 inspect/search，已完成分配范围则 report 提交逐条 judgments、semantic_gaps 和 next_action。文字答复不能替代 report；不要因调用次数或耗时而放弃未完成的核查。'
+      const text = '尚未提交专家产物。用 ticket_expert 补证或搜索，完成后 report 提交 judgments、semantic_gaps、next_action。'
       agent.inject(createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
         sections: [{ name: 'retrieval-agent:expert-repair', text }] }, content: [{ type: 'text', text }] }))
     })
@@ -283,7 +283,7 @@ export class ExpertCoordinator {
     const knowledge = `<untrusted_retrieval_knowledge>${JSON.stringify({ taskId: branch.task.id, goal: branch.task.goal,
       scope: branch.task.scope, assignedCandidateAliases: branch.task.candidateRefs.map(ref => `c${state.candidateHistory.findIndex(c => c.ref === ref) + 1}`),
       actionsUsed: currentTask.actionsUsed, modelRequests: currentTask.modelSteps ?? 0,
-      reportRequirement: '按事实缺口决定是否继续搜索/读取；完成分配范围后集中 report。无固定动作或模型请求次数截止，不因耗时宣布完成。相同参数与错误连续重复且没有进展才识别为循环。',
+      reportRequirement: '按实际缺口继续取证，完成分配范围后 report。',
       releaseId: branch.task.releaseId, entries: branch.wiki })}</untrusted_retrieval_knowledge>`
     const cap = tokenBudget ?? this.application.contextTokenBudget ?? this.application.workingContextBudget(branch.parent)
     const selection = policy.select(roleState, cap - estimateContextTokens(knowledge))
@@ -337,7 +337,7 @@ export class ExpertCoordinator {
     } finally { await run?.dispose() }
   }
   private installTool(): void {
-    this.ctx.tools.register(defineTool({ name: 'ticket_expert', description: 'Judge the assigned scope from received cN titles/summaries first and report directly when sufficient. Inspect source only for a concrete missing fact or contradiction, using a small candidate/field set; reuse shared eN evidence. Search for a substantive coverage gap. Wiki guides interpretation and cannot substitute for ticket evidence.',
+    this.ctx.tools.register(defineTool({ name: 'ticket_expert', description: '处理分配范围：inspect 补证，search 补召回，证据充分时 report。',
       parameters: EXPERT_PARAMETERS,
       output: { schema: { type: 'object', additionalProperties: false, properties: { state: { type: 'string', required: true } } }, render: (_args, value) => [{ type: 'text', text: value.state }] },
       async execute(args, exec) { return coordinator.execute(args, exec) },

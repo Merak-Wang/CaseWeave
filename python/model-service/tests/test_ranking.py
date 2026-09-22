@@ -185,7 +185,7 @@ def test_tokenizer_and_profile_identity_are_versioned() -> None:
     assert RAG_PROTOCOL_VERSION == "retrieval-agent.rag.v1"
     assert profile_version({
         **profile(), "embeddingIdentity": profile()["embeddingIdentity"], "rerankerIdentity": None,
-    }) == "quick-hybrid-v1:67ff143236a8839a"
+    }) == "quick-hybrid-v2:42c14be3ea9515ba"
 
 
 def test_hybrid_keeps_keyword_and_semantic_candidates_and_caches_vectors(tmp_path) -> None:
@@ -351,7 +351,7 @@ def test_keyword_mode_does_not_require_an_embedding_identity() -> None:
     assert result["hits"][0]["documentId"] == "lexical"
 
 
-def test_dense_is_top_15_while_keyword_matches_are_unbounded() -> None:
+def test_dense_threshold_union_does_not_truncate_keyword_or_vector_matches() -> None:
     corpus = [
         {
             "id": f"doc-{index:02d}", "contentHash": f"hash-{index}",
@@ -373,13 +373,26 @@ def test_dense_is_top_15_while_keyword_matches_are_unbounded() -> None:
         "semanticHints": [], "excludedTerms": [], "requiredConcepts": [], "mode": "hybrid",
     }, {"maxScan": 100}, profile())
 
-    assert len(dense["hits"]) == 15
-    assert dense["execution"]["channels"][0]["resultCount"] == 15
+    assert len(dense["hits"]) == 25
+    assert dense["execution"]["channels"][0]["resultCount"] == 25
     assert len(keyword["hits"]) == 25
     assert keyword["keywordEligible"] == 25
-    assert len(hybrid["hits"]) == 16
+    assert len(hybrid["hits"]) == 25
     assert hybrid["keywordEligible"] == 1
-    assert hybrid["execution"]["channels"][1]["resultCount"] == 15
+    assert hybrid["execution"]["channels"][1]["resultCount"] == 25
+
+
+@pytest.mark.parametrize("qualifying, expected", [(260, 260), (5, 15), (0, 15)])
+def test_dense_top15_floor_and_strict_threshold(qualifying, expected):
+    class ScoredModels(FakeModels):
+        def embed(self, texts, input_type, instruction, dimensions):
+            if input_type == "query": return [[1., 0.]]
+            return [[score, float(np.sqrt(1-score*score))]
+                    for text in texts for score in [.9 if int(text.split()[1]) < qualifying else .75]]
+    corpus = [{"id": str(i), "contentHash": str(i), "title": str(i), "summary": "", "body": "", "metadata": ""} for i in range(280)]
+    backend = RetrievalRankingBackend(ScoredModels())
+    result = backend.rank(corpus, {"text": "query", "mode": "dense"}, {"maxScan": 300}, {**profile(), "minimumDenseScore": .75})
+    assert len(result["hits"]) == expected
 
 
 def test_hybrid_keyword_miss_uses_dense_only_for_cross_language_semantics() -> None:

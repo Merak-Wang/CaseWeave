@@ -178,8 +178,7 @@ export function installAutomaticRetrievalStart(
     }
     if (signal.aborted) return { kind: 'enter', messages: [] }
     if (application.operators && state.phase !== 'stopped') {
-      state = await application.operators.searchPlanned(agent, signal)
-      state = await application.operators.filter(agent, undefined, signal)
+      state = await application.operators.searchAndFilter(agent, signal)
     }
 
     if (state.phase === 'stopped' && ['permission_blocked', 'snapshot_invalid', 'backend_error'].includes(state.termination)) {

@@ -36,10 +36,12 @@ export const inject = ['agents', 'llm', 'tokenMeter', 'ticketRetrievalProvider',
 
 interface SemanticFilterConfig {
   algorithm?: 'auto' | 'cluster' | 'active' | 'learned' | 'baseline' | 'direct'
+  batchSize?: number
   options?: Record<string, number | string>
 }
 const SemanticFilterConfig: z<SemanticFilterConfig> = z.object({
   algorithm: z.union(['auto', 'cluster', 'active', 'learned', 'baseline', 'direct'] as const),
+  batchSize: z.number().step(1).min(1).max(8),
   options: z.dict(z.union([z.number(), z.string()])),
 })
 

@@ -19,7 +19,7 @@ describe('HybridRankingEngine FastAPI adapter', () => {
       fusion: { rankConstant: 60, keywordWeight: 0.55, vectorWeight: 0.45 },
       rerankerEnabled: false, rerankTopN: 20, allowKeywordFallback: false,
     })
-    expect(engine.profileVersion).toBe('quick-hybrid-v1:67ff143236a8839a')
+    expect(engine.profileVersion).toBe('quick-hybrid-v2:42c14be3ea9515ba')
   })
 
   it('accepts a versioned admitted ranking response', async () => {
@@ -46,12 +46,13 @@ describe('HybridRankingEngine FastAPI adapter', () => {
     }, { maxScan: 10 })).resolves.toMatchObject({ hits: [{ documentId: 'allowed' }] })
   })
 
-  it('sends a fixed Dense Top-15 candidate budget to the ranking service', async () => {
+  it('sends the Top-15 floor and .75 recall threshold to the ranking service', async () => {
     let observedDenseTopK: number | undefined
     let engine: HybridRankingEngine
     const fetch: typeof globalThis.fetch = async (_input, init) => {
       const request = JSON.parse(String(init?.body))
       observedDenseTopK = request.profile.denseTopK
+      expect(request.profile.minimumDenseScore).toBe(.75)
       return new Response(JSON.stringify({
         protocolVersion: RAG_SERVICE_PROTOCOL_VERSION,
         requestId: request.requestId,

@@ -26,6 +26,28 @@ def test_acceptance_requires_independent_missing_criterion_review(make_runtime):
     assert out[0].label == 'undetermined' and rt.model.calls == 2
 
 
+def test_judgment_prompt_contains_only_query_records_knowledge_and_output(make_runtime):
+    import json
+    seen = []
+    def handler(payload, request):
+        seen.append(request)
+        return decisions(payload, request)
+    rt = make_runtime(handler)
+    rt.knowledge = Knowledge('wiki-v1', ({'id': 'status', 'title': '解绑状态', 'bodyMarkdown': '未完成不能当作已完成。',
+        'provenance': 'internal-publication-metadata', 'reference': 'internal-reference'},))
+    asyncio.run(judge_batch(rt, [record()], '查询解绑受阻工单'))
+    assert len(seen) == 2
+    for request in seen:
+        system, user = request['messages']
+        assert '查询解绑受阻工单' in system['content']
+        knowledge = json.loads(system['content'].split('\n相关Wiki：')[1])
+        assert knowledge == {'entries': [{'id': 'status', 'title': '解绑状态', 'bodyMarkdown': '未完成不能当作已完成。'}]}
+        payload = json.loads(user['content'])
+        assert set(payload) == {'records', 'review_stage', 'output_instructions', 'require_source', 'required_fields'}
+        assert len(payload['output_instructions']) < 250
+        assert set(('accept', 'exclude', 'undetermined')) <= set(request['schema']['properties']['rows']['items']['properties']['label']['enum'])
+
+
 def test_missing_and_duplicate_remain_unknown(make_runtime):
     def handler(p, r):
         values = decisions(p, r)["rows"]
@@ -88,6 +110,18 @@ def test_bad_label_raises_structured_failure(make_runtime):
     rt = make_runtime(lambda p,r: decisions(p,r,"Unknown"))
     with pytest.raises(ProtocolError): asyncio.run(judge_batch(rt, [record()], "x"))
     assert rt.store.metrics("task")["failed_attempts"] == 1
+
+
+def test_harmless_judgment_note_does_not_fail_a_valid_evidence_decision(make_runtime):
+    def handler(payload, request):
+        result = decisions(payload, request)
+        result['rows'][0]['knowledge_ids_note'] = ''
+        return result
+    rt = make_runtime(handler)
+    result = asyncio.run(judge_batch(rt, [record()], 'x'))
+    assert result[0].label == 'accept' and result[0].citations
+    assert rt.model.calls == 2
+    assert rt.store.metrics('task')['failed_attempts'] == 0
 
 
 def test_source_policy_is_explicit(make_runtime):

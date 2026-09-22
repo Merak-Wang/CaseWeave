@@ -10,7 +10,7 @@ export interface RankingProfileParams {
   readonly embeddingBatchSize: number
   readonly modelDeadlineMs: number
   readonly minimumDenseScore: number
-  /** Hard candidate budget applied to the dense channel before fusion. */
+  /** Minimum recall count; scores above minimumDenseScore are also retained. */
   readonly denseTopK: number
   readonly fusion: {
     readonly rankConstant: number

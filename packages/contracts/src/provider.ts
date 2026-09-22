@@ -76,6 +76,8 @@ export interface TicketRetrievalProvider {
     readonly snapshotId: TicketSnapshotId; readonly limit: number; readonly cursor?: string;
     readonly ids?: readonly number[]; readonly refs?: readonly import('./brand.js').TicketCandidateRef[];
     readonly filters?: readonly import('./types.js').TicketFilter[];
+    /** 原始业务查询；仅用于安排标注顺序，不产生相关性结论。 */
+    readonly rankingQuery?: string;
   }, options?: ProviderCallOptions): Promise<NumericFeatureBlock>
   resolveFeatureIds?(principal: TrustedPrincipalContext, request: { readonly snapshotId: TicketSnapshotId;
     readonly ids: readonly number[] }, options?: ProviderCallOptions): Promise<readonly import('./types.js').TicketCandidate[]>
@@ -118,5 +120,7 @@ export interface TicketRetrievalProvider {
 export interface NumericFeatureBlock {
   readonly ids: readonly number[]; readonly dense: string; readonly dimensions: number;
   readonly available: string; readonly feature_id: string; readonly next_cursor?: string | null;
+  /** 与 ids 对齐的 query n-gram / cosine 融合分数，独立于分页和块宽。 */
+  readonly scores?: readonly number[];
   readonly sparse?: { readonly data: string; readonly indices: string; readonly indptr: string; readonly columns: number }
 }

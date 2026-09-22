@@ -22,7 +22,14 @@ export function compileSql(expression: QueryExpression, fields: readonly QueryFi
       case 'constant': return e.value ? 'TRUE' : 'FALSE'
       case 'unknown': return 'NULL'
       case 'not': return `(NOT ${compile(e.child)})`
-      case 'and': case 'or': return `(${e.children.map(compile).join(e.kind === 'and' ? ' AND ' : ' OR ')})`
+      case 'and': case 'or': {
+        // OR 词表共享一次字段扫描，避免每个词分别执行相关子查询。
+        if (e.kind === 'or' && e.children.length > 1 && e.children.every(c => c.kind === 'literal' && c.field === undefined)) {
+          const predicates = e.children.map(c => `LOCATE(CAST(${bind(normalizeLiteral((c as { text: string }).text))} AS BINARY),CAST(f.text_value AS BINARY))>0`)
+          return `EXISTS (SELECT 1 FROM ra_search_field f WHERE f.generation=t.generation AND f.ticket_id=t.ticket_id AND (${predicates.join(' OR ')}))`
+        }
+        return `(${e.children.map(compile).join(e.kind === 'and' ? ' AND ' : ' OR ')})`
+      }
       case 'literal': {
         if (e.field !== undefined) {
           const literal = bind(normalizeLiteral(e.text)); const field = bind(e.field)

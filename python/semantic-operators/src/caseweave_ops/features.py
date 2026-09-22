@@ -3,7 +3,6 @@ from dataclasses import dataclass
 import base64
 import numpy as np
 from scipy.sparse import csr_matrix
-from sklearn.cluster import kmeans_plusplus
 
 
 @dataclass
@@ -12,6 +11,7 @@ class FeatureBlock:
     dense: np.ndarray
     available: np.ndarray
     sparse: csr_matrix | None = None
+    scores: np.ndarray | None = None
 
     @property
     def views(self):
@@ -29,7 +29,8 @@ def decode_block(page):
     matrix = None if sparse is None else csr_matrix((decode_array(sparse["data"], "<f4"),
         decode_array(sparse["indices"], "<i4"), decode_array(sparse["indptr"], "<i4")),
         shape=(len(ids), sparse["columns"]))
-    return FeatureBlock(ids, dense, decode_array(page["available"], "u1").astype(bool), matrix)
+    return FeatureBlock(ids, dense, decode_array(page["available"], "u1").astype(bool), matrix,
+        np.asarray(page["scores"], dtype=np.float64) if "scores" in page else None)
 
 
 def memmap_blocks(ids_path, dense_path, shape, *, block_size=16384, available_path=None):
@@ -70,40 +71,7 @@ class PrioritySample:
     def add(self, ids, keys):
         ids, keys = np.asarray(ids, dtype=np.int64), np.asarray(keys, dtype=np.float64)
         self.seen += len(ids)
-        if len(ids) > self.size:
-            keep = np.argpartition(keys, len(keys)-self.size)[-self.size:]
-            ids, keys = ids[keep], keys[keep]
         ids, keys = np.r_[self.ids, ids], np.r_[self.keys, keys]
-        if len(ids) > self.size:
-            keep = np.argpartition(keys, len(keys)-self.size)[-self.size:]
-            ids, keys = ids[keep], keys[keep]
-        self.ids, self.keys = ids, keys
-
-
-def learning_sample(ids, X, scores, threshold, size, *, committee=None, seed=0):
-    """Mix relevance, boundary, disagreement, diversity, and global exploration.
-
-    Call only on a BOUNDED, unlabeled pool already mixing lexical/ANN hits and
-    global samples. The pool is not the corpus scope. No N x N matrix is built.
-    committee holds binary predictions from candidates on THIS pool only.
-    """
-    ids, scores = np.asarray(ids), np.asarray(scores)
-    n = len(ids)
-    if n <= size:
-        return ids.copy()
-    rng, width = np.random.default_rng(seed), max(1, size//5)
-    def top(values):
-        return np.argpartition(values, n-width)[-width:]
-    picks = [top(scores), top(-np.abs(scores-threshold)), rng.choice(n, width, replace=False)]
-    if committee is not None:
-        mean_vote = np.asarray(committee).mean(axis=0)
-        picks.append(top(np.minimum(mean_vote, 1-mean_vote)))
-    # Diversity selection operates on the bounded pool, not on 40M vectors.
-    _, diverse = kmeans_plusplus(X, n_clusters=width, random_state=seed)
-    picks.append(diverse)
-    selected = np.unique(np.concatenate(picks))
-    if len(selected) < size:
-        remainder = np.setdiff1d(np.arange(n), selected, assume_unique=True)
-        selected = np.r_[selected, rng.choice(remainder, size-len(selected), replace=False)]
-    # Lanes total <= size except very small requested batches.
-    return ids[selected[:size]]
+        # 同分固定按 ID 排序，分页宽度不会改变有界候选池。
+        keep = np.lexsort((ids, -keys))[:self.size]
+        self.ids, self.keys = ids[keep], keys[keep]

@@ -36,14 +36,13 @@ export async function executeTaskJob(application: DurableRetrievalAgentService, 
         : await application.start(agent, application.operators ? buildSemanticTicketRequest(query!.original_query)
           : await buildFastTicketRequest(query!.original_query, { analyzer, signal }), signal)
       if (state.termination === 'backend_error') throw new RetrievalError('PROVIDER_UNAVAILABLE', state.stopExplanation ?? '检索来源暂时不可用。', { retryable: true })
-      if (application.operators) await application.operators.searchPlanned(agent, signal)
+      if (application.operators) await application.operators.searchAndFilter(agent, signal)
       return
     }
     const state = await application.ensureModelAccess(agent, signal)
     if (!state || state.phase === 'stopped') return
     if (application.operators && state.phase !== 'awaiting_clarification') {
-      await application.operators.searchPlanned(agent, signal)
-      await application.operators.filter(agent, undefined, signal)
+      await application.operators.searchAndFilter(agent, signal)
     }
     if (state.phase === 'awaiting_clarification') {
       // A replacement worker resumes unfinished independent branches with its new lease.

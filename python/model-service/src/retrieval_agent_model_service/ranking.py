@@ -166,7 +166,7 @@ def _profile(value: Any) -> dict[str, Any]:
             allow_empty=False,
         ),
         "embeddingBatchSize": _integer(value.get("embeddingBatchSize", 16), "embedding batch size", 1),
-        "minimumDenseScore": _number(value.get("minimumDenseScore", 0.1), "minimum dense score"),
+        "minimumDenseScore": _number(value.get("minimumDenseScore", 0.75), "minimum dense score"),
         "denseTopK": _integer(value.get("denseTopK", 15), "dense top K", 1),
         "modelDeadlineMs": _integer(value.get("modelDeadlineMs", 120_000), "model deadline", 100),
         "rerankerEnabled": value.get("rerankerEnabled", False),
@@ -190,7 +190,7 @@ def _profile(value: Any) -> dict[str, Any]:
 
 def profile_version(profile: dict[str, Any]) -> str:
     serializable = {
-        "version": "quick-hybrid-v1",
+        "version": "quick-hybrid-v2",
         "embeddingIdentity": profile["embeddingIdentity"],
         "rerankerIdentity": profile["rerankerIdentity"],
         "embeddingInstruction": profile["embeddingInstruction"],
@@ -204,7 +204,7 @@ def profile_version(profile: dict[str, Any]) -> str:
         "rerankTopN": profile["rerankTopN"],
     }
     encoded = _javascript_stable(serializable)
-    return f"quick-hybrid-v1:{hashlib.sha256(encoded.encode()).hexdigest()[:16]}"
+    return f"quick-hybrid-v2:{hashlib.sha256(encoded.encode()).hexdigest()[:16]}"
 
 
 def _javascript_stable(value: Any) -> str:
@@ -359,7 +359,7 @@ class RetrievalRankingBackend:
             "protocolVersion": RAG_PROTOCOL_VERSION,
             "loaded": True,
             "ranking": {
-                "strategy": "quick-hybrid-v1", "bm25f": BM25F_VERSION,
+                "strategy": "quick-hybrid-v2", "bm25f": BM25F_VERSION,
                 "dense": DENSE_RANKING_VERSION, "fusion": FUSION_VERSION,
                 "vectorCache": VECTOR_CACHE_FORMAT_VERSION, "preparationProgressSchema": 1,
             },
@@ -649,12 +649,11 @@ class RetrievalRankingBackend:
         hits = [
             {"documentId": document["id"], "score": float(scores[index])}
             for index, document in enumerate(documents)
-            if math.isfinite(float(scores[index])) and float(scores[index]) >= profile["minimumDenseScore"]
+            if math.isfinite(float(scores[index]))
         ]
         hits.sort(key=lambda item: (-item["score"], item["documentId"]))
-        # The threshold is only an eligibility guard. It must never turn dense
-        # recall into a full-corpus ranking consumed page by page.
-        hits = hits[:profile["denseTopK"]]
+        # Top-K 保底与严格阈值取并集，阈值命中不会被页宽截断。
+        hits = [hit for i, hit in enumerate(hits) if i < profile["denseTopK"] or hit["score"] > profile["minimumDenseScore"]]
         for rank, hit in enumerate(hits, start=1):
             hit["rank"] = rank
         return hits, {

@@ -14,6 +14,34 @@ const state = () => ({ inputGeneration: 2, phase: 'assessed', termination: 'acti
 } as unknown as RetrievalState)
 
 describe('public orchestration facts', () => {
+  it('does not treat a returned expert as delivery while filtering or reviewing', () => {
+    const s = { ...state(), expertTasks: state().expertTasks!.map(t => ({ ...t, status: 'completed' as const })) }
+    expect(projectOrchestration(s).stage).toBe('review')
+    expect(projectOrchestration({ ...s, operatorActivity: { inputGeneration: 2, operation: 'sem_filter', status: 'running', at: '' } }).stage).toBe('review')
+    expect(projectOrchestration({ ...s, operatorActivity: { inputGeneration: 2, operation: 'sem_agg', status: 'running', at: '' } }).stage).toBe('synthesis')
+  })
+  it('uses one actual operator request for context, never cumulative input usage', () => {
+    const view = projectOrchestration({ ...state(), budget: { operatorUsage: { reported_prompt_tokens: 80000 } },
+      contextManifests: [{ inputGeneration: 2, measurement: 'dsh_request', estimatedTokens: 1500, operator: {
+        operation: 'query_plan', metrics: { context: { measuredInputTokens: 1234, limit: 1000000, model: 'deepseek-v4.1-flash', operation: 'query_plan' } },
+      } }], operatorActivity: { inputGeneration: 2, operation: 'sem_filter', status: 'failed' },
+    } as unknown as RetrievalState)
+    expect(view.context).toMatchObject({ measuredInputTokens: 1234, limit: 1000000, source: 'operator' })
+    expect(view.retrieval.filterActivity).toBe('failed')
+    expect(view.clock.running).toBe(false)
+  })
+  it('shows historical operator estimates without inventing the old model capacity', () => {
+    const view = projectOrchestration({ ...state(), contextManifests: [{ inputGeneration: 2, measurement: 'dsh_request',
+      estimatedTokens: 1500, operator: { operation: 'query_plan' } }] } as unknown as RetrievalState)
+    expect(view.context).toMatchObject({ estimatedInputTokens: 1500, source: 'operator' })
+    expect(view.context?.limit).toBeUndefined()
+  })
+  it('reads planning usage from the budget after evidence admission strips dynamic metrics', () => {
+    const view = projectOrchestration({ ...state(), budget: { operatorUsage: { context: { measuredInputTokens: 9000, limit: 1000000, operation: 'query_plan' } } },
+      contextManifests: [{ inputGeneration: 2, measurement: 'dsh_request', estimatedTokens: 12000, operator: { operation: 'query_plan' } }],
+    } as unknown as RetrievalState)
+    expect(view.context).toMatchObject({ measuredInputTokens: 9000, limit: 1000000, source: 'operator' })
+  })
   it('projects the current predicate and bounded learning facts without publishing sampled IDs', () => {
     const view = projectOrchestration({ ...state(), expertTasks: [],
       query: { contract: { semanticPlan: { inputGeneration: 2, instruction: '解绑后仍合账，排除未解绑', keywords: ['解绑', '合账'], retrieval_expressions: ['取消副卡后继续扣费'], goal: { mode: 'all', count: null } } } },
@@ -25,12 +53,32 @@ describe('public orchestration facts', () => {
       quality: { precision_lower: .91, recall_lower: null } })
     expect(JSON.stringify(view.retrieval)).not.toContain('training_ids')
   })
+  it('reports expert knowledge carried by actual sample judgments, excluding planning and old inputs', () => {
+    const view = projectOrchestration({ ...state(), expertTasks: [],
+      budget: { operatorUsage: { learning: { input_revision: 2, stop_reason: 'sampling', concurrency: 128, batch_size: 1,
+        precision_target: .9, recall_target: .9, sample_size: 128, diversity_records: 25 } } },
+      contextManifests: [
+        { inputGeneration: 1, measurement: 'dsh_request', operator: { operation: 'sem_filter', knowledgeIds: ['old'] } },
+        { inputGeneration: 2, measurement: 'dsh_request', operator: { operation: 'query_plan', knowledgeIds: ['plan-only'] } },
+        { inputGeneration: 2, measurement: 'dsh_request', operator: { operation: 'sem_filter', knowledgeIds: ['expiry', 'billing'] } },
+      ],
+    } as unknown as RetrievalState)
+    expect(view.retrieval.learning).toMatchObject({ concurrency: 128, batchSize: 1, precisionTarget: .9, recallTarget: .9,
+      sampleSize: 128, diversityCount: 25, knowledgeEntryCount: 2, knowledgeRequestCount: 1 })
+  })
   it('drops old plan and learning progress after a condition revision', () => {
     const view = projectOrchestration({ ...state(), query: { contract: { semanticPlan: { inputGeneration: 1 } } },
       budget: { operatorUsage: { learning: { input_revision: 1, stop_reason: 'quality_passed', returned: 99 } } },
     } as unknown as RetrievalState)
     expect(view.retrieval.plan).toBeUndefined()
     expect(view.retrieval.learning).toBeUndefined()
+  })
+  it('projects the Agent-selected knowledge and reasons from the current plan', () => {
+    const routes = [{ entry_id: 'expiry', title: '宽带到期', reason: '解释到期后的资费状态' }]
+    const view = projectOrchestration({ ...state(), query: { contract: { semanticPlan: {
+      inputGeneration: 2, knowledge_routes: routes,
+    } } } } as unknown as RetrievalState)
+    expect(view.retrieval.plan?.knowledgeRoutes).toEqual(routes)
   })
   it('shows planning and missing-field limits for an empty current generation instead of candidate review', () => {
     const empty = { ...state(), expertTasks: [], candidates: [], query: { unresolvedConstraints: ['来源没有日期字段'], contract: { schemaVersion: 10 } } } as unknown as RetrievalState

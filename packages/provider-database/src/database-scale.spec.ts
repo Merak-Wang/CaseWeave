@@ -28,6 +28,24 @@ describe.skipIf(process.env.RETRIEVAL_AGENT_DATABASE_TEST !== '1')('database bou
     const admin = createPool(url)
     try { await admin.query(`DROP DATABASE ${name}`) } finally { await admin.end() }
   })
+  it('materializes all keyword IDs once while returning only the requested body window', async () => {
+    const records = Array.from({ length: 1200 }, (_, i) => ticket(String(i).padStart(4, '0'), '上海', i % 2 ? '宽带' : '到期'))
+    const gen = await db.importRecords('scale', records, 'bulk-keyword'); await db.publish('scale', gen)
+    const p = provider(), snapshot = await p.openSnapshot(principal)
+    const spec = { ...p.resolve({ target: 'ranked_cases', query: '宽带 到期', mode: 'keyword' }),
+      semanticHints: ['包年变包月'], keywordQuery: { terms: ['宽带', '到期'], operator: 'or' as const } }
+    const calls = vi.spyOn(db.pool, 'query')
+    const page = await p.search(principal, snapshot.snapshotId, spec, { topK: 100, maxScan: 50, stage: 'repair_search' })
+    expect(page.boundary.rankedHits).toBe(1200)
+    expect(page.candidates).toHaveLength(100)
+    expect(page.nextCursor).toBeTruthy()
+    const next = await p.search(principal, snapshot.snapshotId, spec, { topK: 100, maxScan: 50, stage: 'next_page', cursor: page.nextCursor! })
+    expect(next.candidates).toHaveLength(100)
+    expect(next.candidates.some(c => page.candidates.some(first => first.ref === c.ref))).toBe(false)
+    expect(calls.mock.calls.filter(([sql]) => String(sql).startsWith('INSERT INTO ra_search_candidate(run_id,ticket_id,keyword_hit'))).toHaveLength(1)
+    expect(calls.mock.calls.some(([sql]) => String(sql).includes('t.ticket_id>? ORDER BY t.ticket_id LIMIT'))).toBe(false)
+    calls.mockRestore()
+  }, 60_000)
   it('coalesces the same query across provider instances and rebuilds an interrupted result set', async () => {
     const generation = await db.importRecords('scale', [ticket('a'), ticket('b')], '1')
     await db.publish('scale', generation)

@@ -81,7 +81,7 @@ function createProfile(options: HybridRankingOptions): RankingProfileParams {
     rerankerInstruction: options.rerankerInstruction ?? RERANKER_INSTRUCTION,
     embeddingBatchSize: options.embeddingBatchSize ?? 16,
     modelDeadlineMs: options.modelDeadlineMs ?? 120_000,
-    minimumDenseScore: options.minimumDenseScore ?? 0.1,
+    minimumDenseScore: options.minimumDenseScore ?? 0.75,
     denseTopK: options.denseTopK ?? 15,
     fusion: {
       rankConstant: options.fusion?.rankConstant ?? 60,
@@ -97,7 +97,7 @@ function createProfile(options: HybridRankingOptions): RankingProfileParams {
 
 function profileVersion(profile: RankingProfileParams): string {
   const identity = {
-    version: 'quick-hybrid-v1',
+    version: 'quick-hybrid-v2',
     embeddingIdentity: profile.embeddingIdentity ?? null,
     rerankerIdentity: profile.rerankerIdentity ?? null,
     embeddingInstruction: profile.embeddingInstruction,
@@ -110,7 +110,7 @@ function profileVersion(profile: RankingProfileParams): string {
     rerankerEnabled: profile.rerankerEnabled,
     rerankTopN: profile.rerankTopN,
   }
-  return `quick-hybrid-v1:${createHash('sha256').update(stable(identity)).digest('hex').slice(0, 16)}`
+  return `quick-hybrid-v2:${createHash('sha256').update(stable(identity)).digest('hex').slice(0, 16)}`
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {

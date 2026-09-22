@@ -503,7 +503,7 @@
                 <text x="106" y="183" font-size="10" fill="#73816b" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">字面全匹配 · 跨字段</text>
                 <rect x="291" y="138" width="166" height="63" rx="10" fill="#fcfdf9" stroke="#cedcc4"/>
                 <text x="374" y="161" font-size="12" fill="#2c5736" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">向量检索</text>
-                <text x="374" y="183" font-size="10" fill="#73816b" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">原始问题 · Top-K</text>
+                <text x="374" y="183" font-size="10" fill="#73816b" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">原始问题 · Top 15 ∪ 阈值命中</text>
                 <text x="240" y="174" font-size="9" fill="#6e8460" text-anchor="middle" font-family="Consolas, monospace">PARALLEL</text>
               </g>
               <g filter="url(#card-shadow)">
@@ -576,7 +576,7 @@
             <p class="demo-explanation" id="demo-explanation">将普通主题“副卡和跨域”解析为“副卡 OR 跨域”，跨字段枚举任一主题的字面命中，同时对原始问题做向量召回。明确要求“两者同时出现”时才使用 AND；候选由 Agent 再按完整请求复核。</p>
             <div class="demo-modules" id="demo-modules">
               <div class="demo-module"><span class="module-top">路径 A / 关键词</span><strong>副卡 OR 跨域</strong><p>枚举全部字面命中，分页呈现。</p></div>
-              <div class="demo-module"><span class="module-top">路径 B / 向量</span><strong>原始 query → Top-K</strong><p>找到语义相近、表达不同的候选。</p></div>
+              <div class="demo-module"><span class="module-top">路径 B / 向量</span><strong>原始 query → Top 15 ∪ 阈值命中</strong><p>相似度 &gt; 0.75 全部召回，每批 100 条，不足时补足 Top 15。</p></div>
             </div>
             <p class="demo-principle" id="demo-principle">原句向量与查询规划并行，关键词宽召回与语义改写补充候选；完整业务条件决定确认结果。</p>
           </div>
@@ -704,7 +704,7 @@
       {
         role: 'QUERY UNDERSTANDING → RETRIEVAL', title: '让两条检索路径同时出发。',
         explanation: '将普通主题“副卡和跨域”解析为“副卡 OR 跨域”，跨字段枚举任一主题的字面命中，同时对原始问题做向量召回。明确要求“两者同时出现”时才使用 AND；候选由 Agent 再按完整请求复核。',
-        modules: [['路径 A / 关键词', '副卡 OR 跨域', '枚举全部字面命中，分页呈现。'], ['路径 B / 向量', '原始 query → Top-K', '找到语义相近、表达不同的候选。']],
+        modules: [['路径 A / 关键词', '副卡 OR 跨域', '枚举全部字面命中，分页呈现。'], ['路径 B / 向量', '原始 query → Top 15 ∪ 阈值命中', '相似度 > 0.75 全部召回，每批 100 条，不足时补足 Top 15。']],
         principle: '原句向量与查询规划并行，关键词宽召回与语义改写补充候选；完整业务条件决定确认结果。',
         evidenceTitle: '候选工单', evidenceCaption: '三条虚构样例',
         tickets: [{i: 0, status: '检索线索', text: '标题出现“副卡”，处理记录出现“跨域”。'}, {i: 1, status: '检索线索', text: '向量路径召回；需要进一步核对业务含义。'}, {i: 2, status: '检索线索', text: '语义近邻候选；相似度不等于符合要求。'}],

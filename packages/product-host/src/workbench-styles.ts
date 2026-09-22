@@ -271,6 +271,17 @@ dialog select { width: 100%; }
 .learning-metrics strong { font-size: 20px; font-weight: 550; font-variant-numeric: tabular-nums; }
 .learning-metrics span { color: var(--muted); font-size: 11px; }
 .learning-progress[data-state=quality_not_met] { border-left: 3px solid var(--accent); }
+.learning-progress[data-state=failed] { border-left: 3px solid var(--accent); }
+.learning-stages { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; list-style: none; padding: 0; margin: 16px 0; }
+.learning-stages li { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); }
+.learning-stages li small { display: block; margin-top: 5px; font-size: 11px; }
+.learning-stages li[data-state=active], .learning-stages li[data-state=failed] { background: var(--tint); color: var(--accent); border-color: var(--accent); }
+.learning-stages li[data-state=done] { color: var(--text); }
+.model-comparison { width: 100%; margin: 14px 0 8px; border-collapse: collapse; font-size: 12px; }
+.model-comparison th, .model-comparison td { text-align: left; border-bottom: 1px solid var(--line); padding: 9px 6px; }
+.model-comparison tr[data-selected=true] { color: var(--accent); background: var(--tint); }
+.activity-item[data-kind=error] { color: var(--accent); }
+@media (max-width: 600px) { .learning-stages { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 .result-method { padding: 18px 20px; border: 1px solid #f0d3d0; background: #fff8f7; border-radius: 12px; margin-bottom: 20px; }
 .result-method > strong { font-size: 13px; }
 .result-method p { font-size: 12px; color: var(--muted); line-height: 1.8; }

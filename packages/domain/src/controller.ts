@@ -42,7 +42,7 @@ import { advanceRetrievalState, recordMeasuredBudget, recordRetrievalState, retr
 import { planExperts, findingPatch, type ExpertUpdate } from './experts.js'
 import { updateCandidateRanking } from './policy.js'
 import { admitOperatorDecisions, semanticPlanPatch, validateOperatorRecords, validateOperatorArtifact } from './semantic-operators.js'
-import type { SemanticQueryPlan, ContextManifest, OperatorDecision } from '@retrieval-agent/contracts'
+import type { SemanticQueryPlan, ContextManifest, OperatorDecision, TicketSearchProgress, TicketRetrievalSpec } from '@retrieval-agent/contracts'
 
 function frozenCandidate(candidate: TicketCandidate, evidence: readonly TicketEvidenceSegment[]): FrozenEvidencePack['candidates'][number] {
   const supporting = evidence.filter(item => item.candidateRef === candidate.ref)
@@ -449,13 +449,35 @@ export class RetrievalController {
     const patch = admitOperatorDecisions(state, generation, decisions)
     if (JSON.stringify(patch.judgments) === JSON.stringify(state.judgments)) return state
     // Publish the admitted authority once, so feedback and replay consume the same judgment.
-    this.#journal.append(state.retrievalId, 'retrieval/decision-submitted', { inputGeneration: generation,
+    this.#journal.append(state.retrievalId, 'retrieval/decision-submitted', { inputGeneration: generation, origin: 'semantic_operator',
       decision: { stateId: state.stateId, judgments: (patch.judgments ?? []).filter(j => decisions.some(d => d.ref === j.candidateRef)),
         gaps: [], action: { kind: 'inspect', fields: [] } } })
     return this.#record(state, patch)
   }
   recordSemanticSearch(state: RetrievalState, key: string): RetrievalState {
     return state.semanticSearchKeys?.includes(key) ? state : this.#record(state, { semanticSearchKeys: [...(state.semanticSearchKeys ?? []), key] })
+  }
+  /** 并行召回只合入当前窗口与数量；正文不为枚举全量命中而反复灌入任务。 */
+  recordDiscovery(state: RetrievalState, generation: number, spec: TicketRetrievalSpec, progress: TicketSearchProgress, complete = false): RetrievalState {
+    if (generation !== (state.inputGeneration ?? 0) || state.phase === 'stopped'
+      || progress.page.snapshotId !== state.snapshot?.snapshotId) throw new RetrievalError('INVALID_TRANSITION', '召回进度不属于当前任务范围。')
+    const merge = (previous: readonly TicketCandidate[]) => {
+      const rows = new Map(previous.map(c => [c.ref, c]))
+      for (const c of progress.page.candidates) {
+        const old = rows.get(c.ref)
+        rows.set(c.ref, old?.matchSignals && c.matchSignals ? { ...c, matchSignals: {
+          channels: [...new Set([...old.matchSignals.channels, ...c.matchSignals.channels])],
+          keywordTerms: [...new Set([...old.matchSignals.keywordTerms, ...c.matchSignals.keywordTerms])],
+        } } : c)
+      }
+      return [...rows.values()]
+    }
+    if (complete) this.#journal.append(state.retrievalId, 'retrieval/search-completed', { stage: 'repair_search', spec, page: progress.page, previewOnly: true })
+    const candidates = merge(state.candidates)
+    return this.#record(state, { phase: 'assessed', query: { ...state.query, spec }, searchProgress: progress,
+      candidates, candidateHistory: merge(state.candidateHistory), lastPage: progress.page,
+      allowedActions: [action('assess', candidates.map(c => c.ref)), action('repair_search'), action('read_state'),
+        ...(complete && progress.page.nextCursor ? [action('search_next')] : [])] })
   }
   registerResultCandidates(state: RetrievalState, generation: number, candidates: readonly import('@retrieval-agent/contracts').TicketCandidate[], modelId: string): RetrievalState {
     if (generation !== (state.inputGeneration ?? 0) || learnedResult(state)?.model_id !== modelId || candidates.some(c => c.snapshotId !== state.snapshot?.snapshotId)) throw new RetrievalError('INVALID_TRANSITION', '按需结果读取已过期。')

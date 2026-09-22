@@ -15,6 +15,26 @@ function record(id: string, title: string, body: string, region?: string) {
     problemDescription: body, conversationOrUpdates: [], resolutionSteps: [], errorCodes: [], piiRedactionStatus: 'not_applicable', ...(region ? { region } : {}) })
 }
 describe.skipIf(!enabled)('real MySQL / Milvus public provider and controller', () => {
+  it('pages grouped vector recall beyond 100 and fills the Top-15 floor', async () => {
+    const milvus = new MilvusClient(), name = `recall_${randomUUID().replaceAll('-', '')}`
+    const identity = { model: 'fixture', revision: 'v1', dimensions: 2, normalization: 'l2', metric: 'COSINE', chunkChars: 360, chunkVersion: 'field-codepoints-v3' } as const
+    const ids = Array.from({ length: 280 }, (_, i) => String(i))
+    try {
+      await milvus.ensureCollection(name, identity)
+      await milvus.call('entities/upsert', { collectionName: name, data: ids.flatMap((ticket_id, i) => [0, 1].map(part => {
+        const score = i < 260 ? .9 - i * .0001 : .6
+        return { id: `${ticket_id}-${part}`, ticket_id, content_hash: 'h', source_version: 'v1', field: 'title', part, start: 0, end: 1, text_hash: 'h',
+          vector: [score, Math.sqrt(1 - score * score)] }
+      })) })
+      async function* batches() { yield ids }
+      const hits = await milvus.searchBatches(name, [1, 0], batches(), 15, undefined, .75)
+      expect(hits).toHaveLength(260)
+      expect(new Set(hits.map(h => h.ticket_id)).size).toBe(260)
+      expect(hits.every(h => h.distance > .75)).toBe(true)
+      expect(await milvus.searchBatches(name, [1, 0], batches(), 15, undefined, .95)).toHaveLength(15)
+    } finally { await milvus.call('collections/drop', { collectionName: name }) }
+  }, 60_000)
+
   it('restores durable snapshots after the former demo deadline, while rejecting changed grants and sources', async () => {
     const db = new TicketDatabase(), dataset = `snapshot-lifecycle-${randomUUID()}`
     const model = new ModelServiceClient({ baseUrl: modelServiceUrl, embeddingModel: 'Qwen/Qwen3-Embedding-0.6B', embeddingRevision: '97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3', embeddingDimensions: 1024 })

@@ -58,10 +58,10 @@ export class MilvusClient {
   async searchCollection(name: string, vector: readonly number[], topK: number, signal?: AbortSignal): Promise<MilvusHit[]> {
     return this.searchFilter(name, vector, '', topK, signal)
   }
-  private async searchFilter(name: string, vector: readonly number[], filter: string, topK: number, signal?: AbortSignal): Promise<MilvusHit[]> {
+  private async searchFilter(name: string, vector: readonly number[], filter: string, topK: number, signal?: AbortSignal, offset = 0): Promise<MilvusHit[]> {
     signal?.throwIfAborted()
-    const hits = await this.call<MilvusHit[]>('entities/search', { collectionName: name, data: [vector], annsField: 'vector', filter, limit: topK,
-      groupByField: 'ticket_id', groupParams: { groupByField: 'ticket_id', groupSize: 1 },
+    const hits = await this.call<MilvusHit[]>('entities/search', { collectionName: name, data: [vector], annsField: 'vector', filter, limit: topK, offset,
+      groupingField: 'ticket_id', groupSize: 1,
       outputFields: ['ticket_id', 'content_hash', 'source_version', 'field', 'part', 'start', 'end', 'text_hash'],
       consistencyLevel: 'Strong', searchParams: { metricType: 'COSINE' } }, signal)
     signal?.throwIfAborted()
@@ -71,7 +71,7 @@ export class MilvusClient {
     async function* batches() { for (let i = 0; i < ticketIds.length; i += 1000) yield ticketIds.slice(i, i + 1000) }
     return this.searchBatches(name, vector, batches(), topK, signal)
   }
-  async searchBatches(name: string, vector: readonly number[], batches: AsyncIterable<readonly string[]>, topK: number, signal?: AbortSignal): Promise<MilvusHit[]> {
+  async searchBatches(name: string, vector: readonly number[], batches: AsyncIterable<readonly string[]>, topK: number, signal?: AbortSignal, threshold?: number): Promise<MilvusHit[]> {
     signal?.throwIfAborted()
     let best: MilvusHit[] = [], pending: Promise<MilvusHit[]>[] = []
     const abort = new AbortController(), combined = AbortSignal.any([abort.signal, ...(signal ? [signal] : [])])
@@ -82,16 +82,24 @@ export class MilvusClient {
       const unique = new Map<string, MilvusHit>()
       const hits = [...best, ...outcomes.flatMap(o => o.status === 'fulfilled' ? o.value : [])]
       for (const hit of hits.sort((a, b) => b.distance - a.distance || a.ticket_id.localeCompare(b.ticket_id))) if (!unique.has(hit.ticket_id)) unique.set(hit.ticket_id, hit)
-      best = [...unique.values()].slice(0, topK)
+      best = [...unique.values()].filter((hit, i) => i < topK || threshold !== undefined && hit.distance > threshold)
+    }
+    const recall = async (batch: readonly string[]) => {
+      const hits: MilvusHit[] = [], size = threshold === undefined ? topK : 100
+      // 每个授权分片至多 1000 个工单，分组分页不会撞到 Milvus 的深分页上限。
+      for (let offset = 0; offset < batch.length; offset += size) {
+        const page = await this.searchFilter(name, vector, `ticket_id in ${JSON.stringify(batch)}`, size, combined, offset)
+        if (page.some(h => !batch.includes(h.ticket_id))) throw new Error('Milvus returned an ID outside the authorized filter')
+        hits.push(...page)
+        if (threshold === undefined || page.length < size || page.at(-1)!.distance <= threshold) break
+      }
+      return hits.filter((hit, i) => i < topK || threshold !== undefined && hit.distance > threshold)
     }
     try {
       for await (const batch of batches) {
         combined.throwIfAborted()
         if (!batch.length) continue
-        const request = this.searchFilter(name, vector, `ticket_id in ${JSON.stringify(batch)}`, topK, combined).then(hits => {
-          if (hits.some(h => !batch.includes(h.ticket_id))) throw new Error('Milvus returned an ID outside the authorized filter')
-          return hits
-        })
+        const request = recall(batch)
         // Attach a rejection handler immediately, including while the next SQL batch is in flight.
         pending.push(request); void request.catch(error => { abort.abort(error) })
         if (pending.length === 4) await flush()

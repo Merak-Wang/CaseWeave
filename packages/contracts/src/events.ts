@@ -55,9 +55,9 @@ export interface RetrievalEventDataMap {
     readonly spec: TicketRetrievalSpec
   }
   'retrieval/snapshot-opened': { readonly snapshot: TicketSnapshot }
-  'retrieval/search-completed': { readonly stage: TicketSearchStage; readonly spec: TicketRetrievalSpec; readonly page: TicketSearchPage }
+  'retrieval/search-completed': { readonly stage: TicketSearchStage; readonly spec: TicketRetrievalSpec; readonly page: TicketSearchPage; readonly previewOnly?: boolean }
   'retrieval/knowledge-assessed': { readonly assessment: RetrievalKnowledgeAssessment }
-  'retrieval/decision-submitted': { readonly decision: RetrievalDecision; readonly inputGeneration?: number }
+  'retrieval/decision-submitted': { readonly decision: RetrievalDecision; readonly inputGeneration?: number; readonly origin?: 'semantic_operator' }
   /** Revision-zero checkpoint and the legacy v5-v8 cumulative state event. */
   'retrieval/state-recorded': { readonly state: RetrievalState }
   /** Revision one and later use a bounded transition in v9-v12 instead of another cumulative snapshot. */

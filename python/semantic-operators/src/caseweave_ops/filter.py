@@ -9,8 +9,8 @@ import numpy as np
 from scipy.sparse import vstack
 from threadpoolctl import threadpool_limits
 from .runtime import Runtime, CITATION_SCHEMA
-from .features import FeatureBlock, decode_block, random_keys, PrioritySample, learning_sample
-from .models import fit_models, choose_model
+from .features import FeatureBlock, decode_block, random_keys, PrioritySample
+from .models import fit_models, choose_model, model_bank
 from .quality import Region, quality_bounds
 from .types import Decision, ProtocolError, Record, verify_citations, digest
 
@@ -49,6 +49,12 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
         raise ValueError("Quality targets and delta must be between zero and one")
     call = runtime.resources
     key = runtime.predicate_key(instruction)
+    checkpoint_key = digest(['learned-ranked-resume-v2', key, require_source, required_fields,
+        {k: v for k, v in cfg.items() if k not in {'block_size', 'workers', 'concurrency'}}])
+    seeds = await call("features.seeds", {"refs": list(dict.fromkeys([*initial_refs, *(host_labels or {})]))})
+    checkpoint = runtime.store.learning_checkpoint(runtime.scope.key, checkpoint_key)
+    if checkpoint and checkpoint['stats']['feature_id'] != seeds.get('feature_id'):
+        checkpoint = None
     previous = runtime.store.output(runtime.scope.key, "learned_measurement", key)
     measurement = (previous or {}).get("round", 0) + 1
     runtime.store.save(runtime.scope.key, "learned_measurement", key, {"round": measurement})
@@ -57,19 +63,38 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
              "scan_passes": 0, "fit_count": 0, "teacher_unique_records": 0,
              "training_records": 0, "selection_records": 0, "audit_records": 0,
              "scan_seconds": 0., "fit_seconds": 0., "predict_seconds": 0.,
-             "global_semantic_recall": "not_established", "task_semantics": "full_authorized_scope"}
-    labels = {}
+             "global_semantic_recall": "not_established", "task_semantics": "full_authorized_scope",
+             "sampling_phase": "discovery", "sampling_method": "ngram_vector_desc",
+             "training_sampling_method": "ngram_vector_desc", "selection_sampling_method": "ranked_interleaved_holdout",
+             "audit_sampling_method": "srs_without_replacement_per_frozen_region"}
+    labels, models, pool_order, selection_ids = {}, [], np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+    priorities = {}
+    model_labels = {}
+    unresolved_evidence = {}
+
+    def save_checkpoint():
+        # 缓存有界排序池、选择集和小模型；续跑复用分数与划分，全集向量仍在 Provider。
+        runtime.store.save_learning_checkpoint(runtime.scope.key, checkpoint_key,
+            {'stats': stats.copy(), 'pool_order': pool_order, 'selection_ids': selection_ids,
+             'models': models, 'model_labels': model_labels, 'priorities': priorities})
 
     async def update(reason, **extra):
+        stats.update(positive_records=sum(v == 1 for v in labels.values()),
+                     negative_records=sum(v == 0 for v in labels.values()),
+                     undetermined_records=sum(v < 0 for v in labels.values()), batch_size=batch_size,
+                     concurrency=cfg['concurrency'], sample_size=cfg['sample_size'],
+                     precision_target=cfg['precision_target'], recall_target=cfg['recall_target'])
         stats.update(stop_reason=reason, **extra)
+        if reason in {'needs_selection_coverage', 'needs_coverage', 'needs_information', 'quality_passed', 'quality_not_met'}:
+            save_checkpoint()
         await call("learning.update", {**stats, "_usage": runtime.store.metrics(runtime.scope.task_id)})
 
-    async def scan():
+    async def scan(*, ranked=False):
         cursor, count, valid = None, 0, 0
         start = perf_counter()
         while True:
             await runtime.scope.check()
-            page = await call("features.scan", {"cursor": cursor, "page_size": cfg["block_size"]})
+            page = await call("features.scan", {"cursor": cursor, "page_size": cfg["block_size"], "ranked": ranked})
             block = decode_block(page)
             if "feature_id" in stats and stats["feature_id"] != page["feature_id"]:
                 raise ValueError("Feature generation changed during filtering")
@@ -94,112 +119,205 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
             np.concatenate([p.available for p in parts]), vstack([p.sparse for p in parts], format="csr") if parts[0].sparse is not None else None)
 
     async def ask(ids, phase):
-        ids = sorted(set(map(int, ids)) - labels.keys())
+        ids = [i for i in dict.fromkeys(map(int, ids)) if i not in labels]
+        status = 'auditing' if phase == 'independent_frozen_population_audit' else 'sampling'
+        await update(status, sampling_phase=phase)
         width = batch_size * cfg["concurrency"]
-        async def one(part):
-            response = await call("rows.read", {"ids": part})
-            rows = [Record.from_dict(row) for row in response["rows"]]
-            if len(rows) != len(part):
-                raise ValueError("Authorized sample cardinality changed")
-            return part, await judge_batch(runtime, rows, instruction,
+        async def one(part, rows):
+            decisions = await judge_batch(runtime, rows, instruction,
                 require_source=require_source, required_fields=required_fields)
+            for ident, row, decision in zip(part, rows, decisions):
+                if decision.label == 'undetermined' and not decision.error:
+                    unresolved_evidence[ident] = evidence_key(row)
+                else:
+                    unresolved_evidence.pop(ident, None)
+            return part, decisions
+        def evidence_key(row):
+            return digest([row.identity, [asdict(p) for p in row.passages], require_source, required_fields,
+                row.attributes.get('required_evidence_fields', [])])
         for start in range(0, len(ids), width):
-            jobs = await asyncio.gather(*(one(ids[i:i+batch_size])
-                for i in range(start, min(start+width, len(ids)), batch_size)))
+            # 一次读取本组样本正文，再按模型批宽并发判断，避免逐条读取阻塞所有模型请求。
+            window = ids[start:start+width]
+            response = await call("rows.read", {"ids": window})
+            rows = [Record.from_dict(row) for row in response["rows"]]
+            if len(rows) != len(window):
+                raise ValueError("Authorized sample cardinality changed")
+            fresh = []
+            for ident, row in zip(window, rows):
+                if unresolved_evidence.get(ident) == evidence_key(row):
+                    labels[ident] = -1
+                    stats['reused_unresolved_records'] = stats.get('reused_unresolved_records', 0) + 1
+                else:
+                    fresh.append((ident, row))
+            jobs = await asyncio.gather(*(one([i for i, _ in fresh[start:start+batch_size]],
+                [row for _, row in fresh[start:start+batch_size]]) for start in range(0, len(fresh), batch_size)))
             for part, decisions in jobs:
                 for ident, decision in zip(part, decisions):
                     labels[ident] = {"accept": 1, "exclude": 0, "undetermined": -1}[decision.label]
                     yield {"type": "decision", "value": asdict(decision)}
             stats["teacher_unique_records"] = len(labels)
             runtime.store.save(runtime.scope.key, "learned_labels", key,
-                {"feature_id": stats["feature_id"], "labels": labels})
-            await update("sampling", sampling_phase=phase)
+                {"feature_id": stats["feature_id"], "labels": labels, 'unresolved_evidence': unresolved_evidence})
+            await update(status, sampling_phase=phase,
+                         audit_records=stats['audit_records'] + sum(len(part) for part, _ in jobs) if status == 'auditing' else stats['audit_records'])
 
-    # 全域均匀探索与已有关键词/ANN 发现合并；仅对有界池做多样性选择。
-    pool = PrioritySample(cfg["pool_size"] + cfg["selection_size"])
-    async for block in scan():
-        ids = block.ids[block.available]
-        pool.add(ids, random_keys(ids, cfg["seed"]))
+    # 全域只传数值分数；正文按原句 n-gram/向量融合分数，从最高分开始有界读取。
+    if checkpoint:
+        stats.update({k: checkpoint['stats'][k] for k in ('feature_id', 'corpus_records', 'feature_records',
+            'missing_features', 'scan_passes', 'scan_seconds')})
+        pool_order = checkpoint['pool_order']
+        priorities.update(checkpoint['priorities'])
+    else:
+        pool = PrioritySample(cfg["pool_size"] + cfg["selection_size"])
+        await update('scanning')
+        async for block in scan(ranked=True):
+            ids = block.ids[block.available]
+            scores = block.scores[block.available] if block.scores is not None else np.zeros(len(ids))
+            pool.add(ids, scores)
+            await update('scanning', scanned_records=stats.get('scanned_records', 0) + len(block.ids))
+        pool_order = pool.ids
+        priorities.update(zip(map(int, pool.ids), map(float, pool.keys)))
     history = runtime.store.output(runtime.scope.key, "learned_labels", key)
     if history and history["feature_id"] == stats["feature_id"]:
         labels.update({int(i): int(v) for i, v in history["labels"].items()})
-    seeds = await call("features.seeds", {"refs": list(dict.fromkeys([*initial_refs, *(host_labels or {})]))})
+        unresolved_evidence.update({int(i): v for i, v in history.get('unresolved_evidence', {}).items()})
     seed_ids = np.asarray(seeds["ids"], dtype=np.int64)
+    priorities.update({int(i): float(v) for i, v in seeds.get('scores', {}).items()})
+    # 没有显式分数的旧 Provider 仍按种子给定顺序；已有全域分数不被占位分数覆盖。
+    for rank, ident in enumerate(seed_ids):
+        priorities.setdefault(int(ident), 1. - rank/max(1, len(seed_ids)))
+    pool_order = np.asarray(sorted(dict.fromkeys([*map(int, seed_ids), *map(int, pool_order)]),
+        key=lambda i: (-priorities[i], i)), dtype=np.int64)
     labels.update({int(i): int(v) for i, v in seeds.get("known_labels", {}).items()})
-    order = pool.ids[np.argsort(-pool.keys, kind="stable")]
-    order = order[~np.isin(order, list(labels))]
-    selection_size = min(cfg["selection_size"], max(1, len(order)//3))
-    selection_ids = order[:selection_size]
-    train_pool = np.setdiff1d(np.union1d(order[selection_size:], seed_ids), selection_ids)
-    if not len(train_pool):
+    # 新一轮可重读旧未决样本；已有确定标签继续复用，未决不能永久挡住补证。
+    labels = {i: v for i, v in labels.items() if v >= 0}
+    stats['teacher_unique_records'] = len(labels)
+    order = pool_order[~np.isin(pool_order, list(labels))]
+    resuming_selection = checkpoint and checkpoint['models'] and checkpoint['stats']['stop_reason'] in {
+        'training', 'sampling', 'resuming_selection', 'needs_selection_coverage'} and all(
+            labels.get(i) == v for i, v in checkpoint['model_labels'].items())
+    if resuming_selection:
+        models, model_labels = checkpoint['models'], checkpoint['model_labels']
+        selection_ids = checkpoint['selection_ids']
+        # 已训练模型继续等待选择样本；按分数补入尚未判断且不属于训练集的样本。
+        if checkpoint['stats']['stop_reason'] == 'needs_selection_coverage':
+            extra = order[~np.isin(order, selection_ids)][:cfg['selection_size']]
+            selection_ids = np.r_[selection_ids, extra]
+        stats.update({k: checkpoint['stats'][k] for k in ('fit_count', 'fit_seconds', 'training_records', 'training_ids')})
+        stats.update(reused_training_records=len(model_labels), reused_label_records=len(labels))
+        await update('resuming_selection', selection_records=len(selection_ids))
+    else:
+        if checkpoint:
+            selection_ids = checkpoint['selection_ids']
+        else:
+            # 排名相邻样本按 T/S/S/T 留出，避免稀少的前排正例全被训练消耗。
+            selection_size = min(cfg['selection_size'], max(1, len(order)//3))
+            positions = np.arange(len(order)) % 4
+            selection_ids = order[(positions == 1) | (positions == 2)][:selection_size]
+        if checkpoint:
+            await update('resuming_discovery', reused_label_records=len(labels), reused_training_records=0)
+    selection_set = set(map(int, selection_ids))
+    train_pool = np.asarray([i for i in pool_order if i not in selection_set], dtype=np.int64)
+    stats['selection_ids'] = selection_ids.tolist()
+    def next_training():
+        return [int(i) for i in train_pool if i not in labels][:cfg['sample_size']]
+    def next_discovery():
+        return [int(i) for i in pool_order if i not in labels][:cfg['sample_size']]
+    def training_classes():
+        return {v for i, v in labels.items() if v >= 0 and i not in selection_set}
+    def balance_unfitted_classes():
+        nonlocal selection_ids, train_pool
+        if checkpoint and checkpoint['models']:
+            return
+        # 首次拟合前按已知类别修正划分；每条只属一侧，至少两例才分给两侧。
+        for value in (1, 0):
+            held = [int(i) for i in pool_order if labels.get(int(i)) == value and i in selection_set]
+            trained = [int(i) for i in pool_order if labels.get(int(i)) == value and i not in selection_set]
+            if not trained and len(held) >= 2:
+                selection_set.remove(held[0])
+            elif not held and len(trained) >= 2:
+                selection_set.add(trained[0])
+        selection_ids = np.asarray([i for i in pool_order if i in selection_set], dtype=np.int64)
+        train_pool = np.asarray([i for i in pool_order if i not in selection_set], dtype=np.int64)
+        stats['selection_ids'] = selection_ids.tolist()
+    if not resuming_selection and not len(train_pool):
         await update("needs_coverage", unresolved=stats["corpus_records"], next_action="expand_discovery_or_use_explicit_small_scope_reference")
         return
-    data = await take(train_pool)
-    seed_scores = np.isin(data.ids, seed_ids).astype(float)
-    with threadpool_limits(limits=1):
-        train_ids = learning_sample(data.ids, data.dense, seed_scores, .5,
-                                    cfg["sample_size"], seed=cfg["seed"])
-    async for event in ask(train_ids, "training_discovery"):
-        yield event
-    # 单类先扩充表达覆盖。仍无两类就如实交回发现/澄清，不逐轮标完整库。
-    if len({v for v in labels.values() if v >= 0}) < 2:
-        remaining = ~np.isin(data.ids, list(labels))
-        with threadpool_limits(limits=1):
-            more = learning_sample(data.ids[remaining], data.dense[remaining], seed_scores[remaining],
-                                   .5, cfg["sample_size"], seed=cfg["seed"]+1) if remaining.any() else []
-        async for event in ask(more, "expanded_expression_coverage"):
+    if not resuming_selection:
+        await update('ranked_sampling', sampling_method='ngram_vector_desc', pool_records=len(train_pool))
+        async for event in ask(next_discovery(), "training_discovery"):
             yield event
-    train_ids = np.array(sorted(labels), dtype=np.int64)
-    if len({v for v in labels.values() if v >= 0}) < 2:
+        balance_unfitted_classes()
+    # 单类只继续下一个排序窗口；仍缺类别时报告缺口，续跑从尚未标注处继续。
+    if len(training_classes()) < 2:
+        async for event in ask(next_discovery(), "expanded_ranked_coverage"):
+            yield event
+        balance_unfitted_classes()
+    train_ids = np.array(list(model_labels) if resuming_selection else
+        [i for i, v in labels.items() if v >= 0 and i not in selection_set], dtype=np.int64)
+    if len(training_classes()) < 2:
         await update("needs_coverage" if any(v >= 0 for v in labels.values()) else "needs_information",
+                     training_ids=train_ids.tolist(), training_records=len(train_ids),
+                     missing_training_labels=[name for value, name in ((1, 'positive'), (0, 'negative')) if value not in training_classes()],
+                     discovery_remaining_records=sum(i not in labels for i in pool_order),
                      unresolved=stats["corpus_records"]-sum(v >= 0 for v in labels.values()),
-                     next_action="new_expressions_or_clarify_predicate" if any(v >= 0 for v in labels.values()) else "read_missing_facts")
+                     next_action="continue_ranked_discovery" if any(i not in labels for i in pool_order) else
+                         "new_expressions_or_clarify_predicate" if any(v >= 0 for v in labels.values()) else "read_missing_facts")
         return
-    train = await take(train_ids)
-    if len({labels[int(i)] for i in train.ids[train.available] if labels[int(i)] >= 0}) < 2:
-        await update("needs_coverage", unresolved=stats["corpus_records"]-sum(v >= 0 for v in labels.values()),
-                     next_action="prepare_features_for_observed_classes")
-        return
-    start = perf_counter()
-    models = fit_models({name: X[train.available] for name, X in train.views.items()},
-        np.array([labels[int(i)] for i in train.ids[train.available]]), workers=cfg["workers"], seed=cfg["seed"])
-    stats.update(fit_count=len(models), training_records=len(train_ids), fit_seconds=perf_counter()-start,
-                 training_ids=train_ids.tolist())
+    if not resuming_selection:
+        train = await take(train_ids)
+        if len({labels[int(i)] for i in train.ids[train.available] if labels[int(i)] >= 0}) < 2:
+            await update("needs_coverage", unresolved=stats["corpus_records"]-sum(v >= 0 for v in labels.values()),
+                         next_action="prepare_features_for_observed_classes")
+            return
+        start = perf_counter()
+        await update('training', candidate_models=[m.name for m in model_bank(sparse='sparse' in train.views)],
+                     training_records=len(train_ids))
+        models = fit_models({name: X[train.available] for name, X in train.views.items()},
+            np.array([labels[int(i)] for i in train.ids[train.available]]), workers=cfg["workers"], seed=cfg["seed"])
+        model_labels = {int(i): labels[int(i)] for i in train.ids[train.available]}
+        stats.update(fit_count=len(models), training_records=len(train_ids), fit_seconds=perf_counter()-start,
+                     training_ids=train_ids.tolist())
+    save_checkpoint()
     async for event in ask(selection_ids, "model_threshold_selection"):
         yield event
     stats["selection_records"] = len(selection_ids)
     stats["selection_ids"] = selection_ids.tolist()
     if len({labels[int(i)] for i in selection_ids if labels[int(i)] >= 0}) < 2:
-        await update("needs_selection_coverage", unresolved=stats["corpus_records"]-sum(v >= 0 for v in labels.values()),
-                     next_action="independent_selection_sample_with_positive_and_negative_support")
+        # 排序池耗尽后交回具体发现缺口，避免无新样本时反复请求续跑。
+        remaining = len(np.setdiff1d(pool_order, np.union1d(selection_ids, list(labels))))
+        await update("needs_selection_coverage" if remaining else "needs_coverage",
+                     selection_remaining_records=remaining,
+                     unresolved=stats["corpus_records"]-sum(v >= 0 for v in labels.values()),
+                     next_action="independent_selection_sample_with_positive_and_negative_support" if remaining else "new_expressions_or_clarify_predicate")
         return
     selection = await take(selection_ids)
-    # V 是全域简单随机样本。排除的训练 ID 本就取自其补集，无需类别平衡权重。
+    # 选择样本与训练分离；续补只作经验选模，最终质量仍由冻结后的独立总体抽验给出。
+    await update('selecting')
     winner, threshold, board = choose_model(models, selection.views,
         np.array([labels[int(i)] for i in selection.ids]), corpus_size=stats["corpus_records"],
         precision_target=cfg["precision_target"], recall_target=cfg["recall_target"])
     if not any(row["feasible_on_selection"] for row in board):
         # 可复现选择误差触发一次有目标的覆盖修正；没有收益就换表示，不循环标完库。
-        remaining = ~np.isin(data.ids, list(labels))
-        if remaining.any():
-            pool_views = {name: X[remaining] for name, X in data.views.items()}
-            with threadpool_limits(limits=1):
-                committee = [m.score(pool_views[m.view]) >= row["threshold"] for m, row in zip(models, board)]
-                more = learning_sample(data.ids[remaining], data.dense[remaining], winner.score(pool_views[winner.view]),
-                    threshold, cfg["sample_size"], committee=committee, seed=cfg["seed"]+2)
-            async for event in ask(more, "error_driven_disagreement_boundary_coverage"):
+        more = next_training()
+        if more:
+            async for event in ask(more, "expanded_ranked_coverage"):
                 yield event
-            train_ids = np.setdiff1d(np.array(sorted(labels)), selection_ids)
+            train_ids = np.array([i for i, v in labels.items() if v >= 0 and i not in selection_set], dtype=np.int64)
             train = await take(train_ids)
             start = perf_counter()
+            await update('training', training_records=len(train_ids))
             models = fit_models({name: X[train.available] for name, X in train.views.items()},
                 np.array([labels[int(i)] for i in train.ids[train.available]]), workers=cfg["workers"], seed=cfg["seed"])
+            model_labels = {int(i): labels[int(i)] for i in train.ids[train.available]}
             stats["fit_seconds"] += perf_counter()-start
+            await update('selecting')
             winner, threshold, board = choose_model(models, selection.views,
                 np.array([labels[int(i)] for i in selection.ids]), corpus_size=stats["corpus_records"],
                 precision_target=cfg["precision_target"], recall_target=cfg["recall_target"])
             stats.update(fit_count=stats["fit_count"]+len(models), training_records=len(train_ids), training_ids=train_ids.tolist())
     stats.update(models=board, selected_model=winner.name, threshold=threshold)
+    await update('predicting', predicted_records=0)
     model_id = digest([key, winner.name, threshold, sorted(labels.items()), str(uuid4())])
     await call("predictions.begin", {"model_id": model_id, "predicate_key": key,
         "feature_id": stats["feature_id"], "input_revision": runtime.scope.input_revision,
@@ -236,6 +354,7 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
             "ids": block.ids.tolist(), "labels": predictions.tolist(),
             "scores": np.where(np.isfinite(scores), scores, 0).tolist()})
         scanned += len(block.ids)
+        await update('predicting', predicted_records=scanned)
     audit_ids = np.concatenate([p.ids for p in pools.values()])
     async for event in ask(audit_ids, "independent_frozen_population_audit"):
         yield event
@@ -280,7 +399,7 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
 
 DECISION_SCHEMA = {"type": "object", "additionalProperties": False,
     "required": ["rows"], "properties": {"rows": {"type": "array", "items": {
-    "type": "object", "additionalProperties": False,
+    "type": "object",
     "required": ["ref", "label", "citations", "knowledge_ids", "reason"],
     "properties": {"ref": {"type": "string"}, "label": {"enum": ["accept", "exclude", "undetermined"]},
         "citations": {"type": "array", "items": CITATION_SCHEMA},
@@ -370,21 +489,12 @@ async def _judge_ready(runtime: Runtime, records: list[Record], instruction: str
                 return False
         return True
     result = await runtime.call("sem_filter", instruction,
-        {"records": model_rows, "requested_refs": [r.ref for r in records],
+        {"records": model_rows,
          "review_stage": "criterion_gaps" if review else "initial",
-         "output_instructions": ("本轮专门核对缺失条件。先从原始请求列出必要事实，再逐一核对每条记录。"
-             "reason 必须逐项简述各必要事实对应的材料依据或缺项。不要概括为主题相符。"
-             "特别区分已知的变化结果与未记载的变化前状态；结果不能反推原状态。"
-             "所引句必须结合前后对话确定对象和时点：正在介绍、推荐或准备办理的新方案，不能证明原先方案的属性。"
-             "短句存在省略、指代或转写歧义时，核查相邻问答；若仍存在导致必要条件不成立的合理解释，标记 undetermined 并说明歧义，不选最有利于命中的解释。"
-             "任一必要事实缺失即 undetermined，明确相反才 exclude，全部有据才 accept。"
-             "不因记录被送来复核就认为它此前已通过，也不增加用户未要求的必要条件。" if review else "") +
-             "输出 rows.ref 和 citations.ref 使用记录 alias（@r1 等），citations.passage_id 使用该记录内的段落 alias（@p1 等）。"
-             "quote 必须逐字复制该段落中的连续短句；不能引用同一工单的其他段落代替。"
-             "accept 必须逐项有据地满足用户明确的对象、原状态、变化、时序及其他限定，不能只满足其中一部分。"
-             "attributes.unresolved_issue 是该工单此前尚未解决的疑点，不是来源事实或新增要求。若本轮改为 accept，reason 须说明哪段证据消除了该疑点，或先前疑点与哪段原文矛盾；重复读取、追加无关字段不能自行解决原有歧义。"
-             "缺少某项事实时用 undetermined 并说明缺项；主题相近、日期或行业惯例不能补出材料未记载的状态或类型，不能为凑足数量放宽条件。"
-             "确定标签必须引用每个 required_fields 的 source 原文，displayId 不证明业务事实。每条仅给决定性引文和简短事实理由。",
+         "output_instructions": ("独立复核全部查询条件，不能由结果反推原状态。" if review else "") +
+             "逐条返回 accept（全部满足）、exclude（明确不符）或 undetermined（证据不足），reason 简述依据或缺项。"
+             "引用用记录/段落 alias（@r1/@p1），quote 为原文连续短句；required_fields 须有 source 引用。"
+             "已有疑点未被证据解决时保留未决。knowledge_ids 只填实际用到的知识。仅调用 submit_result 一次，不输出思考过程。",
          "require_source": require_source, "required_fields": required_fields}, DECISION_SCHEMA, cache_if=cacheable, use_cache=use_cache)
     # 保留每个 ref 的全部返回项，用数量检查识别缺失和重复，而不是静默覆盖。
     by_ref: dict[str, list[dict[str, Any]]] = {}

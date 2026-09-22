@@ -328,6 +328,18 @@ function accept(ref: TicketCandidateRef) {
 }
 
 describe('RetrievalController', () => {
+  it('merges discovery beside learning without replacing judgments and rejects an obsolete generation', async () => {
+    const { controller, journal } = setup()
+    const initial = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡' })
+    const learning = { input_revision: 0, fit_count: 4, stop_reason: 'predicting' }
+    const state = controller.recordOperatorUsage(initial, 0, { learning })
+    const page = state.lastPage!, progress = { page, channels: [{ channel: 'keyword' as const, status: 'completed' as const, count: 5000 }], timings: {} }
+    const next = controller.recordDiscovery(state, 0, state.query.spec, progress, true)
+    expect(next.judgments).toEqual(state.judgments)
+    expect(next.budget.operatorUsage?.learning).toEqual(learning)
+    expect(foldRetrievalEvents(journal.read(next.retrievalId), next.retrievalId)).toEqual(next)
+    expect(() => controller.recordDiscovery({ ...next, inputGeneration: 1 }, 0, state.query.spec, progress)).toThrow(/当前任务/)
+  })
   it('keeps same-generation learning progress when a model failure settles usage', async () => {
     const { controller } = setup()
     let state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡' })

@@ -75,9 +75,11 @@ describe('public decision tool', () => {
         'retrieval-agent:shipped-persona', 'retrieval-agent:policy', 'retrieval-agent:evidence-review', 'retrieval-agent:collaboration',
       ]))
       const system = renderPrompt(assembly)
-      expect(system).toContain('默认采用标题与摘要优先')
-      expect(system).toContain('用户已回答的口径持续有效')
-      expect(system).toContain('不能改成“只有A和B都完成才排除”')
+      expect(system).toContain('标题、摘要和字段足够时')
+      expect(system).toContain('已有回答持续有效')
+      expect(system).toContain('保留“或/且”关系')
+      expect(system).toContain('任一排除项成立则 exclude')
+      expect(system.length).toBeLessThan(1800)
     } finally { await ctx.fiber.dispose() }
   })
   it('identifies the missing delegate scope and the actual nested error instead of unrelated action examples', async () => {
@@ -87,14 +89,14 @@ describe('public decision tool', () => {
       expect(delegate.isError).toBe(true)
       expect(JSON.stringify(delegate.content)).toContain('action.assignments[0].scope')
       const missingKind = await execute({ ...base, action: { reason: 'satisfied', explanation: '摘要足以回答' } })
-      expect(JSON.stringify(missingKind.content)).toContain('action.kind is required')
+      expect(JSON.stringify(missingKind.content)).toContain('action.kind 必填')
       const serialized = await execute({ ...base, action: JSON.stringify({ kind: 'finish', reason: 'incomplete', explanation: '缺少事实' }) })
-      expect(JSON.stringify(serialized.content)).toContain('action must be a JSON object')
+      expect(JSON.stringify(serialized.content)).toContain('action 必须为对象')
       const nested = await execute({ ...base, judgments: [{ candidate_alias: 'c1', verdict: 'exclude', evidence_aliases: ['c1'], reason: '矛盾',
         conflict_resolution: { kind: 'business_scope', reason: '来源说明', evidence_aliases: ['e1'], evidence_aliases_note: '不应存在的字段' } }],
         action: { kind: 'finish', reason: 'satisfied', explanation: '实际依据' } })
-      expect(JSON.stringify(nested.content)).toContain('Fix the exact nested field')
-      expect(JSON.stringify(nested.content)).not.toContain('Finish requires')
+      expect(JSON.stringify(nested.content)).toContain('修正报错字段')
+      expect(JSON.stringify(nested.content)).not.toContain('finish 填 reason')
       expect(decisions).toEqual([])
     } finally { await ctx.fiber.dispose() }
   })

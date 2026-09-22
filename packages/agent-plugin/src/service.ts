@@ -194,6 +194,11 @@ export class RetrievalAgentService extends Service {
     const entry = this.entry(agent)
     return this.mutate(entry, async state => entry.controller.recordSemanticSearch(state, key))
   }
+  async recordDiscovery(agent: Agent, generation: number, spec: import('@retrieval-agent/contracts').TicketRetrievalSpec,
+    progress: import('@retrieval-agent/contracts').TicketSearchProgress, complete = false): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => entry.controller.recordDiscovery(state, generation, spec, progress, complete))
+  }
   async hydrateResultCandidates(agent: Agent, refs: readonly import('@retrieval-agent/contracts').TicketCandidateRef[], signal?: AbortSignal): Promise<RetrievalState> {
     const state = this.current(agent), result = learnedResult(state), provider = this.ctx.ticketRetrievalProvider
     const missing = refs.filter(ref => !state.candidates.some(c => c.ref === ref))
@@ -385,7 +390,7 @@ export class RetrievalAgentService extends Service {
     return await this.mutate(entry, async state => entry.controller.recordToolCall(state, input))
   }
 
-  async principal(agent: Agent, operation: 'detail_read' | 'evidence_read' | 'export' | 'snapshot_open', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
+  async principal(agent: Agent, operation: 'detail_read' | 'evidence_read' | 'export' | 'snapshot_open' | 'search', signal?: AbortSignal): Promise<TrustedPrincipalContext> {
     return await this.resolvePrincipal(agent, operation, signal)
   }
 

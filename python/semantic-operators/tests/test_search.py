@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 import pytest
 from caseweave_ops import *
 from caseweave_ops.search import PLAN_SCHEMA, validate_plan
@@ -18,6 +19,40 @@ def test_first_plan_is_one_llm_call_and_no_boolean_ast(make_runtime):
     assert rt.model.calls==1 and p["goal"]=={"mode":"all","count":None}
     assert p["keywords"]==["副卡","解绑"] and "hard" not in p and "keyword_ast" not in p
     assert p["original"].endswith("先显示20条")
+
+
+@pytest.mark.parametrize("routes", [[], [{"entry_id": "expiry", "reason": "理解到期后的资费变化"}]])
+def test_planning_routes_only_catalog_knowledge_in_the_same_call(make_runtime, routes):
+    context = json.dumps({"knowledge_catalog": [{"id": "broadband", "entries": [{"id": "expiry"}]}]})
+    rt = make_runtime(lambda p, r: {**plan(), "knowledge_routes": routes})
+    result = asyncio.run(plan_query(rt, "宽带到期扣费", context))
+    assert result["knowledge_routes"] == routes
+    assert rt.model.calls == 1
+
+
+@pytest.mark.parametrize("routes", [None, [{"entry_id": "missing", "reason": "编造条目"}],
+    [{"entry_id": "expiry", "reason": "重复"}] * 2])
+def test_routing_rejects_missing_invented_or_duplicate_choices(make_runtime, routes):
+    context = json.dumps({"knowledge_catalog": [{"id": "broadband", "entries": [{"id": "expiry"}]}]})
+    rt = make_runtime(lambda p, r: {**plan(), **({"knowledge_routes": routes} if routes is not None else {})})
+    with pytest.raises(ProtocolError):
+        asyncio.run(plan_query(rt, "宽带到期扣费", context))
+    assert rt.model.calls == 2
+
+
+def test_planner_repairs_search_index_name_instead_of_requiring_nonexistent_evidence(make_runtime):
+    requests = []
+    def respond(payload, request):
+        requests.append(request)
+        value = adaptive_plan()
+        value['steps'][0]['params'] = {'required_fields': ['body' if len(requests) == 1 else 'problemDescription']}
+        return value
+    rt = make_runtime(respond)
+    context = json.dumps({'search_fields': ['body'], 'evidence_fields': [{'key': 'problemDescription'}]})
+    value = asyncio.run(plan_query(rt, '宽带到期扣费', context))
+    assert value['steps'][0]['params']['required_fields'] == ['problemDescription']
+    assert rt.model.calls == 2
+    assert 'Unknown evidence fields' in requests[-1]['messages'][0]['content']
 
 
 def test_plan_rejects_budget_and_invalid_dependencies():
@@ -127,7 +162,8 @@ def test_invalid_plan_gets_one_feedback_retry_and_model_can_repair():
             plan = await plan_query(runtime, '查找宽带案例')
             assert model.calls == 2 and plan['goal'] == {'mode': 'adaptive', 'count': None}
             # 重试请求携带校验原因，模型能看到具体失败原因并纠正
-            assert '未通过计划校验' in model.requests[1]
+            assert 'Only examples has an explicit positive result count' in model.requests[1]
+            assert 'submit_result' in model.requests[1]
         finally:
             store.close()
 
