@@ -8,6 +8,7 @@ export interface ReportCitation {
 }
 export interface ReportNarrative { paragraphs: { text: string; citations: string[] }[] }
 export interface RetrievalReport {
+  format?: 'summary'
   learning?: { modelId: string; featureId: string; quality: import('@retrieval-agent/contracts').LearnedResult['quality']; hashBasis: string }
   schemaVersion: 1; taskId: string; resultRevision: string; generatedAt: string; audience: 'operator' | 'handoff';
   confirmedCount: number; confirmedSetSha256: string; conclusion: string;
@@ -45,7 +46,7 @@ export function createRetrievalReport(state: RetrievalState, inputs: RetrievalRe
       reason: judgment?.reason ?? '历史确认未保存逐条理由。', citations: citations.filter(e => e.candidateRef === c.ref).map(e => e.id) }
   })
   const s = state.snapshot
-  return { schemaVersion: 1, taskId: state.retrievalId, resultRevision: result.resultRevision,
+  return { format: 'summary', schemaVersion: 1, taskId: state.retrievalId, resultRevision: result.resultRevision,
     ...(learnedResult(state) ? { learning: { modelId: learnedResult(state)!.model_id, featureId: learnedResult(state)!.feature_id,
       quality: learnedResult(state)!.quality, hashBasis: String(learnedResult(state)!.metadata.hash_basis) } } : {}),
     generatedAt: new Date().toISOString(), audience, confirmedCount: confirmedCount(state),
@@ -73,10 +74,11 @@ export function validateReportNarrative(value: unknown, report: RetrievalReport)
   const fail = (): never => { throw new RetrievalError('PROTOCOL_MISMATCH', '报告解释或引用未通过校验。') }
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).join() !== 'paragraphs') fail()
   const paragraphs = (value as ReportNarrative).paragraphs
-  if (!Array.isArray(paragraphs) || !paragraphs.length || paragraphs.length > 4) fail()
+  const paragraphLimit = report.format === 'summary' ? 2 : 4, textLimit = report.format === 'summary' ? 300 : 1000
+  if (!Array.isArray(paragraphs) || !paragraphs.length || paragraphs.length > paragraphLimit) fail()
   const allowed = new Set(report.citations.map(c => c.id))
   for (const p of paragraphs) {
-    if (!p || Object.keys(p).sort().join() !== 'citations,text' || typeof p.text !== 'string' || !p.text.trim() || p.text.length > 1000
+    if (!p || Object.keys(p).sort().join() !== 'citations,text' || typeof p.text !== 'string' || !p.text.trim() || p.text.length > textLimit
       || !Array.isArray(p.citations) || !p.citations.length || p.citations.length > 10
       || new Set(p.citations).size !== p.citations.length || p.citations.some(id => !allowed.has(id))) fail()
   }
@@ -89,7 +91,7 @@ const md = (value: unknown): string => String(value ?? '').replace(/[\\`*_[\]<>#
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
   : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, canonical(child)])) : value
 const stableJson = (value: unknown): string => JSON.stringify(canonical(value))
-export function reportMarkdown(r: RetrievalReport): string {
+function legacyReportMarkdown(r: RetrievalReport): string {
   const labels: Record<string, string> = { region: '地区', status: '状态', createdAt: '创建时间', product: '产品', ticketId: '工单编号' }
   const ops: Record<string, string> = { eq: '为', neq: '不是', gte: '不早于', lte: '不晚于', contains: '包含' }
   const conditions = (r.scope.conditions as { field: string; op: string; value: unknown }[]).map(c => `${labels[c.field] ?? c.field}${ops[c.op] ?? c.op}${String(c.value)}`).join('；')
@@ -101,7 +103,9 @@ export function reportMarkdown(r: RetrievalReport): string {
     `停止性质：${{ satisfied: 'Agent 判定本轮要求已满足', no_result: '本轮无可确认结果', incomplete: '本轮未完成' }[r.coverage.semanticStatus]}；当前表达式取完：${r.coverage.resultPagesExhausted ? '是' : '否'}。`,
     r.coverage.semanticRecallKnown ? '已记录语义覆盖判断。' : '未建立全库语义召回率；不能据此宣称找全。',
     ...(r.learning ? [`模型集合：${md(r.learning.modelId)}；特征代次：${md(r.learning.featureId)}。`,
-      `相对抽验标签的集合下界：Precision=${r.learning.quality.precision_lower}，Recall=${r.learning.quality.recall_lower}。这依赖固定总体、独立抽验及参考标签可靠性，不是业务真值保证。`,
+      r.learning.quality.basis === 'selection'
+        ? `模型选择集指标：Precision=${r.learning.quality.precision}，Recall=${r.learning.quality.recall}。${r.learning.quality.acceptance === 'fallback' ? '未达原目标，采用最佳模型预测，选择集查准率达到 60% 门槛' : '模型达标后直接预测'}；未进行独立抽验，指标不代表全库质量或单条置信度。`
+        : `历史抽验下界：Precision=${r.learning.quality.precision_lower}，Recall=${r.learning.quality.recall_lower}。这是旧版抽验记录，依赖参考标签可靠性，不是实际召回率。`,
       `集合指纹口径：${md(r.learning.hashBasis)}。`] : []),
     ...(r.coverage.assessment ? [`已核查：${md(r.coverage.assessment.checked.join('；'))}`, `剩余范围：${md(r.coverage.assessment.remaining.join('；') || '无另列范围')}`,
       `下一动作：${md(r.coverage.assessment.nextAction)}；预期价值：${md(r.coverage.assessment.nextActionValue)}`] : []),
@@ -114,4 +118,29 @@ export function reportMarkdown(r: RetrievalReport): string {
     '## 交付与使用', '', ...r.usage.map(t => `- ${md(t)}`), '', '## 来源与复现记录', '', `来源代次：${md(stableJson(r.scope.snapshot))}`,
     `已执行方向：${md(stableJson(r.coverage.searches))}`, `集合 SHA-256：${r.confirmedSetSha256}`, `可用正文字段：${md(r.scope.fields.map(f => `${f.label} (${f.key})`).join('、'))}`, '']
   return lines.join('\n')
+}
+
+function summaryReportMarkdown(r: RetrievalReport): string {
+  const fieldLabel = (field: string) => r.scope.fields.find(item => item.key === field)?.label
+    ?? ({ summary: '摘要', problemDescription: '问题描述', conversationOrUpdates: '沟通记录', resolution: '处理结果' } as Record<string, string>)[field]
+    ?? field
+  const citedIds = r.narrative.status === 'model' ? [...new Set(r.narrative.paragraphs.flatMap(p => p.citations))] : []
+  const citations = citedIds.map(id => ({ index: r.citations.findIndex(c => c.id === id), id }))
+    .filter(citation => citation.index >= 0).map(citation => ({ ...citation, value: r.citations[citation.index]! }))
+  const citationNumbers = new Map(citations.map((citation, index) => [citation.id, index + 1]))
+  const summary = r.narrative.status === 'model'
+    ? r.narrative.paragraphs.map(p => `${md(p.text)} ${p.citations.map(id => `[${citationNumbers.get(id)}](#ref-${citationNumbers.get(id)})`).join(' ')}`)
+    : [`已确认 ${r.confirmedCount} 条工单。`]
+  return [
+    `# 工单检索${r.audience === 'handoff' ? '交接' : '复核'}报告`, '',
+    `查询：${md(r.scope.originalQuery)}`, `确认数量：${r.confirmedCount}`, '',
+    '## 总结', '', ...summary, '',
+    ...(citations.length ? ['## 引用', '', ...citations.flatMap((entry, index) => [
+      `<a id="ref-${index + 1}"></a>`, `[${index + 1}] ${md(entry.value.displayId)}（${md(fieldLabel(entry.value.field))}）`,
+    ])] : []), '',
+  ].join('\n')
+}
+
+export function reportMarkdown(r: RetrievalReport): string {
+  return r.format === 'summary' ? summaryReportMarkdown(r) : legacyReportMarkdown(r)
 }

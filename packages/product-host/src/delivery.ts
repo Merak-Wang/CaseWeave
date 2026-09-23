@@ -10,7 +10,7 @@ export interface DeliveryAccess { state: RetrievalState; principal: TrustedPrinc
 export interface DeliveryOptions {
   access(id: string): Promise<DeliveryAccess>
   providerFor(agent: Agent): TicketRetrievalProvider
-  model?(agent: Agent, id: string, stage: 'write' | 'review', input: unknown, signal: AbortSignal, trace: (data: unknown) => Promise<void>): Promise<unknown>
+  model?(agent: Agent, id: string, input: unknown, signal: AbortSignal, trace: (data: unknown) => Promise<void>): Promise<unknown>
 }
 export function parseDelivery(value: unknown): { operationId: string; spec: DeliverySpec; retry: boolean } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RetrievalError('INVALID_REQUEST', '工件请求必须是对象。')
@@ -28,6 +28,19 @@ export function parseDelivery(value: unknown): { operationId: string; spec: Deli
 export const deliveryView = (d: DeliveryRecord) => ({ id: d.id, operationId: d.operation_id, ...d.spec_json,
   status: d.expires_at.getTime() <= Date.now() ? 'expired' : d.status, rowCount: d.row_count, byteCount: d.byte_count,
   contentSha256: d.content_sha256, error: d.error, expiresAt: d.expires_at.toISOString(), fileName: d.meta_json?.fileName })
+
+function reportModelInput(report: RetrievalReport) {
+  const citations = new Map(report.citations.map(c => [c.id, c]))
+  return { query: report.scope.originalQuery, requirements: report.scope.inputs.filter(i => ['supplement', 'answer'].includes(i.kind))
+    .slice(-30).flatMap(i => i.text ? [i.text] : []), conditions: report.scope.conditions, confirmedCount: report.confirmedCount,
+    tickets: report.examples.map(example => ({ title: example.title,
+      citations: example.citations.map(id => citations.get(id)).filter((c): c is NonNullable<typeof c> => Boolean(c))
+        .map(c => ({ id: c.id, field: c.field, text: c.text })) })) }
+}
+function structuredSummary(report: RetrievalReport): string {
+  const example = report.examples[0]?.title
+  return `本次查询“${report.scope.originalQuery.slice(0, 80)}”确认${report.confirmedCount}条工单。${example ? `代表案例：${example}。` : ''}`
+}
 
 export class TaskDeliveryHost {
   readonly store: MySqlDeliveryStore
@@ -57,17 +70,24 @@ export class TaskDeliveryHost {
     const run = this.running
     if (run) { run.abort.abort(); await this.store.release(run.job); await run.work }
   }
-  async current(taskId: string, resultRevision: string): Promise<DeliveryAccess> {
+  async current(taskId: string, resultRevision: string, operationId?: string): Promise<DeliveryAccess> {
     const access = await this.options.access(taskId), s = access.state
     if (s.phase !== 'stopped' || (s.frozenEvidence?.packId ?? s.stateId) !== resultRevision) throw new RetrievalError('INVALID_TRANSITION', '结果版本已变化，请刷新后重新生成。')
+    if (operationId?.startsWith('auto-report-') && s.termination === 'cancelled') throw new RetrievalError('INVALID_TRANSITION', '任务已取消，自动报告不再生成。')
     if (s.accessValidation !== 'current' || ['permission_blocked', 'snapshot_invalid'].includes(s.termination)) throw new RetrievalError('SNAPSHOT_INVALID', '来源或访问资格已失效，请重新复核。')
     return access
   }
   async request(taskId: string, value: unknown) {
     const { operationId, spec, retry } = parseDelivery(value)
-    const { state } = await this.current(taskId, spec.resultRevision)
+    const { state } = await this.current(taskId, spec.resultRevision, operationId)
     if (spec.kind !== 'report' && !confirmedCount(state)) throw new RetrievalError('CANDIDATE_NOT_FOUND', '尚无可下载的确认工单。')
     return deliveryView(await this.store.create(taskId, operationId, spec, retry))
+  }
+  async ensureAutomaticReport(taskId: string, resultRevision: string) {
+    const { state } = await this.current(taskId, resultRevision)
+    if (state.termination === 'cancelled') return undefined
+    const operationId = `auto-report-${createHash('sha256').update(`${taskId}\0${resultRevision}\0operator`).digest('hex').slice(0, 40)}`
+    return this.request(taskId, { operationId, kind: 'report', template: 'summary', audience: 'operator', resultRevision })
   }
   async report(taskId: string, revision: string, audience: RetrievalReport['audience']): Promise<RetrievalReport> {
     if (!['operator', 'handoff'].includes(audience)) throw new RetrievalError('INVALID_REQUEST', '报告用途无效。')
@@ -92,25 +112,16 @@ export class TaskDeliveryHost {
   private async run(job: DeliveryRecord, abort: AbortController): Promise<void> {
     const timer = setInterval(() => { void this.store.renew(job).catch(() => abort.abort()) }, 4000)
     try {
-      const { state, principal, agent } = await this.current(job.task_id, job.spec_json.resultRevision)
+      const { state, principal, agent } = await this.current(job.task_id, job.spec_json.resultRevision, job.operation_id)
       const report = await this.buildReport(state, job.spec_json.audience)
-      const check = async () => { abort.signal.throwIfAborted(); await this.current(job.task_id, job.spec_json.resultRevision) }
+      const check = async () => { abort.signal.throwIfAborted(); await this.current(job.task_id, job.spec_json.resultRevision, job.operation_id) }
       if (job.spec_json.kind === 'report') {
         if (this.options.model && report.citations.length) {
-          let reason = '模型解释未通过引用或独立来源校验。'
-          for (let attempt = 0; attempt < 2; attempt++) {
-            try {
-              const input = { ...report, scope: { ...report.scope, inputs: report.scope.inputs.slice(-30) }, correction: attempt ? reason : undefined }
-              const draft = validateReportNarrative(await this.options.model(agent, `${job.id}-${attempt}`, 'write', input, abort.signal,
-                trace => this.store.trace(job, `write-${attempt}`, trace)), report)
-              const review = await this.options.model(agent, `${job.id}-${attempt}`, 'review', { report: input, draft }, abort.signal,
-                trace => this.store.trace(job, `review-${attempt}`, trace)) as { supported?: boolean; reason?: string }
-              if (!review || Object.keys(review).sort().join() !== 'reason,supported' || review.supported !== true || typeof review.reason !== 'string' || !review.reason.trim()) throw new Error('独立来源校验未通过。')
-              report.narrative = { status: 'model', paragraphs: draft.paragraphs }; break
-            } catch (e) { await check(); reason = e instanceof RetrievalError ? e.publicMessage : '模型解释暂不可用或未通过独立来源校验。' }
-          }
-          if (report.narrative.status !== 'model') report.narrative = { status: 'structured', paragraphs: [], reason }
-        } else report.narrative.reason = report.citations.length ? '当前模型不可用，交付结构化说明。' : '没有适合模型解释的已确认可见引用，交付结构化说明。'
+          const narrative = validateReportNarrative(await this.options.model(agent, job.id, reportModelInput(report), abort.signal,
+            trace => this.store.trace(job, 'summary', trace)), report)
+          await check()
+          report.narrative = { status: 'model', paragraphs: narrative.paragraphs }
+        } else report.narrative.reason = structuredSummary(report)
         await check()
         const content = reportMarkdown(report)
         await this.store.append(job, content, report.confirmedCount)

@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { ModelCallMetrics } from './metrics/model-call.js'
+import { accumulateRuntimeMetrics } from '@retrieval-agent/domain'
 import { readTaskKnowledge } from './knowledge-view.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
@@ -13,10 +15,10 @@ import { applyQueryDelta, requireUserConstraints, estimateContextTokens } from '
 import type { RetrievalAgentService } from './service.js'
 import { DECISION_PARAMETERS, activeRef, evidenceRefs, exclusionChecksFromArguments } from './assessment.js'
 import { openWiki, revokedKnowledge } from './wiki-store.js'
-import { requestManifest } from './request-manifest.js'
-import { compactRetrievalSurface } from './working-context.js'
-import { inputContextTokens, installContextRecovery, requestTokens } from './context-recovery.js'
-import { toolFailureSignature } from './context-budget.js'
+import { requestManifest } from './context/manifest.js'
+import { compactRetrievalSurface } from './context/surface.js'
+import { inputContextTokens, installContextRecovery, requestTokens } from './context/recovery.js'
+import { toolFailureSignature } from './metrics/budget.js'
 import { EVIDENCE_REVIEW_POLICY } from './evidence-review-policy.js'
 
 interface WikiEntry { id: string; reference: string; releaseId: string; bodyMarkdown: string; scope: string; limitations: string[]; evidenceChecklist: string[] }
@@ -143,13 +145,21 @@ export class ExpertCoordinator {
         if (measured + (options.maxTokens ?? 2048) + 512 > capacity) throw new RetrievalError('CAPACITY_EXCEEDED', '专家上下文容量不足，保留来源并转交主 Agent。')
         await application.updateExpert(branch.parent, branch.generation, { kind: 'manifest', manifest: requestManifest(state, options, branch.task.id, measured) })
         let input = 0, output = 0
-        for await (const chunk of next()) {
-          if (chunk.type === 'usage') { input = inputContextTokens(chunk.usage); output = chunk.usage.outputTokens }
-          yield chunk
+        const metrics = new ModelCallMetrics(ctx, options, capacity)
+        let completed = false
+        try {
+          for await (const chunk of next()) {
+            metrics.push(chunk)
+            if (chunk.type === 'usage') { input = inputContextTokens(chunk.usage); output = chunk.usage.outputTokens }
+            if (chunk.type === 'finish') completed = !['error', 'aborted'].includes(chunk.reason.kind)
+            yield chunk
+          }
+        } finally {
+          const task = coordinator.current(branch).expertTasks!.find(t => t.id === branch.task.id)!
+          await application.updateExpert(branch.parent, branch.generation, { kind: 'task', taskId: task.id, patch: {
+            modelSteps: (task.modelSteps ?? 0) + 1, inputTokens: (task.inputTokens ?? 0) + input, outputTokens: (task.outputTokens ?? 0) + output,
+            runtimeMetrics: accumulateRuntimeMetrics(task.runtimeMetrics, metrics.finish(completed)) } })
         }
-        const task = coordinator.current(branch).expertTasks!.find(t => t.id === branch.task.id)!
-        await application.updateExpert(branch.parent, branch.generation, { kind: 'task', taskId: task.id, patch: {
-          modelSteps: (task.modelSteps ?? 0) + 1, inputTokens: (task.inputTokens ?? 0) + input, outputTokens: (task.outputTokens ?? 0) + output } })
       })()
     }, { global: true })
   }

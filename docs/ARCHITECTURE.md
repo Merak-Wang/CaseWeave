@@ -18,7 +18,7 @@ flowchart TD
   Q --> K[MySQL 关键词 OR 全集枚举]
   Q --> V2[语义改写与 Milvus 召回]
   V2 --> S
-  S --> O[Python filter：共享样本多模型与独立抽验]
+  S --> O[Python filter：最多128次抽样请求，选模预测或返回不知道]
   F[索引期准备的 ID 与连续向量/CSR] --> O
   O -->|DSH 标注样本、块级预测与质量| S
   O --> M[MySQL 批量结果集合]
@@ -43,6 +43,8 @@ flowchart TD
 语义能力只保留 filter、extract、agg。默认全集不逐条 LLM 强判，数值预测与真实 teacher 判断分开表达；集合句柄和质量对象随任务代次失效。确认数量、分页、报告和下载使用持久集合，已水合样本只作为证据窗口。具体调用与统计假设见 [算子设计](design/OPERATORS.md)。
 
 ## 2. 组件职责与技术选择
+
+运行时计量集中在 [agent-plugin/metrics](../packages/agent-plugin/src/metrics)，复用 DSH 官方用量、速度和上下文投影；[agent-plugin/context](../packages/agent-plugin/src/context) 负责工作视窗、历史整理、容量恢复与请求清单。宿主通过 [orchestration-metrics.ts](../packages/product-host/src/orchestration-metrics.ts) 汇总主 Agent、专家及算子回执，浏览器由 [workbench-metrics.js](../packages/product-host/src/workbench-metrics.js) 统一渲染圆环和用量详情，任务阶段与知识路由保留在原编排模块。
 
 | 组件 | 责任与输入/输出 | 技术起点与可替换边界 |
 | --- | --- | --- |

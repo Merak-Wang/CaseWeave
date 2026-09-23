@@ -121,10 +121,14 @@ export interface RetrievalAllowedAction {
 export interface ContextCompressionStats {
   readonly workingSetCount: number
   readonly capacityCount: number
+  readonly dshCount?: number
+  readonly dshFailures?: number
+  readonly dshActive?: boolean
   readonly last?: { readonly reason: 'working_set' | 'window_pressure' | 'provider_overflow'; readonly beforeTokens: number;
     readonly thresholdTokens: number; readonly limit: number; readonly at: string }
 }
 export interface RetrievalBudgetState {
+  readonly runtimeMetrics?: import('./runtime-metrics.js').RuntimeMetrics
   readonly operatorUsage?: Readonly<Record<string, unknown>>
   /** Latest full request usage, independent of the lifetime token totals. */
   readonly context?: { readonly estimatedInputTokens: number; readonly measuredInputTokens?: number;

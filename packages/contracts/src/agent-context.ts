@@ -12,6 +12,7 @@ export interface TicketContentOrigin {
 }
 export interface EvidencePosition { readonly candidateRef: TicketCandidateRef; readonly field: string; readonly part: number; readonly start: number }
 export interface ContextManifest {
+  readonly runtimeMetrics?: import('./runtime-metrics.js').RuntimeMetrics
   readonly operator?: { readonly pythonManifestId: string; readonly operation: string;
     readonly records: readonly import('./semantic-operators.js').OperatorRecord[]; readonly knowledgeIds: readonly string[];
     readonly catalog?: RetrievalKnowledgeCatalog; readonly metrics?: Readonly<Record<string, unknown>> }
@@ -66,6 +67,7 @@ export interface ExpertTask extends ExpertAssignment {
   readonly inputTokens?: number
   readonly outputTokens?: number
   readonly childSessionId?: string
+  readonly runtimeMetrics?: import('./runtime-metrics.js').RuntimeMetrics
   readonly failure?: string
   readonly finding?: ExpertFinding
   readonly context?: { readonly candidateRefs: readonly TicketCandidateRef[]; readonly candidateWindowRefs?: readonly TicketCandidateRef[]; readonly evidencePosition?: EvidencePosition;

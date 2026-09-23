@@ -48,6 +48,10 @@ class Usage:
                 raise ValueError("Cached prompt tokens cannot exceed total prompt tokens")
 
 
+class SamplingLimitReached(Exception):
+    """当前查询的样本判断请求已用完。"""
+
+
 class ArtifactStore:
     def __init__(self, path: str | Path = ":memory:", clock: Callable[[], float] = time.time):
         self.clock, self.lock = clock, threading.RLock()
@@ -76,10 +80,21 @@ class ArtifactStore:
         ''')
         self.db.commit()
 
-    def begin(self, task: str, scope: str, op: str, request: dict[str, Any]) -> str:
+    def sampling_calls(self, scope: Scope) -> int:
+        with self.lock:
+            return self.db.execute("""SELECT COUNT(*) FROM calls WHERE task=? AND op='sem_filter'
+                AND (json_extract(request_json, '$.input_revision')=? OR scope=?)""",
+                (scope.task_id, scope.input_revision, scope.key)).fetchone()[0]
+
+    def begin(self, task: str, scope: str, op: str, request: dict[str, Any], *, sampling_scope: Scope | None = None) -> str:
         ident = str(uuid.uuid4())
         # 请求发出前登记 running，后续所有结算都以该唯一调用 ID 为准。
         with self.lock, self.db:
+            # 检查与登记在同一临界区；并发初判和复核共用额度，续跑读取已有调用。
+            if sampling_scope is not None:
+                self.db.execute('BEGIN IMMEDIATE')
+                if self.sampling_calls(sampling_scope) >= 128:
+                    raise SamplingLimitReached()
             self.db.execute("INSERT INTO calls(id,task,scope,op,started,status,request_json) VALUES(?,?,?,?,?,'running',?)",
                             (ident, task, scope, op, self.clock(), canonical(request)))
         return ident
@@ -225,7 +240,7 @@ class Runtime:
 
     async def call(self, op: str, instruction: str, payload: Any, schema: dict[str, Any],
                    *, use_cache: bool | None = None, validate: Callable[[Any], Any] | None = None,
-                   cache_if: Callable[[Any], bool] | None = None) -> StructuredResult:
+                   cache_if: Callable[[Any], bool] | None = None, sampling: bool = False) -> StructuredResult:
         # 记录初始作用域，调用或缓存复用结束时据此拒绝已经过期的结果。
         await self.scope.check()
         initial_scope = self.scope.key
@@ -262,7 +277,8 @@ class Runtime:
             return StructuredResult(saved["payload"], saved["manifest_id"], True)
         # 发起网络请求前先落一条 running 记录，确保失败和取消也能完整结算。
         ident = self.store.begin(self.scope.task_id, self.scope.key, op,
-                                 {"model_identity": self.model.identity, **request})
+                                 {"model_identity": self.model.identity, "input_revision": self.scope.input_revision, **request},
+                                 sampling_scope=self.scope if sampling else None)
         request = {**request, "manifest_id": ident, "operation": op}
         usage = Usage()
         settled = False

@@ -2,7 +2,7 @@ import { RetrievalError, type OperatorRecord, type OperatorDecision, type Retrie
   type TicketCandidateRef, type TicketEvidenceSegment, type SemanticQueryPlan } from '@retrieval-agent/contracts'
 import { mergeCandidateJudgments } from './decision.js'
 import { operatorRequiredFields, requiredEvidenceFields } from './evidence-requirements.js'
-export { operatorRequiredFields } from './evidence-requirements.js'
+export { operatorRequiredFields, sourceEvidenceFields } from './evidence-requirements.js'
 
 /** 构造本条工单已授权的材料；新证据追加片段，不覆盖旧片段。 */
 export function operatorRecord(state: RetrievalState, candidate: TicketCandidate, evidence = state.promotedEvidence): OperatorRecord {

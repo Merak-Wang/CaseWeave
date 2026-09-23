@@ -4,9 +4,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type { RetrievalState } from '@retrieval-agent/contracts'
-import { requestManifest } from './request-manifest.js'
-import { contextCompactions, contextCompressionStats, inputContextTokens, installContextRecovery, requestTokens } from './context-recovery.js'
-export { contextCompressionStats } from './context-recovery.js'
+import { ModelCallMetrics } from './model-call.js'
+import { requestManifest } from '../context/manifest.js'
+import { contextCompactions, contextCompressionStats, inputContextTokens, installContextRecovery, requestTokens } from '../context/recovery.js'
+export { contextCompressionStats } from '../context/recovery.js'
 
 export interface RetrievalRuntimeBudgetApplication {
   modelContextTokenLimit?(agent: Agent): number | undefined
@@ -25,6 +26,7 @@ export interface RetrievalRuntimeBudgetApplication {
     readonly compression?: import('@retrieval-agent/contracts').ContextCompressionStats
   }): Promise<{ readonly accepted: boolean }>
   recordModelResponse(agent: Agent, input: {
+    readonly runtimeMetrics?: import('@retrieval-agent/contracts').RuntimeMetrics
     readonly modelLatencyMs: number
     readonly outputTokens: number
     readonly inputTokens?: number
@@ -110,13 +112,19 @@ export function installRetrievalRuntimeBudget(
       const startedAt = Date.now()
       let outputTokens = 0
       let inputTokens: number | undefined
+      const callMetrics = new ModelCallMetrics(ctx, options, modelContextWindow ?? 32000)
+      let completed = false
       try {
         for await (const chunk of next()) {
+          callMetrics.push(chunk)
           if (chunk.type === 'usage') { outputTokens = chunk.usage.outputTokens; inputTokens = inputContextTokens(chunk.usage) }
+          if (chunk.type === 'finish') completed = !['error', 'aborted'].includes(chunk.reason.kind)
           yield chunk
         }
       } finally {
+        const metrics = callMetrics.finish(completed)
         await application.recordModelResponse(agent, {
+          runtimeMetrics: metrics,
           modelLatencyMs: Date.now() - startedAt,
           outputTokens,
           ...(inputTokens === undefined ? {} : { inputTokens }),

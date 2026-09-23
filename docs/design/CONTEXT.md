@@ -68,7 +68,11 @@ CandidateStore 保留所有候选关系、当前资格、命中分支和最新�
 
 这是确定性结构化压缩，参考 [Hermes 的载荷裁剪、完整工具组与尾部保留](https://hermes-agent.nousresearch.com/docs/developer-guide/context-compression-and-caching/) 和 [OpenAI compaction](https://developers.openai.com/api/docs/guides/compaction)，没有让摘要模型重写证据事实。原始日志与 SQL 工件完整保留；补充条件后的过期专家产物只保留历史计数，不作为当前可采用 Finding。
 
-budget.context 持久化最近一次完整请求的 estimatedInputTokens、可用的 provider measuredInputTokens、limit、reservedTokens 与 compactionCount；工作台圆环显示输入占窗口比例，点击可见明细。DSH TokenUsage 的 inputTokens 只指未缓存部分，实际输入必须加上 cacheReadTokens 和 cacheWriteTokens；缓存命中仍占上下文。主/专家使用同一求和规则。供应商尚无回执时标为估算，尚无请求时显示待测量。累计消耗另行计量，不能当作上下文占用。compression 分别记录 workingSetCount 与 capacityCount，新的压缩注记保留 working_set/window_pressure/provider_overflow 原因、触发前估算、阈值和窗口；旧 Session 注记按其实际类型分类。工作集整理不等于窗口已满。输出消耗按主 Agent 与所有专家（含旧轮次和失败调用）的供应商 outputTokens 回执累计，不加输入/cache tokens；报告/Wiki 不混入检索回路计数。
+工作台复用 DSH `tokenUsage`、`sessionStats`、`contextPressure`、`contextBreakdown` 投影。主 Agent 圆环优先显示 `projectedTokens`：上次供应商输入回执加上当前视窗增减的估算，压缩后立即回落；详情另列上次实际输入与系统/工具/会话组成估算，组成估算不冒充供应商总量。尚无供应商回执时使用 `budget.context` 中最近请求的估算；没有窗口时不计算百分比。DSH 用量四桶彼此独立，输入占用包括未缓存输入、缓存读取和缓存写入，输出不重复加入 reasoning tokens。
+
+确定性历史整理在每次 surface 替换前同步追加官方 `compaction/prune`，用 `tokenMeter.measure()` 的节点价格扣除被替换内容；DSH 官方压缩继续由已配置的 `compaction-basic` 执行。界面区分工作集整理、容量重建和官方压缩的成功/进行中/失败状态；前两类保留触发原因、估算、阈值和窗口。压缩不会减少累计模型消耗，也不改变工单证据资格。
+
+算子每次调用独立使用官方统计投影，读数随原有请求清单保存；主 Agent 和专家随每次调用将官方用量桶与时间读数累计到任务回执。刷新、MySQL 恢复、旧代次和缓存复用不会重复累加。完整 DSH 日志尚未恢复时，部分日志不覆盖已有累计回执。速度为有输出回执的 `sum(decodeTokens) / (sum(decodeMs) / 1000)`，单位 tokens/s；平均首 token 延迟按有首 token 时间的请求计算。并行调用按请求耗时加总，不能理解为任务墙钟吞吐。历史缺失时间显示待计量，失败调用保留可用用量。报告/Wiki 后台调用不混入检索回路统计。
 
 ## 4. 多专家与判断准入
 

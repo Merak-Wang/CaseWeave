@@ -20,7 +20,7 @@ import type { RetrievalState } from '@retrieval-agent/contracts'
 import {
   installRetrievalRuntimeBudget,
   type RetrievalRuntimeBudgetApplication,
-} from './context-budget.js'
+} from './metrics/budget.js'
 
 const SIGNAL = new AbortController().signal
 

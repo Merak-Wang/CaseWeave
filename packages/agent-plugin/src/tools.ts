@@ -12,8 +12,8 @@ const POLICY = `你负责只读工单检索，首轮搜索已完成。用 ticket
 
 const OPERATOR_POLICY = `你协调只读工单检索，原句向量搜索与查询规划已完成。完整原句和用户补充决定范围，关键词与改写只用于召回。
 用 sem_filter 判断相关性，结果已保存，不逐条重判；缺证用 ticket_read 读取最少字段，随后自动复核。材料未变的未决项不重复判断；needs_selection_coverage 时再次 sem_filter 续补选型样本，复用已有标签和模型；needs_coverage 且 discovery_remaining_records>0 时可继续下一个排序窗口，无需重复补搜。
-指定 ID 只核实该工单；指定数量满足即停；未指定数量进入全集学习。全集须 learning.stop_reason=quality_passed 才能宣告完成，其他状态按 next_action 解决具体缺口。
-使用最新 state_id，串行修改任务。ticket_decide 提交缺口和下一动作，通常 judgments=[]，只自行处置明确专家分歧。finish 填 coverage：满足用 satisfied，核实范围内均排除用 no_result，其余说明 incomplete。调用量仅计量，故障如实报告；通过工具提交，不用文字答复替代。`
+指定 ID 只核实该工单；指定数量满足即停；未指定数量进入全集学习。抽样初判与命中复核累计最多 128 次模型请求，续跑共用额度，不再独立抽验。quality_passed 表示选择集达标；quality_fallback 表示未达原目标，采用训练效果最好的模型预测，选择集查准率至少 60%。两者均可交付模型确认集合，不宣称全库查全。
+model_unknown 表示不知道：最佳模型选择集查准率低于 60% 或额度内证据不足，只交付已确认工单，以 incomplete 结束；不得用补搜或定向判断绕过额度。使用最新 state_id，串行修改任务。ticket_decide 提交缺口和下一动作，通常 judgments=[]，只自行处置明确专家分歧。finish 填 coverage：满足用 satisfied，核实范围内均排除用 no_result，其余说明 incomplete。故障如实报告；通过工具提交，不用文字答复替代。`
 
 export interface RetrievalToolApplication {
   readonly operators?: import('./semantic-operators.js').SemanticOperators
@@ -62,7 +62,7 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
       },
     }))
     ctx.tools.register(defineTool({ name: 'sem_filter',
-      description: '省略 candidate_aliases：全集学习与独立抽验，或指定数量任务的下一批判断；传入别名：定向判断。沿用用户判据，续跑复用标签和模型，按返回缺口补证或补召回。',
+      description: '省略 candidate_aliases：累计最多 128 次抽样请求后用最佳模型预测，选择集查准率低于 60% 则返回不知道及已确认工单；或指定数量任务的下一批判断。传入别名：定向判断。续跑复用额度、标签和模型，不做独立抽验。',
       parameters: { candidate_aliases: { type: 'array', items: { type: 'string' } } },
       output: { schema: { type: 'object', additionalProperties: false, properties: { state: { type: 'string', required: true } } }, render: (_args, value) => [{ type: 'text', text: value.state }] },
       presentCall: () => ({ card: 'generic', title: '批量复核工单', kind: 'execute' }),

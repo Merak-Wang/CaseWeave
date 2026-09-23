@@ -8,10 +8,9 @@ from typing import Any, AsyncIterable
 import numpy as np
 from scipy.sparse import vstack
 from threadpoolctl import threadpool_limits
-from .runtime import Runtime, CITATION_SCHEMA
-from .features import FeatureBlock, decode_block, random_keys, PrioritySample
+from .runtime import Runtime, CITATION_SCHEMA, SamplingLimitReached
+from .features import FeatureBlock, decode_block, PrioritySample
 from .models import fit_models, choose_model, model_bank
-from .quality import Region, quality_bounds
 from .types import Decision, ProtocolError, Record, verify_citations, digest
 
 async def sem_filter(runtime: Runtime, source: AsyncIterable[Record], instruction: str, *,
@@ -33,19 +32,19 @@ async def sem_filter(runtime: Runtime, source: AsyncIterable[Record], instructio
 async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
                          initial_refs=(), host_labels=None, require_source=True, required_fields=(), **_):
     cfg = {"block_size": 16384, "pool_size": 4096, "sample_size": 128,
-           "selection_size": 256, "validation_size": 512, "workers": 1,
-           "precision_target": .95, "recall_target": .95, "delta": .05,
+           "selection_size": 256, "workers": 1,
+           "precision_target": .95, "recall_target": .95,
            "seed": 0, "concurrency": 4}
     supplied = dict(options or {})
     # 旧 active 参数仅作迁移读取；区域污染容忍度不再冒充召回目标。
-    for old in ("proposal", "clusters", "accept_error", "reject_error"):
+    for old in ("proposal", "clusters", "accept_error", "reject_error", "validation_size", "delta"):
         supplied.pop(old, None)
     cfg.update(supplied)
     if runtime.resources is None:
         raise ValueError("Full-scope filter requires an authorized numeric feature provider")
-    if any(cfg[k] < 1 for k in ("block_size", "pool_size", "sample_size", "selection_size", "validation_size", "workers", "concurrency")):
+    if any(cfg[k] < 1 for k in ("block_size", "pool_size", "sample_size", "selection_size", "workers", "concurrency")):
         raise ValueError("Physical block/sample/worker sizes must be positive")
-    if not all(0 < cfg[k] < 1 for k in ("precision_target", "recall_target", "delta")):
+    if not all(0 < cfg[k] < 1 for k in ("precision_target", "recall_target")):
         raise ValueError("Quality targets and delta must be between zero and one")
     call = runtime.resources
     key = runtime.predicate_key(instruction)
@@ -55,18 +54,14 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
     checkpoint = runtime.store.learning_checkpoint(runtime.scope.key, checkpoint_key)
     if checkpoint and checkpoint['stats']['feature_id'] != seeds.get('feature_id'):
         checkpoint = None
-    previous = runtime.store.output(runtime.scope.key, "learned_measurement", key)
-    measurement = (previous or {}).get("round", 0) + 1
-    runtime.store.save(runtime.scope.key, "learned_measurement", key, {"round": measurement})
     stats = {"algorithm": "learned", "predicate_key": key, "input_revision": runtime.scope.input_revision,
              "corpus_records": 0, "feature_records": 0, "missing_features": 0,
              "scan_passes": 0, "fit_count": 0, "teacher_unique_records": 0,
-             "training_records": 0, "selection_records": 0, "audit_records": 0,
+             "training_records": 0, "selection_records": 0, "quality_basis": "selection",
              "scan_seconds": 0., "fit_seconds": 0., "predict_seconds": 0.,
              "global_semantic_recall": "not_established", "task_semantics": "full_authorized_scope",
              "sampling_phase": "discovery", "sampling_method": "ngram_vector_desc",
-             "training_sampling_method": "ngram_vector_desc", "selection_sampling_method": "ranked_interleaved_holdout",
-             "audit_sampling_method": "srs_without_replacement_per_frozen_region"}
+             "training_sampling_method": "ngram_vector_desc", "selection_sampling_method": "ranked_interleaved_holdout"}
     labels, models, pool_order, selection_ids = {}, [], np.array([], dtype=np.int64), np.array([], dtype=np.int64)
     priorities = {}
     model_labels = {}
@@ -79,15 +74,22 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
              'models': models, 'model_labels': model_labels, 'priorities': priorities})
 
     async def update(reason, **extra):
+        requests = runtime.store.sampling_calls(runtime.scope)
         stats.update(positive_records=sum(v == 1 for v in labels.values()),
                      negative_records=sum(v == 0 for v in labels.values()),
                      undetermined_records=sum(v < 0 for v in labels.values()), batch_size=batch_size,
                      concurrency=cfg['concurrency'], sample_size=cfg['sample_size'],
-                     precision_target=cfg['precision_target'], recall_target=cfg['recall_target'])
+                     precision_target=cfg['precision_target'], recall_target=cfg['recall_target'],
+                     sampling_requests=requests, sampling_request_limit=128, sampling_limit_reached=requests >= 128)
         stats.update(stop_reason=reason, **extra)
-        if reason in {'needs_selection_coverage', 'needs_coverage', 'needs_information', 'quality_passed', 'quality_not_met'}:
+        if reason in {'needs_selection_coverage', 'needs_coverage', 'needs_information', 'quality_passed', 'quality_fallback', 'model_unknown'}:
             save_checkpoint()
         await call("learning.update", {**stats, "_usage": runtime.store.metrics(runtime.scope.task_id)})
+
+    async def cannot_judge(reason, **extra):
+        await update('model_unknown', message='不知道：' + reason + '，仅返回已确认工单。',
+                     unresolved=stats['corpus_records']-sum(v >= 0 for v in labels.values()),
+                     next_action='return_confirmed_only', **extra)
 
     async def scan(*, ranked=False):
         cursor, count, valid = None, 0, 0
@@ -120,12 +122,14 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
 
     async def ask(ids, phase):
         ids = [i for i in dict.fromkeys(map(int, ids)) if i not in labels]
-        status = 'auditing' if phase == 'independent_frozen_population_audit' else 'sampling'
-        await update(status, sampling_phase=phase)
+        await update('sampling', sampling_phase=phase)
         width = batch_size * cfg["concurrency"]
         async def one(part, rows):
-            decisions = await judge_batch(runtime, rows, instruction,
-                require_source=require_source, required_fields=required_fields)
+            try:
+                decisions = await judge_batch(runtime, rows, instruction,
+                    require_source=require_source, required_fields=required_fields, sampling=True)
+            except SamplingLimitReached:
+                return [], []
             for ident, row, decision in zip(part, rows, decisions):
                 if decision.label == 'undetermined' and not decision.error:
                     unresolved_evidence[ident] = evidence_key(row)
@@ -136,6 +140,8 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
             return digest([row.identity, [asdict(p) for p in row.passages], require_source, required_fields,
                 row.attributes.get('required_evidence_fields', [])])
         for start in range(0, len(ids), width):
+            if runtime.store.sampling_calls(runtime.scope) >= 128:
+                break
             # 一次读取本组样本正文，再按模型批宽并发判断，避免逐条读取阻塞所有模型请求。
             window = ids[start:start+width]
             response = await call("rows.read", {"ids": window})
@@ -158,8 +164,7 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
             stats["teacher_unique_records"] = len(labels)
             runtime.store.save(runtime.scope.key, "learned_labels", key,
                 {"feature_id": stats["feature_id"], "labels": labels, 'unresolved_evidence': unresolved_evidence})
-            await update(status, sampling_phase=phase,
-                         audit_records=stats['audit_records'] + sum(len(part) for part, _ in jobs) if status == 'auditing' else stats['audit_records'])
+            await update('sampling', sampling_phase=phase)
 
     # 全域只传数值分数；正文按原句 n-gram/向量融合分数，从最高分开始有界读取。
     if checkpoint:
@@ -256,6 +261,10 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
     train_ids = np.array(list(model_labels) if resuming_selection else
         [i for i, v in labels.items() if v >= 0 and i not in selection_set], dtype=np.int64)
     if len(training_classes()) < 2:
+        if runtime.store.sampling_calls(runtime.scope) >= 128:
+            await cannot_judge('抽样请求已达 128 次，仍缺少可训练的正反例',
+                               training_ids=train_ids.tolist(), training_records=len(train_ids))
+            return
         await update("needs_coverage" if any(v >= 0 for v in labels.values()) else "needs_information",
                      training_ids=train_ids.tolist(), training_records=len(train_ids),
                      missing_training_labels=[name for value, name in ((1, 'positive'), (0, 'negative')) if value not in training_classes()],
@@ -281,9 +290,13 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
     save_checkpoint()
     async for event in ask(selection_ids, "model_threshold_selection"):
         yield event
-    stats["selection_records"] = len(selection_ids)
-    stats["selection_ids"] = selection_ids.tolist()
-    if len({labels[int(i)] for i in selection_ids if labels[int(i)] >= 0}) < 2:
+    observed_selection = np.array([i for i in selection_ids if i in labels], dtype=np.int64)
+    stats["selection_records"] = len(observed_selection)
+    stats["selection_ids"] = observed_selection.tolist()
+    if len({labels[int(i)] for i in observed_selection if labels[int(i)] >= 0}) < 2:
+        if runtime.store.sampling_calls(runtime.scope) >= 128:
+            await cannot_judge('抽样请求已达 128 次，选择样本不足以判断模型查准率')
+            return
         # 排序池耗尽后交回具体发现缺口，避免无新样本时反复请求续跑。
         remaining = len(np.setdiff1d(pool_order, np.union1d(selection_ids, list(labels))))
         await update("needs_selection_coverage" if remaining else "needs_coverage",
@@ -291,8 +304,8 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
                      unresolved=stats["corpus_records"]-sum(v >= 0 for v in labels.values()),
                      next_action="independent_selection_sample_with_positive_and_negative_support" if remaining else "new_expressions_or_clarify_predicate")
         return
-    selection = await take(selection_ids)
-    # 选择样本与训练分离；续补只作经验选模，最终质量仍由冻结后的独立总体抽验给出。
+    selection = await take(observed_selection)
+    # 留出样本选择模型与阈值；达标后直接预测，经验指标不代表全库质量。
     await update('selecting')
     winner, threshold, board = choose_model(models, selection.views,
         np.array([labels[int(i)] for i in selection.ids]), corpus_size=stats["corpus_records"],
@@ -300,13 +313,15 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
     if not any(row["feasible_on_selection"] for row in board):
         # 可复现选择误差触发一次有目标的覆盖修正；没有收益就换表示，不循环标完库。
         more = next_training()
-        if more:
+        if more and runtime.store.sampling_calls(runtime.scope) < 128:
             async for event in ask(more, "expanded_ranked_coverage"):
                 yield event
             train_ids = np.array([i for i, v in labels.items() if v >= 0 and i not in selection_set], dtype=np.int64)
             train = await take(train_ids)
             start = perf_counter()
             await update('training', training_records=len(train_ids))
+            previous_winner, previous_threshold, previous_board = winner, threshold, board
+            previous_models = models
             models = fit_models({name: X[train.available] for name, X in train.views.items()},
                 np.array([labels[int(i)] for i in train.ids[train.available]]), workers=cfg["workers"], seed=cfg["seed"])
             model_labels = {int(i): labels[int(i)] for i in train.ids[train.available]}
@@ -315,18 +330,32 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
             winner, threshold, board = choose_model(models, selection.views,
                 np.array([labels[int(i)] for i in selection.ids]), corpus_size=stats["corpus_records"],
                 precision_target=cfg["precision_target"], recall_target=cfg["recall_target"])
+            # 扩充训练未改善选择集效果时，保留上一轮最好的模型。
+            old = next(row for row in previous_board if row['name'] == previous_winner.name)
+            new = next(row for row in board if row['name'] == winner.name)
+            if (old['feasible_on_selection'], old['f1']) > (new['feasible_on_selection'], new['f1']):
+                winner, threshold, board, models = previous_winner, previous_threshold, previous_board, previous_models
             stats.update(fit_count=stats["fit_count"]+len(models), training_records=len(train_ids), training_ids=train_ids.tolist())
     stats.update(models=board, selected_model=winner.name, threshold=threshold)
+    selected = next(row for row in board if row['name'] == winner.name)
+    quality = {"basis": "selection", **{k: selected[k] for k in ('precision', 'recall', 'f1', 'selection_unknown')},
+               "selection_records": len(observed_selection), "precision_target": cfg['precision_target'],
+               "recall_target": cfg['recall_target'], "minimum_precision": .6,
+               "acceptance": 'target' if selected['feasible_on_selection'] else 'fallback'}
+    if selected['precision'] < .6:
+        quality['acceptance'] = 'unknown'
+        await cannot_judge('最佳模型的选择集查准率低于 60%', quality=quality)
+        return
+    stats['quality'] = quality
     await update('predicting', predicted_records=0)
     model_id = digest([key, winner.name, threshold, sorted(labels.items()), str(uuid4())])
     await call("predictions.begin", {"model_id": model_id, "predicate_key": key,
         "feature_id": stats["feature_id"], "input_revision": runtime.scope.input_revision,
         "training_records": len(train_ids), "fit_count": len(models), "model": winner.name,
         "threshold": threshold, "task_semantics": "full_authorized_scope"})
-    # 冻结后只扫一次：落预测块、累计数量、抽取互斥区域的独立样本。
+    # 选模后只做数值扫描；已有判断覆盖预测，未知项保留，不再读取正文或调用大模型。
     known_ids = np.array(sorted(labels), dtype=np.int64)
     known_labels = np.array([labels[int(i)] for i in known_ids], dtype=np.int8)
-    pools = {label: PrioritySample(cfg["validation_size"]) for label in (-1, 0, 1)}
     counts = {-1: 0, 0: 0, 1: 0}
     scanned = 0
     async for block in scan():
@@ -343,58 +372,21 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
         indices = np.flatnonzero(matched)
         matched[indices] = known_ids[positions[indices]] == block.ids[indices]
         predictions[matched] = known_labels[positions[matched]]
-        for label, sample in pools.items():
-            mask = predictions == label
-            counts[label] += int(mask.sum())
-            ids = block.ids[mask & ~matched]
-            sample.add(ids, random_keys(ids, cfg["seed"]+100*measurement))
+        for label in counts:
+            counts[label] += int(np.count_nonzero(predictions == label))
         stats["predict_seconds"] += perf_counter()-start
-        # 只有块数组通过 Host，模型和抽验说明仅存一份。
+        # 只有块数组通过 Host，模型与选择集指标仅存一份。
         await call("predictions.write", {"model_id": model_id, "offset": scanned,
             "ids": block.ids.tolist(), "labels": predictions.tolist(),
             "scores": np.where(np.isfinite(scores), scores, 0).tolist()})
         scanned += len(block.ids)
         await update('predicting', predicted_records=scanned)
-    audit_ids = np.concatenate([p.ids for p in pools.values()])
-    async for event in ask(audit_ids, "independent_frozen_population_audit"):
-        yield event
-    # 先评价冻结集合，再保守推导有限标签修正后的区间；不回训后沿用旧抽验。
-    regions = [Region(label == 1, sample.seen, len(sample.ids),
-        sum(labels[int(i)] == 1 for i in sample.ids), sum(labels[int(i)] < 0 for i in sample.ids))
-        for label, sample in pools.items()]
-    quality = quality_bounds(regions, known_tp=int((known_labels == 1).sum()),
-        known_unknown=int((known_labels < 0).sum()), delta=cfg["delta"]/(measurement*(measurement+1)))
-    # 抽验已知标签优先于预测。有限修正的影响从原冻结区间推导，不重用抽验训练模型。
-    removed = sum(labels[int(i)] != 1 for i in pools[1].ids)
-    removed_unknown = sum(labels[int(i)] < 0 for i in pools[1].ids)
-    added = sum(labels[int(i)] == 1 for label in (-1, 0) for i in pools[label].ids)
-    returned = counts[1] - removed + added
-    tp_lo = max(0, quality["tp_interval"][0] - removed_unknown) + added
-    fn_hi = max(0, quality["fn_interval"][1] - added) + removed_unknown
-    quality.update(precision_lower=tp_lo/returned if returned else None,
-        recall_lower=tp_lo/(tp_lo+fn_hi) if tp_lo+fn_hi else None,
-        tp_interval=(tp_lo, min(returned, quality["tp_interval"][1]+added)),
-        fn_interval=(max(0, quality["fn_interval"][0]-added), fn_hi), returned=returned,
-        audit_corrections={"removed": removed, "added": added, "unknown_removed": removed_unknown})
-    await call("predictions.write", {"model_id": model_id, "offset": -1,
-        "ids": audit_ids.tolist(), "labels": [labels[int(i)] for i in audit_ids], "scores": [0.] * len(audit_ids)})
-    quality.update(precision_target=cfg["precision_target"], recall_target=cfg["recall_target"],
-                   measurement_round=measurement, assumptions="fixed population/predictions; SRS per region; truthful reference labels")
-    passed = (quality["precision_lower"] is not None and quality["recall_lower"] is not None
-              and quality["precision_lower"] >= cfg["precision_target"]
-              and quality["recall_lower"] >= cfg["recall_target"])
-    await call("predictions.finish", {"model_id": model_id, "passed": passed, "quality": quality,
-        "scope_count": scanned, "returned": returned, "known_ids": known_ids.tolist(),
-        "audit_ids": audit_ids.tolist()})
-    feasible = next(r["feasible_on_selection"] for r in board if r["name"] == winner.name)
-    unknown = counts[-1] or any(labels[int(i)] < 0 for i in audit_ids)
-    errors = any(labels[int(i)] != label for label in (0, 1) for i in pools[label].ids)
-    next_action = "none" if passed else "read_missing_facts" if unknown else "change_representation_or_discriminator" if errors or not feasible else "increase_independent_measurement"
-    await update("quality_passed" if passed else "quality_not_met", quality=quality,
+    await call("predictions.finish", {"model_id": model_id, "passed": True, "quality": quality,
+        "scope_count": scanned, "returned": counts[1]})
+    await update("quality_passed" if selected['feasible_on_selection'] else "quality_fallback", quality=quality,
         complete_scope_coverage=True, complete_feature_coverage=stats["missing_features"] == 0,
-        predicted_records=scanned, audit_records=len(audit_ids), audit_ids=audit_ids.tolist(),
-        returned=returned, unresolved=counts[-1] if passed else stats["corpus_records"]-len(known_ids),
-        next_action=next_action)
+        predicted_records=scanned, returned=counts[1], unresolved=counts[-1],
+        next_action='return_confirmed_results')
 
 
 DECISION_SCHEMA = {"type": "object", "additionalProperties": False,
@@ -412,7 +404,8 @@ def unknown(record: Record, key: str, why: str, manifest: str | None = None) -> 
 
 
 async def judge_batch(runtime: Runtime, records: list[Record], instruction: str,
-                      *, require_source: bool = True, required_fields: tuple[str, ...] = (), use_cache: bool | None = None) -> list[Decision]:
+                      *, require_source: bool = True, required_fields: tuple[str, ...] = (), use_cache: bool | None = None,
+                      sampling: bool = False) -> list[Decision]:
     """Only ask the model about rows whose required evidence is available."""
     key = runtime.predicate_key(instruction)
     ready, missing = [], {}
@@ -424,11 +417,15 @@ async def judge_batch(runtime: Runtime, records: list[Record], instruction: str,
         else:
             ready.append(row)
     judged = await _judge_ready(runtime, ready, instruction, require_source=require_source,
-                                required_fields=required_fields, use_cache=use_cache)
+                                required_fields=required_fields, use_cache=use_cache, sampling=sampling)
     # 初判命中后独立查缺项；不提供初判标签或理由，避免复核沿用相似性结论。
     accepted = {d.ref for d in judged if d.label == 'accept'}
-    reviewed = await _judge_ready(runtime, [r for r in ready if r.ref in accepted], instruction,
-        require_source=require_source, required_fields=required_fields, use_cache=use_cache, review=True)
+    try:
+        reviewed = await _judge_ready(runtime, [r for r in ready if r.ref in accepted], instruction,
+            require_source=require_source, required_fields=required_fields, use_cache=use_cache, review=True, sampling=sampling)
+    except SamplingLimitReached:
+        # 初判命中尚未复核的条目保留未决，不能因额度耗尽直接确认为命中。
+        reviewed = [unknown(r, key, '抽样请求已达 128 次，命中复核未完成') for r in ready if r.ref in accepted]
     replacements = {d.ref: d for d in reviewed}
     judged = [replacements.get(d.ref, d) for d in judged]
     by_ref = {**missing, **{d.ref: d for d in judged}}
@@ -437,7 +434,7 @@ async def judge_batch(runtime: Runtime, records: list[Record], instruction: str,
 
 async def _judge_ready(runtime: Runtime, records: list[Record], instruction: str,
                        *, require_source: bool, required_fields: tuple[str, ...], use_cache: bool | None,
-                       review: bool = False) -> list[Decision]:
+                       review: bool = False, sampling: bool = False) -> list[Decision]:
     if not records:
         return []
     if len({r.ref for r in records}) != len(records):
@@ -495,7 +492,8 @@ async def _judge_ready(runtime: Runtime, records: list[Record], instruction: str
              "逐条返回 accept（全部满足）、exclude（明确不符）或 undetermined（证据不足），reason 简述依据或缺项。"
              "引用用记录/段落 alias（@r1/@p1），quote 为原文连续短句；required_fields 须有 source 引用。"
              "已有疑点未被证据解决时保留未决。knowledge_ids 只填实际用到的知识。仅调用 submit_result 一次，不输出思考过程。",
-         "require_source": require_source, "required_fields": required_fields}, DECISION_SCHEMA, cache_if=cacheable, use_cache=use_cache)
+         "require_source": require_source, "required_fields": required_fields}, DECISION_SCHEMA,
+        cache_if=cacheable, use_cache=use_cache, sampling=sampling)
     # 保留每个 ref 的全部返回项，用数量检查识别缺失和重复，而不是静默覆盖。
     by_ref: dict[str, list[dict[str, Any]]] = {}
     for row in resolved_rows(result.payload):

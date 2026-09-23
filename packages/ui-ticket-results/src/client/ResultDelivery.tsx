@@ -23,7 +23,9 @@ export function ResultDelivery({ data, sessionId }: { readonly data: TicketCandi
   return <section className={css.delivery} aria-label="确认结果与下载">
     <h3>{total === 0 ? '本次尚无可确认结果' : `已确认 ${total} 条工单`}</h3>
     <p>{result.explanation ?? '请结合当前查询范围和证据使用确认结果。'}</p>
-    {result.learnedSet ? <p>确认集合包含模型预测，未逐条经过语言模型判断。相对抽验标签的查准率下界为 {qualityValue(result.learnedSet.quality.precision_lower)}，召回率下界为 {qualityValue(result.learnedSet.quality.recall_lower)}；这些区间依赖参考标签可靠性，不是单条工单的置信度。</p> : null}
+    {result.learnedSet ? <p>确认集合包含模型预测，未逐条经过语言模型判断。{result.learnedSet.quality.basis === 'selection'
+      ? <>选择集查准率 {qualityValue(result.learnedSet.quality.precision)}，选择集召回率 {qualityValue(result.learnedSet.quality.recall)}；{result.learnedSet.quality.acceptance === 'fallback' ? '未达原目标，采用最佳模型预测，查准率达到 60% 门槛' : '模型达标后直接预测'}，未进行独立抽验，指标不代表全库质量。</>
+      : <>历史抽验查准率下界 {qualityValue(result.learnedSet.quality.precision_lower)}，召回率下界 {qualityValue(result.learnedSet.quality.recall_lower)}；这是旧版记录，不是实际召回率。</>}</p> : null}
     {result.stoppingReason === 'top_k_accepted' || result.stoppingReason === 'no_result' ? null
       : <p>本次检索尚未完成，已确认部分可以交付；其余候选仍需复核。</p>}
     <details>

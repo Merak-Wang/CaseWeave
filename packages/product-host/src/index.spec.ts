@@ -176,7 +176,7 @@ describe('DSH product Host adapter', () => {
     const agent = { session: { requestContext: () => ({ provider: 'fixture', model: 'fixture', contextWindow: 32000 }) } } as unknown as Agent
     const invoke = (inject: typeof productHostInject) => new Promise<unknown>((resolve, reject) => {
       void Promise.resolve(ctx.plugin({ name: 'product-host-report-scope', inject, async apply(scope: Context) {
-        try { resolve(await callReportModel(scope, agent, 'report-scope', 'write', {}, new AbortController().signal, async () => {})) }
+        try { resolve(await callReportModel(scope, agent, 'report-scope', {}, new AbortController().signal, async () => {})) }
         catch (error) { reject(error) }
       } })).catch(reject)
     })

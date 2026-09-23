@@ -1,4 +1,13 @@
-import type { RetrievalBudgetState } from '@retrieval-agent/contracts'
+import type { RetrievalBudgetState, RuntimeMetrics } from '@retrieval-agent/contracts'
+
+/** 合并官方读数的累计桶，不在业务层重新推算 token 或首 token 时间。 */
+export function accumulateRuntimeMetrics(previous: RuntimeMetrics | undefined, current: RuntimeMetrics): RuntimeMetrics {
+  const sum = <T extends object>(before: T | undefined, next: T): T => Object.fromEntries(Object.entries(next)
+    .map(([key, value]) => [key, value + (before?.[key as keyof T] ?? 0)])) as T
+  return { ...previous, ...current,
+    ...(current.tokenUsage ? { tokenUsage: sum(previous?.tokenUsage, current.tokenUsage) } : {}),
+    ...(current.sessionStats ? { sessionStats: sum(previous?.sessionStats, current.sessionStats) } : {}) }
+}
 
 export interface ModelRequestMeasurement {
   readonly compression?: import('@retrieval-agent/contracts').ContextCompressionStats
@@ -15,6 +24,7 @@ export interface ModelRequestMeasurement {
   readonly accepted: boolean
 }
 export interface ModelResponseMeasurement {
+  readonly runtimeMetrics?: RuntimeMetrics
   readonly inputTokens?: number
   readonly modelLatencyMs: number
   readonly outputTokens: number
@@ -41,6 +51,7 @@ export function modelRequestBudget(budget: RetrievalBudgetState, input: ModelReq
 export function modelResponseBudget(budget: RetrievalBudgetState, input: ModelResponseMeasurement): RetrievalBudgetState {
   return {
     ...budget,
+    ...(input.runtimeMetrics ? { runtimeMetrics: accumulateRuntimeMetrics(budget.runtimeMetrics, input.runtimeMetrics) } : {}),
     ...(budget.context && input.inputTokens !== undefined ? { context: { ...budget.context, measuredInputTokens: input.inputTokens } } : {}),
     ...(input.inputTokens === undefined ? {} : { totalMeasuredInputTokens: (budget.totalMeasuredInputTokens ?? 0) + input.inputTokens }),
     wallClockElapsedMs: Math.max(budget.wallClockElapsedMs ?? 0, input.wallClockElapsedMs),

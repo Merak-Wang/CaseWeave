@@ -6,13 +6,13 @@
 
 `pnpm operators:test` 运行 Python 验收。uv 的 `--inexact` 保留已有模型依赖，不删除环境内其他包。算子不重新下载模型权重，embedding/rerank 继续复用既有模型服务。模型供应商和凭据仍配置在 DSH；共享服务令牌用 `CASEWEAVE_OPERATORS_TOKEN` 同时配置服务和 Node，避免放进 URL。算子设计与计量定义见 [Python 算子](design/OPERATORS.md)。
 
-默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 使用 Provider 的 `featureBlock` 扫描对齐 ID 与连续数值块，共享样本拟合 LR/SVM/MLP/HGB，再独立抽验集合 P/R。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。缺特征计入遗漏上界，不自动逐条强判全库。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验与显式旧 baseline 命令见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
+默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 使用 Provider 的 `featureBlock` 扫描对齐 ID 与连续数值块，共享样本拟合 LR/SVM/MLP/HGB，选择集 P/R 达标后直接预测全集；未达标时用选择集 F1 最好的已训练模型，查准率低于 60% 则返回“不知道”及已确认工单。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。缺特征与已有未决项保持未知，不自动逐条强判全库。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验与显式旧 baseline 命令见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
 
-从旧版算法升级 Docker 部署时，构建应用、算子和排名服务：`docker compose build app semantic-operators model-service`，再执行 `docker compose up -d --no-deps --wait model-service semantic-operators app`。旧算子镜像不认识新筛选参数时可能返回 `ProtocolError`。若旧数据库尚无数值特征，执行 `docker compose exec app node scripts/database.mjs index --dataset=esft-development`，复用已有向量和索引检查点补齐；自定义数据集替换名称。日常 `start.cmd` 不承担这些升级步骤。
+从旧版算法升级 Docker 部署时，运行 `start.cmd` 或 `bash setup.sh start`，自动构建并更新应用、算子和排名服务。旧算子镜像不认识新筛选参数时可能返回 `ProtocolError`。若旧数据库尚无数值特征，另执行 `docker compose exec app node scripts/database.mjs index --dataset=esft-development`，复用已有向量和索引检查点补齐；自定义数据集替换名称。已有安装的日常启动不自动重新导入数据或重建索引。
 
-语言模型标注的并发与每次样本数由 `RETRIEVAL_AGENT_FILTER_CONFIG` 配置。例如在 `.env` 设置 `RETRIEVAL_AGENT_FILTER_CONFIG={"batchSize":4,"options":{"concurrency":32,"precision_target":0.9,"recall_target":0.9}}`，表示最多同时执行 32 个样本判断请求，每个请求包含至多 4 条工单，并要求独立抽验的精度/召回率下界均不低于 0.90；尾批及命中复核可能少于 4 条。它不改变抽样总数、Agent 证据窗口或分类器训练并行度。修改后执行 `docker compose up -d --no-deps --wait app`，未取消的后台任务在原任务内恢复。
+语言模型标注的并发与每次样本数由 `RETRIEVAL_AGENT_FILTER_CONFIG` 配置。例如在 `.env` 设置 `RETRIEVAL_AGENT_FILTER_CONFIG={"batchSize":4,"options":{"concurrency":32,"precision_target":0.9,"recall_target":0.9}}`，表示最多同时执行 32 个样本判断请求，每个请求包含至多 4 条工单，并要求模型选择集的查准率/召回率均不低于 0.90；这是选择集经验指标，不是全库质量下界；尾批及命中复核可能少于 4 条。抽样初判和命中复核累计最多 128 次模型请求，续跑共用额度；此配置不能提高累计上限，也不改变 Agent 证据窗口或分类器训练并行度。修改后执行 `docker compose up -d --no-deps --wait app`，未取消的后台任务在原任务内恢复。
 
-选择样本覆盖不足时，后续筛选复用同一查询、来源及配置下的有界随机 ID 池、已判断标签和已训练模型，只补充独立选择样本；训练标签更正后重新拟合。原文及证据要求未变化的未决样本沿用原结论，不重复请求模型。工作台显示复用与续补进度。批量判断可减少请求和重复提示开销，实际费用仍取决于样本正文、复核和抽验数量。
+选择样本覆盖不足时，后续筛选复用同一查询、来源及配置下的有界排序 ID 池、已判断标签和已训练模型，只补充独立选择样本；训练标签更正后重新拟合。原文及证据要求未变化的未决样本沿用原结论，不重复请求模型。工作台显示复用与续补进度。批量判断可减少请求和重复提示开销，实际费用仍取决于训练/选择样本正文及命中复核数量，全集预测后不再另抽样调用大模型。
 
 完整容器部署适合单机试用；源码入口供开发、集成与排障使用。产品概览见 [README](../README.md)，测试范围见 [评测与验收](EVALUATION_STRATEGY.md)。
 
@@ -24,14 +24,19 @@
 
 ## 一键容器部署
 
-首次使用在仓库根目录运行 Windows `./setup.cmd` 或 Linux/Git Bash `bash setup.sh`。Windows 入口通过 [setup.ps1](../setup.ps1) 定位 Git for Windows 自带的 Bash，两边执行同一个 [setup.sh](../setup.sh)。需要已启动的 Linux Docker 引擎、Compose v2.20+ 和 Git；向导不依赖宿主 Node、pnpm、Python 或 uv。
+在仓库根目录运行 Windows `./start.cmd` 或 Linux/Git Bash `bash setup.sh`，首次自动初始化，之后自动构建更新并启动。Windows 批处理直接调用原生 [setup.ps1](../setup.ps1)，不嵌套 Git Bash；Linux 使用 [setup.sh](../setup.sh)。两平台保持相同操作与选项，Linux 需事先准备 Docker 引擎和 Compose v2.20+。
+
+Windows 的 [Docker 依赖准备](../scripts/docker-windows.ps1) 在 Docker 未就绪时先检查 WSL：缺失时提权执行 `wsl --install --no-distribution`，低于 2.1.5 时执行 `wsl --update`，无需安装 Ubuntu。随后在 Docker 命令缺失时下载官方安装器，使用当前用户模式安装并添加当前进程所需的 CLI 路径；引擎通过官方 `docker desktop start --timeout 120` 启动。已有可用 Linux 引擎直接复用。只读检查及 stop/status/logs 不安装软件、不自动启动 Docker。下载、安装或启动失败时停止后续准备；若要求系统重启则提示重新运行同一入口，不强制重启。首次许可与系统授权由用户在系统界面完成。安装选项见 [Docker 官方 Windows 安装说明](https://docs.docker.com/desktop/setup/install/windows-install/) 和 [Microsoft WSL 命令说明](https://learn.microsoft.com/en-us/windows/wsl/basic-commands)。
+
+运行依赖分层安装：应用镜像安装 Node.js、pnpm、固定 DSH 及 workspace 依赖；算子和模型镜像安装 Python、uv 及锁文件中的 Python 依赖。均由 Dockerfile 自动下载和安装，宿主不需要 Node、pnpm、Python 或 uv。模型权重和示例数据只在首次准备或显式 install 时下载校验。
 
 没有 `.env` 时从 [.env.example](../.env.example) 创建；首次选择 CPU/GPU，再填写 Provider、模型、API 地址和密钥。只补充缺失项，已有值继续复用。主模型的密钥环境变量名自动设为 `RETRIEVAL_AGENT_MAIN_MODEL_API_KEY`，与应用 Compose 的实际转发字段一致。密钥隐藏输入，配置不作为 shell 脚本执行；特殊字符按 [Docker dotenv 规则](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax) 保存，由 Compose 解析。宿主环境变量仍按 Compose 规则优先于 `.env`，修改配置文件后需注意已有环境变量的覆盖。
 
 常用选项如下；Windows 将 `bash setup.sh` 换为 `./setup.cmd`，参数相同：
 
 ```bash
-bash setup.sh start                          # 日常启动已有镜像及依赖服务
+bash setup.sh start                          # 构建更新并启动，首次自动初始化
+bash setup.sh start --no-build               # 显式跳过构建，复用已有镜像
 bash setup.sh stop                           # 停止当前项目，保留容器和数据卷
 bash setup.sh status                         # 显示当前项目所有容器状态
 bash setup.sh logs                           # 应用/模型服务最近 100 行日志
@@ -43,18 +48,20 @@ bash setup.sh --no-build                      # 复用现有应用/模型镜像
 bash setup.sh --env-file .env.local --check    # 检查另一份配置
 ```
 
-不带操作名时，没有 `.env` 才进入首次安装；已有 `.env` 默认日常 `start`。Windows 也可直接双击根 `start.cmd`。更新代码后的完整部署使用 `setup.cmd install`；只改应用时使用 `docker compose build app` 后 `setup.cmd start`。显式 CPU/GPU、检查或安装选项仍进入对应流程。日常 `start` 执行 `docker compose up -d --wait --no-build --pull never app`，启动 app 及 MySQL/Milvus/模型依赖，明确禁止自动构建和拉取镜像，不执行 model-prepare、app-prepare 或索引脚本。`stop` 使用 `compose stop --timeout 60`，给服务 60 秒退出时间；`status` 使用 `compose ps --all`，`logs` 读取有限日志。日常操作要求已有 `.env`，不会创建或修改配置，也不运行主模型配置向导；即使模型凭据待修复，仍可停止服务或查看状态/日志。已有 `.env` 但缺少镜像、数据或模型时应显式运行 `setup.cmd install`。
+`start` 在缺少 `.env` 或 Compose 项目尚无 app 容器（包括停止的容器）时自动执行首次准备，因此复制好 `.env` 的新安装和准备中断也可继续使用同一入口。已有安装先执行 `docker compose build app semantic-operators model-service`，成功后再执行 `docker compose up -d --wait --no-build --pull never app`；构建失败不替换现有容器。Docker 复用未变化的构建层，Compose 更新变化的服务并启动依赖；不重复运行 model-prepare、app-prepare 或索引脚本。`start --no-build` 是显式跳过构建的入口。`install` 和 CPU/GPU 选项执行完整准备，`--check` 只检查配置。
 
-应用的 `pnpm install` / `pnpm build` 已在 Dockerfile 构建阶段执行。容器日常启动无需宿主构建；宿主源码修改后，需要重新构建应用镜像才能进入容器。关闭终端或浏览器不停止容器；电脑重启后先启动 Docker，再执行 `setup.cmd start` / `bash setup.sh start`。
+`stop` 使用 `compose stop --timeout 60`，给服务 60 秒退出时间；`status` 使用 `compose ps --all`，`logs` 读取有限日志。这三种管理操作要求已有 `.env`，不修改配置，也不运行主模型配置向导；即使模型凭据待修复，仍可停止或查看服务。应用容器存在但模型或数据卷损坏时，可显式运行 `setup.cmd install` 重新检查完整准备流程。
+
+应用的 `pnpm install` / `pnpm build` 在 Dockerfile 构建阶段执行，启动入口自动完成镜像构建，无需先在宿主编译。关闭终端或浏览器不停止容器；Windows 重启后直接执行 `start.cmd`，Linux 启动 Docker 后执行 `bash setup.sh start`。
 
 端口在 `.env` 的 `RETRIEVAL_AGENT_*_PORT` 中设置。同一宿主运行多个实例时，使用不同 `COMPOSE_PROJECT_NAME` 和未占用端口；后续重启保留项目名以继续使用原卷。`--check` 不修改配置，不下载、启动或请求主模型 API。GPU 启动失败会退出，不能将其当作 CPU 成功。任何部署步骤失败均返回非零退出码，后续步骤停止；修复后重复运行，底层数据/模型准备脚本校验并复用有效文件和已完成进度。最后的健康检查只表示工作台启动，主模型 API 与业务查询应在公开工作台另行验证。
 
 向导按顺序执行以下入口；需要逐步排障时，在已填写 `.env` 的仓库根目录执行：
 
 ```sh
-docker compose build app model-service
+docker compose build app semantic-operators model-service
 docker compose run --rm --no-deps model-prepare prepare --download
-docker compose up -d --wait mysql milvus model-service
+docker compose up -d --wait mysql milvus model-service semantic-operators
 docker compose run --rm --no-deps app-prepare
 docker compose run --rm --no-deps app-prepare node scripts/database.mjs prepare
 docker compose run --rm --no-deps app-prepare node scripts/database.mjs grams
@@ -62,7 +69,7 @@ docker compose run --rm --no-deps app-prepare node scripts/database.mjs verify
 docker compose up -d --wait app
 ```
 
-入口回归：`node --test --test-concurrency=1 scripts/setup.spec.mjs`，需要 Docker Compose CLI 和 Bash。测试使用真实 Compose 解析配置，以受控 Docker 执行器验证首次向导、密钥特殊字符、失败中止、重复运行、GPU 失败和只读检查，不创建业务容器或模型请求。
+入口回归：`node --test --test-concurrency=1 scripts/setup.spec.mjs` 验证 Bash；Windows 设置 `$env:SETUP_TEST_SHELL='powershell'` 后运行同一命令验证原生 PowerShell。需要 Docker Compose CLI 和对应 shell。`node --test scripts/docker-windows.spec.mjs` 另验证依赖下载/安装/启动及失败分支。测试使用真实 Compose 解析配置，以受控 Docker 执行器验证首次向导、自动构建、已有配置但尚未初始化、密钥特殊字符、失败中止、重复运行、GPU 失败和只读检查，不创建业务容器或安装宿主软件。
 
 ### 模型设置、内存与项目名称
 
@@ -76,7 +83,7 @@ MySQL 数据文件位于 mysql-data 卷，Milvus/etcd 位于 milvus-data 卷。�
 
 默认 Compose 项目名为 `retrieval-agent`。新安装使用默认卷配置；迁移已有项目时，通过 `RETRIEVAL_AGENT_VOLUME_PREFIX` 和 `RETRIEVAL_AGENT_EXISTING_VOLUMES=true` 显式指定原卷。先确认原卷身份，再停止旧容器并创建新容器。不要使用 `down -v`，也不要仅更改项目名后连接到空库。
 
-应用镜像将固定 DSH runtime、依赖 fetch 与源码 build 分层，源码修改可复用下载缓存。日常 start 不触发这些构建层。构建耗时与资源占用取决于硬件和缓存状态。
+应用镜像将固定 DSH runtime、依赖 fetch 与源码 build 分层。日常 start 执行缓存构建，源码未变化的层直接复用；源码变化后生成新镜像并应用到容器。构建耗时与资源占用取决于硬件和缓存状态。
 
 ## MySQL / Milvus 与持久任务入口
 
@@ -84,7 +91,7 @@ MySQL 数据文件位于 mysql-data 卷，Milvus/etcd 位于 milvus-data 卷。�
 
 `.env.example` 的 `COMPOSE_FILE` 合并数据库、模型和应用配置，固定 `;` 分隔符，跨 Windows/Linux 使用同一文件；NVIDIA GPU 追加 `config/model-service/compose.gpu.yml`。`app-prepare` 与 `app` 共用具名 data/state/wiki/output 卷，默认模型仅 embedding；可选 reranker 先以 `RETRIEVAL_AGENT_RERANKER_ENABLED=true` 运行 model-prepare 下载，再启动同配置的模型服务。CPU 双模型比单 embedding 消耗更多内存，部署时应按所选模型测量常驻内存。
 
-镜像升级前给现有 app/model 镜像添加明确备份标签，记录 `docker image inspect` 的 ID；对 MySQL 做一致性备份，并保存 Milvus、etcd、app-state、app-data、app-wiki 和模型/缓存卷。包含凭据的备份只保留在私有目录。更新源码后执行 `docker compose build app model-service`、`docker compose up -d --wait model-service app`，保留原 Compose 项目名和卷。回退时在 `.env` 指定 `RETRIEVAL_AGENT_APP_IMAGE` / `RETRIEVAL_AGENT_MODEL_IMAGE` 为已保存标签，再启动同一服务。镜像回退仅适用于 schema 仍兼容的版本；数据库不兼容升级必须使用匹配的一致性备份恢复。
+镜像升级前给现有 app/model 镜像添加明确备份标签，记录 `docker image inspect` 的 ID；对 MySQL 做一致性备份，并保存 Milvus、etcd、app-state、app-data、app-wiki 和模型/缓存卷。包含凭据的备份只保留在私有目录。更新源码后运行 `start.cmd` 或 `bash setup.sh start`，自动构建应用、算子和模型服务，保留原 Compose 项目名和卷。回退时在 `.env` 指定 `RETRIEVAL_AGENT_APP_IMAGE` / `RETRIEVAL_AGENT_MODEL_IMAGE` 为已保存标签，再通过 `start --no-build` 启动。镜像回退仅适用于 schema 仍兼容的版本；数据库不兼容升级必须使用匹配的一致性备份恢复。
 
 首次完整安装需要完成数据和索引准备。`No published dataset` 表示尚无可服务的数据发布，应先运行 `database.mjs prepare`。准备脚本默认保留已有业务卷。
 
@@ -362,7 +369,7 @@ pnpm retrieval-agent web --no-open --port 3081
 | `pnpm exec vitest run packages/agent-plugin/src/service.spec.ts` | 运行指定相邻测试；路径可换成受影响的现有 spec |
 | `pnpm test` | 运行默认行为/边界回归；不加载全量语料做假排名，实库专项需显式启用 |
 | `pnpm model:test` | 通过 uv 运行 Python model-service 测试；环境未就绪时可能同步依赖 |
-| `pnpm operators:test` | 三个核心算子、默认四模型/全域扫描、独立集合质量、未知/缺特征、数值等价和旧 filter baseline；CI 使用同一入口 |
+| `pnpm operators:test` | 三个核心算子、默认四模型/全域扫描、128 次抽样额度与 60% 查准率门槛、未知/缺特征、数值等价和旧 filter baseline；CI 使用同一入口 |
 | `pnpm eval:self-test` | Python 评测数据与 scorer 自检，不执行真实 Agent 任务 |
 
 跨包导入可能通过 package exports 读取 `lib/`。跨包源码变更后先显式 `pnpm build` 一次，再运行 `pnpm typecheck:code` 和所选行为检查；也可直接用 `pnpm typecheck` 完成构建与类型检查。单独 `--noEmit` 不能证明已有构建产物与源码一致。依赖开发语料的测试和运行入口要求事先显式准备数据，纯代码检查无需此步骤。

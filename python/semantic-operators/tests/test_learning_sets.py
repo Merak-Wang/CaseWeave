@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 from caseweave_ops import invoke_rows
 from caseweave_ops.models import fit_models, operating_point
-from caseweave_ops.quality import Region, quality_bounds, positive_bounds
 from conftest import record, source, collect, decisions
 
 
@@ -43,31 +42,41 @@ def numeric_port(runtime, X, y, missing=(), scores=None):
 
 def run(rt, **options):
     return asyncio.run(collect(invoke_rows('sem_filter', rt, source([]), 'synthetic predicate',
-        {'options': {'pool_size': 1024, 'sample_size': 128, 'selection_size': 256, 'validation_size': 512, **options}})))
+        {'options': {'pool_size': 1024, 'sample_size': 128, 'selection_size': 256, **options}})))
 
 
-def test_default_fits_four_models_scores_full_scope_and_separates_training_selection_audit(make_runtime):
+def test_selection_pass_predicts_full_scope_without_more_teacher_calls(make_runtime):
     y = np.arange(5000) % 2
     X = np.eye(2, dtype=np.float32)[y]
     rt = make_runtime(); updates, predicted, sampled = numeric_port(rt, X, y)
+    port = rt.resources
+    predicting = False
+    async def call(method, payload):
+        nonlocal predicting
+        if method == 'predictions.begin': predicting = True
+        if method == 'rows.read': assert not predicting, 'No new labels after model selection'
+        return await port(method, payload)
+    rt.resources = call
     run(rt)
     last = updates[-1]
     phases = [p['stop_reason'] for p in updates]
     assert phases.index('scanning') < phases.index('ranked_sampling') < phases.index('training')
-    assert phases.index('training') < phases.index('selecting') < phases.index('predicting') < phases.index('auditing')
+    assert phases.index('training') < phases.index('selecting') < phases.index('predicting')
+    assert 'auditing' not in phases
     assert updates[phases.index('ranked_sampling')]['sampling_method'] == 'ngram_vector_desc'
-    assert updates[phases.index('auditing')]['sampling_method'] == 'ngram_vector_desc'
-    assert updates[phases.index('auditing')]['audit_sampling_method'] == 'srs_without_replacement_per_frozen_region'
     assert len(updates[phases.index('training')]['candidate_models']) == 4
     assert updates[phases.index('predicting')]['selected_model']
     assert last['fit_count'] == 4 and last['predicted_records'] == len(X)
     assert last['positive_records'] > 0 and last['negative_records'] > 0 and last['undetermined_records'] == 0
     assert len(predicted) == len(X) and last['stop_reason'] == 'quality_passed'
-    assert last['quality']['recall_lower'] >= .95
+    assert last['quality']['basis'] == 'selection'
+    assert last['quality']['precision'] >= .95 and last['quality']['recall'] >= .95
+    assert 'recall_lower' not in last['quality'] and 'precision_lower' not in last['quality']
+    assert 'audit_ids' not in last and 'audit_records' not in last
     assert {i for i, v in predicted.items() if v == 1} == set(np.flatnonzero(y))
     assert len(sampled) < len(X)
-    t, v, a = map(lambda k: set(last[k]), ('training_ids', 'selection_ids', 'audit_ids'))
-    assert not t & v and not t & a and not v & a
+    t, v = map(lambda k: set(last[k]), ('training_ids', 'selection_ids'))
+    assert not t & v and set(sampled) == t | v
 
 
 def test_batch_width_changes_neither_samples_nor_set(make_runtime):
@@ -109,13 +118,15 @@ def test_runs_sample_batches_concurrently(make_runtime, concurrency, batch_size)
         rt.model.handler = parallel_teacher
         await collect(invoke_rows('sem_filter', rt, source([]), 'synthetic predicate',
             {'batch_size': batch_size, 'options': {'concurrency': concurrency, 'sample_size': width,
-                'pool_size': width*2, 'selection_size': 1, 'validation_size': 1,
+                'pool_size': width*2, 'selection_size': 1,
                 'precision_target': .9, 'recall_target': .9}}))
         assert peak == concurrency
-        assert read_sizes == [width, width]
+        windows = min(2, 128 // concurrency)
+        assert read_sizes == [width] * windows
         assert updates[-1]['batch_size'] == batch_size and updates[-1]['concurrency'] == concurrency
         assert updates[-1]['precision_target'] == .9 and updates[-1]['recall_target'] == .9
-        assert len(set(samples)) == width*2
+        assert len(set(samples)) == width * windows
+        assert rt.model.calls <= 128
     asyncio.run(execute())
 
 
@@ -153,10 +164,11 @@ def test_selection_resume_keeps_models_and_holdout_after_store_reopen(make_runti
         # 耗尽现有排序池后明确交回发现缺口，不能继续提示无收益的原样续跑。
         for _ in range(5):
             run(rt)
-            if updates[-1]['stop_reason'] == 'needs_coverage':
+            if updates[-1]['stop_reason'] == 'model_unknown':
                 break
-        assert updates[-1]['stop_reason'] == 'needs_coverage'
-        assert updates[-1]['selection_remaining_records'] == 0
+        assert updates[-1]['stop_reason'] == 'model_unknown'
+        assert updates[-1]['sampling_requests'] == 128
+        assert updates[-1]['next_action'] == 'return_confirmed_only'
         assert len(scans) == previous_scans
         assert updates[-1]['fit_count'] == 4
     finally:
@@ -303,9 +315,10 @@ def test_selection_resume_consumes_new_high_score_positive_with_frozen_models(ma
 
 def test_random_unlearnable_is_not_certified(make_runtime):
     rng = np.random.default_rng(8); X = rng.normal(size=(4000, 10)); y = rng.integers(0, 2, 4000)
-    rt = make_runtime(); updates, _, samples = numeric_port(rt, X, y); run(rt)
-    assert updates[-1]['stop_reason'] == 'quality_not_met'
-    assert updates[-1]['next_action'] == 'change_representation_or_discriminator'
+    rt = make_runtime(); updates, predicted, samples = numeric_port(rt, X, y); run(rt)
+    assert updates[-1]['stop_reason'] == 'model_unknown'
+    assert updates[-1]['next_action'] == 'return_confirmed_only'
+    assert not predicted and 'predicting' not in {u['stop_reason'] for u in updates}
     assert len(samples) < len(X)
 
 
@@ -321,9 +334,18 @@ def test_insufficient_information_or_rare_positives_never_become_all_negative_or
     assert len(samples) <= 256 and updates[-1]['unresolved'] > 0
 
 
-def test_missing_features_and_observed_unknown_contribute_to_recall():
-    q = quality_bounds([Region(True, 1000, 1000, 1000), Region(False, 1000, 0, 0)], known_unknown=10)
-    assert q['fn_interval'][1] == 1010 and q['recall_lower'] < .5
+def test_selection_pass_keeps_missing_features_and_known_unknown_out_of_results(make_runtime):
+    y = np.arange(5000) % 2
+    X = np.eye(2, dtype=np.float32)[y]
+    y[10] = -1
+    rt = make_runtime(); updates, predicted, _ = numeric_port(rt, X, y, missing=[4999])
+    run(rt)
+    assert updates[-1]['stop_reason'] == 'quality_passed'
+    assert updates[-1]['quality']['basis'] == 'selection'
+    assert updates[-1]['global_semantic_recall'] == 'not_established'
+    assert updates[-1]['unresolved'] == 2
+    assert updates[-1]['missing_features'] == 1
+    assert predicted[10] == predicted[4999] == -1
 
 
 def test_unresolved_history_can_be_judged_after_evidence_becomes_available(make_runtime):
@@ -347,18 +369,6 @@ def test_unchanged_unresolved_evidence_does_not_call_teacher_again(make_runtime)
     assert updates[-1]['reused_unresolved_records'] > 0
 
 
-def test_finite_population_bounds_match_exhaustive_small_integer_tails():
-    from math import comb
-    for N in range(1, 12):
-        for n in range(1, N+1):
-            for k in range(n+1):
-                possible = []
-                for K in range(k, k+N-n+1):
-                    mass = [comb(K, j)*comb(N-K, n-j) if j <= K and n-j <= N-K else 0 for j in range(n+1)]
-                    if 40*sum(mass[:k+1]) >= comb(N, n) and 40*sum(mass[k:]) >= comb(N, n): possible.append(K)
-                assert positive_bounds(N, n, k, .05) == (min(possible), max(possible))
-
-
 def test_linear_folding_preserves_fit_precision_dense_and_sparse():
     from scipy.sparse import csr_matrix
     from caseweave_ops.models import model_bank
@@ -373,14 +383,3 @@ def test_linear_folding_preserves_fit_precision_dense_and_sparse():
 def test_nonuniform_selection_uses_inclusion_weights_and_never_class_weights():
     q = operating_point(np.array([1, 0, 1]), np.array([3., 2., 1.]), weights=np.array([1., 100., 1.]))
     assert q['precision'] < 1 or q['recall'] < 1
-
-
-def test_previous_audit_becomes_known_and_cannot_reenter_independent_measurement(make_runtime):
-    y = np.arange(5000) % 2; X = np.eye(2, dtype=np.float32)[y]
-    rt = make_runtime(); updates, _, _ = numeric_port(rt, X, y)
-    run(rt); first = updates[-1]
-    run(rt); second = updates[-1]
-    assert second['quality']['measurement_round'] == 2
-    assert second['quality']['delta'] < first['quality']['delta']
-    assert set(first['audit_ids']) <= set(second['training_ids'])
-    assert not set(first['audit_ids']) & set(second['audit_ids'])

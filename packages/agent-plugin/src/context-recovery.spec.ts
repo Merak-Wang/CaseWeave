@@ -3,13 +3,13 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import LlmRuntime, { LlmAdapter, LlmError, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { LlmAdapter, LlmError, createUserMessage, createAssistantMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { describe, it, expect } from 'vitest'
-import { contextCompactions, contextCompressionStats, installContextRecovery, isContextOverflow } from './context-recovery.js'
-import { compactRetrievalSurface } from './working-context.js'
+import { contextCompactions, contextCompressionStats, installContextRecovery, isContextOverflow } from './context/recovery.js'
+import { compactRetrievalSurface } from './context/surface.js'
 
 class Adapter extends LlmAdapter {
   requests: GenerateOptions[] = []
@@ -23,6 +23,28 @@ class Adapter extends LlmAdapter {
 }
 
 describe('context recovery through the actual DSH request loop', () => {
+  it('updates official projected occupancy immediately when retrieval history is pruned', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime)
+      await ctx.plugin(ToolRuntime); await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)
+      await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      const handle = await ctx.agents.create({ sessionId: SessionId('official-occupancy') })
+      try {
+        const session = handle.agent.session
+        session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '旧证据'.repeat(8000) }] }), { surfaceOp: 'append' })
+        session.append('step/start', { turn: 0, step: 0 })
+        session.append('assistant/message', { turn: 0, step: 0, stream: [],
+          message: createAssistantMessage({ content: [{ type: 'text', text: '已读' }], source: { provider: 'mock', model: 'model' } }),
+          usage: { inputTokens: 8000, outputTokens: 2 } }, { surfaceOp: 'append' })
+        const before = ctx.sessionProjections.snapshot(session).values
+        compactRetrievalSurface(handle.agent, { freshTurn: true })
+        const after = ctx.sessionProjections.snapshot(session).values
+        expect(after.contextPressure!.projectedTokens!).toBeLessThan(before.contextPressure!.projectedTokens! / 2)
+        expect(after.tokenUsage).toEqual(before.tokenUsage)
+      } finally { await handle.dispose() }
+    } finally { await ctx.fiber.dispose() }
+  })
   it('keeps earlier read batches available when the context has ample space', async () => {
     const ctx = new Context()
     let dispose: (() => Promise<void>) | undefined
@@ -56,6 +78,8 @@ describe('context recovery through the actual DSH request loop', () => {
       compactRetrievalSurface(handle.agent, { contextWindow: 400000 })
       expect(contextCompressionStats(handle.agent)).toMatchObject({ workingSetCount: 1, capacityCount: 0,
         last: { reason: 'working_set', beforeTokens: used, thresholdTokens: 260000, limit: 400000 } })
+      expect(ctx.sessionProjections.snapshot(handle.agent.session).values.contextBreakdown?.messageTokens)
+        .toBe(ctx.tokenMeter.measure(handle.agent.session).surfaceTokens)
     } finally { await dispose?.(); await ctx.fiber.dispose() }
   })
   it.each([false, true])('compresses and continues without cancelling; provider overflow=%s', async failFirst => {

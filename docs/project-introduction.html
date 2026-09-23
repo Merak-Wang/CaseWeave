@@ -685,8 +685,8 @@
       <div class="status-panel">
         <div class="status-heading"><h2 id="start-title">从一句查询开始。</h2><span>GET STARTED / 单机部署</span></div>
         <div class="status-grid">
-          <article><span class="status-kicker">01 / 安装</span><h3>准备 Git 与 Docker</h3><p>Windows 使用 Docker Desktop 的 Linux 容器模式；Linux 使用 Docker Engine。Compose 版本需为 v2.20 或以上。完整容器部署无需宿主 Node.js 或 Python。</p><div class="command"><span>Windows</span><code>.\setup.cmd</code></div><div class="command"><span>Linux / Git Bash</span><code>bash setup.sh</code></div></article>
-          <article><span class="status-kicker building">02 / 打开工作台</span><h3>资源准备后，即可查询</h3><p>首次安装准备模型、示例数据和索引。完成后打开工作台；日常启动复用已有资源，停止会保留数据卷。</p><div class="command"><span>工作台地址</span><code>http://127.0.0.1:3080/retrieval</code></div><div class="command"><span>日常启动 · Windows</span><code>.\setup.cmd start</code></div></article>
+          <article><span class="status-kicker">01 / 安装</span><h3>下载源码，运行启动入口</h3><p>Windows 自动准备 WSL 2、下载安装或启动 Docker，无需 Git Bash；Linux 先准备 Docker 和 Compose v2.20+。Node.js、pnpm、Python、uv 及项目依赖随镜像自动安装。</p><div class="command"><span>Windows</span><code>.\start.cmd</code></div><div class="command"><span>Linux / Git Bash</span><code>bash setup.sh</code></div></article>
+          <article><span class="status-kicker building">02 / 打开工作台</span><h3>一个入口，初始化与更新</h3><p>首次启动自动准备模型、示例数据和索引；之后启动自动构建更新并等待服务就绪。已有资源继续复用，停止保留数据卷。</p><div class="command"><span>工作台地址</span><code>http://127.0.0.1:3080/retrieval</code></div><div class="command"><span>日常启动 · Windows</span><code>.\start.cmd</code></div></article>
           <article><span class="status-kicker validating">03 / 配置模型</span><h3>选择适合的供应商</h3><p>在安装向导或工作台侧栏的“模型与供应商”中配置主模型。任务运行时可以补充条件；模型切换作用于后续步骤。供应商选择需符合工单数据的使用范围。</p><a class="guide-link" href="DEVELOPMENT.md">查看配置与运行说明 <span aria-hidden="true">↗</span></a></article>
         </div>
         <p class="status-note">默认提供 19,587 条示例工单，日期、地区和状态字段缺失，系统会保留未知。首次安装需要联网；检索质量与耗时取决于数据、模型、硬件和查询范围。页面演示使用虚构工单，不连接实际检索服务。</p>

@@ -1,7 +1,7 @@
+import { taskRuntimeMetrics } from './orchestration-metrics.js'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { projectOrchestration } from './orchestration.js'
-import { contextCompressionStats } from '@retrieval-agent/agent-plugin'
 import { installWorkbenchModels, WorkbenchModels } from './models.js'
 import { readActivity } from './activity.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -134,12 +134,20 @@ export class TaskHost {
     const renewal = setInterval(() => {
       void this.store.renew(job, this.options.leaseMs ?? 15000).then(valid => { if (!valid) abort.abort() }, () => abort.abort())
     }, Math.max(50, Math.floor((this.options.leaseMs ?? 15000) / 3)))
+    let automaticReportFailed = false
     try {
       const task = (await this.store.rows<{ session_id: string }>('SELECT session_id FROM ra_task WHERE id=?', [job.task_id]))[0]!
       const agent = await this.options.agentFor(task.session_id)
       const application = this.options.applicationFor(agent)
       if (job.kind !== 'source_check' && job.kind !== 'unlearn') await application.mirror(agent)
       await executeTaskJob(application, agent, job, this.options.analyzer, abort.signal)
+      if (this.deliveries && ['search', 'agent', 'page'].includes(job.kind)) {
+        const state = application.currentOrUndefined(agent)
+        if (state?.phase === 'stopped' && state.termination !== 'cancelled' && state.accessValidation === 'current') {
+          try { await this.deliveries.ensureAutomaticReport(job.task_id, state.frozenEvidence?.packId ?? state.stateId) }
+          catch (error) { automaticReportFailed = true; throw error }
+        }
+      }
       await this.store.settle(job)
     } catch (error) {
       this.options.onError?.(job, error)
@@ -147,7 +155,12 @@ export class TaskHost {
         const message = error instanceof RetrievalError ? error.publicMessage : ['learn', 'unlearn', 'source_check'].includes(job.kind)
           ? 'Wiki 学习或修订未完成，已保留作业记录；已有确认结果仍按原资格下载。' : '后台执行失败，已保存任务条件。'
         const retryable = error instanceof RetrievalError ? error.retryable : !abort.signal.aborted
-        try { await this.store.settle(job, message, retryable) } catch { /* a newer command or owner fenced this worker */ }
+        try {
+          if (automaticReportFailed) {
+            if (retryable && job.attempts < 3) await this.store.settle(job, message, true)
+            else await this.store.settle(job)
+          } else await this.store.settle(job, message, retryable)
+        } catch { /* a newer command or owner fenced this worker */ }
       }
     } finally { clearInterval(renewal) }
   }
@@ -172,8 +185,7 @@ export class TaskHost {
       if (authorized.accessValidation !== 'current' && authorized.termination !== 'snapshot_invalid') throw new RetrievalError('UNAUTHORIZED', authorized.stopExplanation ?? '当前工单访问资格未通过。')
       node = windowedNode(authorized, projectTicketCandidateState(authorized, authorized.retrievalId))
       if (authorized.accessValidation === 'current' && !['snapshot_invalid', 'permission_blocked'].includes(authorized.termination)) {
-        orchestration = projectOrchestration(authorized)
-        if (orchestration.context) orchestration.context = { ...orchestration.context, compression: contextCompressionStats(agent) }
+        orchestration = projectOrchestration(authorized, taskRuntimeMetrics(agent, authorized))
       }
     }
     const task = (await this.store.rows<{ id: string; session_id: string; event_seq: number; semantic_revision: number;
@@ -401,7 +413,7 @@ export async function installTaskHost(ctx: Context, config: { mysqlUrl?: string;
       if (!provider) throw new RetrievalError('PROVIDER_UNAVAILABLE', '当前工单来源不可用。')
       return provider
     },
-    reportModel: (agent, id, stage, input, signal, trace) => callReportModel(ctx, agent, id, stage, input, signal, trace),
+    reportModel: (agent, id, input, signal, trace) => callReportModel(ctx, agent, id, input, signal, trace),
     onError: (_job, error) => { ctx.logger.warn('retrieval background operation failed', error) },
     onRequestError: error => { ctx.logger.warn('retrieval request failed', error) },
     analyzer: new SpacyQueryAnalyzer({ baseUrl: config.queryAnalysisBaseUrl ?? process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012' }) })

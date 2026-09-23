@@ -8,15 +8,17 @@ import { createUserMessage, type GenerateOptions, type TokenUsage } from '@deeps
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { RetrievalError, type ContextManifest, type OperatorDecision, type OperatorRecord,
   type RetrievalState, type SemanticQueryPlan, type TicketCandidateRef, type TicketRetrievalSpec, type TicketSearchProgress } from '@retrieval-agent/contracts'
-import { estimateContextTokens, operatorRecords, operatorRequiredFields, validateOperatorRecords } from '@retrieval-agent/domain'
+import { estimateContextTokens, operatorRecords, operatorRequiredFields, sourceEvidenceFields, validateOperatorRecords } from '@retrieval-agent/domain'
 import { confirmedCount } from '@retrieval-agent/domain/result'
 import { PythonOperatorBridge, type PythonOperatorRun } from './python-operator-bridge.js'
 import type { RetrievalAgentService } from './service.js'
-import { inputContextTokens } from './context-recovery.js'
+import { inputContextTokens } from './context/recovery.js'
 import { isDeepStrictEqual } from 'node:util'
 import { openWiki, revokedKnowledge } from './wiki-store.js'
 import { modelFailure } from './model-failure.js'
 import { readTaskKnowledge } from './knowledge-view.js'
+import { installSessionMetrics } from './metrics/session.js'
+import { ModelCallMetrics } from './metrics/model-call.js'
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 // 累计调用回执只更新计量；学习状态由本轮 learning.update 更新，不能复活旧结论。
@@ -26,6 +28,10 @@ type ModelScope = { state: RetrievalState; input: ModelRequest; knowledge: Pytho
 const object = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RetrievalError('PROTOCOL_MISMATCH', '算子协议要求对象。')
   return value as Record<string, unknown>
+}
+const planFieldsAvailable = (plan: SemanticQueryPlan | undefined, catalog: NonNullable<RetrievalState['snapshot']>['fieldCatalog'] = []) => {
+  const available = new Set(sourceEvidenceFields(catalog).map(field => field.key))
+  return operatorRequiredFields(plan, catalog).every(field => available.has(field))
 }
 
 // 按工单和片段各归并一次；聚合树中的重复来源不会引发反复全表过滤。
@@ -45,11 +51,13 @@ function mergeOperatorRecords(rows: readonly OperatorRecord[]): OperatorRecord[]
 export class SemanticOperators {
   readonly bridge: PythonOperatorBridge
   private readonly requests = new AsyncLocalStorage<ModelScope>()
+  private readonly metricsReady: Promise<void>
   constructor(readonly ctx: Context, readonly application: RetrievalAgentService, readonly wikiRoot?: string,
     readonly root = process.cwd(), bridge?: PythonOperatorBridge,
     readonly filterConfig: { readonly algorithm?: 'auto' | 'cluster' | 'active' | 'learned' | 'baseline' | 'direct'; readonly batchSize?: number; readonly options?: Readonly<Record<string, number | string>> } = {}) {
     this.bridge = bridge ?? new PythonOperatorBridge(root)
     application.operators = this
+    this.metricsReady = installSessionMetrics(ctx)
     ctx.effect(() => () => this.bridge.close())
     ctx.on('llm/stream', (options, next) => {
       const scope = this.requests.getStore()
@@ -96,6 +104,7 @@ export class SemanticOperators {
     return { release: wiki.releaseId ?? 'none', entries: selected.filter(e => !revoked.has(e.reference)).map(e => ({ ...e })) }
   }
   private async model(agent: Agent, scope: ModelScope, signal?: AbortSignal): Promise<unknown> {
+    await this.metricsReady
     signal?.throwIfAborted()
     const config = this.config(agent), input = scope.input
     const system = input.messages.find(m => m.role === 'system')?.content
@@ -112,6 +121,7 @@ export class SemanticOperators {
     await mkdir(resolve(this.root, '.cache/semantic-operators/requests'), { recursive: true })
     const started = Date.now(); let payload: unknown, usage: TokenUsage | undefined, finished = false, failure: string | undefined
     let aggregateReceipt: unknown
+    let callMetrics: ModelCallMetrics | undefined
     try {
       if (input.operation === 'sem_agg') {
         const data = object(JSON.parse(input.messages.find(m => m.role === 'user')!.content))
@@ -129,7 +139,9 @@ export class SemanticOperators {
         }
       }
       await this.requests.run(scope, async () => {
+        callMetrics = new ModelCallMetrics(this.ctx, request, contextWindow)
         for await (const chunk of this.ctx.llm.stream(request)) {
+          callMetrics.push(chunk)
           signal?.throwIfAborted()
           if (chunk.type === 'usage') usage = chunk.usage
           if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
@@ -159,10 +171,12 @@ export class SemanticOperators {
         cached_prompt_tokens: usage.cacheReadTokens ?? null } : {} }
     } catch (error) { failure = error instanceof RetrievalError ? error.code : 'model_failure'; throw error }
     finally {
+      const runtimeMetrics = callMetrics?.finish(finished)
       // 将这一次模型回执附回对应清单，UI 据此显示算子窗口而不是任务累计量。
       for (let i = 0; i < scope.manifests.length; i++) {
         const manifest = scope.manifests[i]!
         if (manifest.operator?.pythonManifestId === input.manifest_id) scope.manifests[i] = { ...manifest,
+          ...(runtimeMetrics ? { runtimeMetrics } : {}),
           operator: { ...manifest.operator, metrics: { ...manifest.operator.metrics, context: {
             ...(usage ? { measuredInputTokens: inputContextTokens(usage) } : {}), limit: contextWindow,
             model: config.model, operation: input.operation,
@@ -234,7 +248,7 @@ export class SemanticOperators {
     let plan: SemanticQueryPlan | undefined
     const metrics = await this.bridge.run(this.runInput(agent, state, knowledge, 'query_plan', state.query.original,
       { confirmed_context: JSON.stringify({ feedback: state.userFeedback ?? [], confirmed_filters: state.query.confirmedConstraints,
-        search_fields: state.snapshot?.queryFields, evidence_fields: state.snapshot?.fieldCatalog,
+        search_fields: state.snapshot?.queryFields, evidence_fields: sourceEvidenceFields(state.snapshot?.fieldCatalog),
         ...(this.wikiRoot ? { knowledge_catalog: catalog.domains.map(d => ({ id: d.id, title: d.title,
           entries: d.entries.filter(e => !e.revoked).map(({ id, title, scope, kind, keywords }) => ({ id, title, scope, kind, keywords })) })) } : {}),
         query_time: state.createdAt, time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone }) }),
@@ -246,6 +260,7 @@ export class SemanticOperators {
       plan = { ...object(event.value), schemaVersion: 1, inputGeneration: state.inputGeneration ?? 0 } as unknown as SemanticQueryPlan
     }, signal)
     if (!plan) throw new RetrievalError('PROTOCOL_MISMATCH', '查询规划缺少结果。')
+    if (!planFieldsAvailable(plan, state.snapshot?.fieldCatalog)) throw new RetrievalError('PROTOCOL_MISMATCH', '查询计划要求了不能作为原文读取的字段。')
     if (this.wikiRoot && !plan.knowledge_routes) throw new RetrievalError('PROTOCOL_MISMATCH', '检索 Agent 尚未选择知识或明确零样本判断。')
     if (plan.knowledge_routes) plan = { ...plan, knowledge_routes: plan.knowledge_routes.map(route => {
       const entry = entries.find(e => e.id === route.entry_id)
@@ -263,7 +278,7 @@ export class SemanticOperators {
     const plan = state.query.contract?.semanticPlan
     if (plan?.inputGeneration === (state.inputGeneration ?? 0)
       && (!this.wikiRoot || plan.knowledge_routes !== undefined)
-      && operatorRequiredFields(plan, state.snapshot?.fieldCatalog).every(key => state.snapshot?.fieldCatalog.some(f => f.key === key))
+      && planFieldsAvailable(plan, state.snapshot?.fieldCatalog)
       && state.contextManifests?.some(m => m.operator?.pythonManifestId === plan.manifest_id)) return state
     await this.application.recordOperatorActivity(agent, { operation: 'query_plan', status: 'running', at: new Date().toISOString(), inputGeneration: state.inputGeneration ?? 0 })
     try {
@@ -290,19 +305,27 @@ export class SemanticOperators {
       throw error
     }
   }
-  async filter(agent: Agent, refs?: readonly TicketCandidateRef[], signal?: AbortSignal): Promise<RetrievalState> {
+  private async finishUnknown(agent: Agent): Promise<RetrievalState> {
+    const state = this.application.current(agent)
+    const learning = state.budget.operatorUsage?.learning as { input_revision?: number; stop_reason?: string; message?: string } | undefined
+    return state.phase !== 'stopped' && learning?.input_revision === (state.inputGeneration ?? 0) && learning.stop_reason === 'model_unknown'
+      ? this.application.stopIncomplete(agent, learning.message ?? '不知道：现有模型无法可靠判断，仅返回已确认工单。') : state
+  }
+  async filter(agent: Agent, refs?: readonly TicketCandidateRef[], signal?: AbortSignal, deferFinish = false): Promise<RetrievalState> {
     await this.application.ensureModelAccess(agent, signal)
     await this.application.coordinator?.prepare(agent, signal)
     const state = await this.ensurePlan(agent, signal), generation = state.inputGeneration ?? 0
     const plan = state.query.contract!.semanticPlan!, knowledge = await this.knowledge(state)
-    const algorithm = refs || plan.goal.mode === 'examples' ? 'direct' : this.filterConfig.algorithm ?? 'auto'
+    const lastLearning = state.budget.operatorUsage?.learning as { input_revision?: number; stop_reason?: string; discovery_key?: string; discovery_remaining_records?: number } | undefined
+    // 全集抽样启动后，定向重判也回到同一学习过程，不能另开 direct 请求绕过额度。
+    const algorithm = plan.goal.mode === 'examples' || refs && lastLearning?.input_revision !== generation ? 'direct' : this.filterConfig.algorithm ?? 'auto'
     const fullScope = ['auto', 'active', 'learned'].includes(algorithm)
     const planFields = operatorRequiredFields(plan, state.snapshot?.fieldCatalog)
     const requiredFields = planFields
     const discoveryKey = (s: RetrievalState) => hash(['ngram-vector-desc-v1', s.candidates.map(c => c.ref).sort(), s.promotedEvidence.map(e => e.evidenceId).sort(), this.filterConfig.options, requiredFields])
-    const lastLearning = state.budget.operatorUsage?.learning as { input_revision?: number; stop_reason?: string; discovery_key?: string; discovery_remaining_records?: number } | undefined
+    if (lastLearning?.input_revision === generation && lastLearning.stop_reason === 'model_unknown') return this.finishUnknown(agent)
     if (fullScope && lastLearning?.input_revision === generation
-      && (lastLearning.stop_reason === 'quality_passed' || lastLearning.discovery_key === discoveryKey(state)
+      && (['quality_passed', 'quality_fallback'].includes(lastLearning.stop_reason ?? '') || lastLearning.discovery_key === discoveryKey(state)
         && (['quality_not_met', 'needs_information'].includes(lastLearning.stop_reason ?? '')
           || lastLearning.stop_reason === 'needs_coverage' && !(lastLearning.discovery_remaining_records! > 0)))) return state
     const byRef = new Map(state.candidates.map(c => [c.ref, c]))
@@ -414,8 +437,9 @@ export class SemanticOperators {
         const p = object(payload), quality = p.quality as import('@retrieval-agent/contracts').LearnedResult['quality']
         if (p.model_id !== modelMetadata?.model_id || p.scope_count !== written) throw new RetrievalError('INVALID_REQUEST', '预测集合未覆盖本次扫描。')
         if (p.passed === true) {
-          if (quality.precision_lower === null || quality.recall_lower === null || quality.precision_lower < quality.precision_target
-            || quality.recall_lower < quality.recall_target) throw new RetrievalError('INVALID_REQUEST', '集合质量未达到声明目标。')
+          if (quality.basis !== 'selection' || !(quality.precision >= .6)
+            || (quality.acceptance !== 'fallback' && !(quality.precision >= quality.precision_target && quality.recall >= quality.recall_target)))
+            throw new RetrievalError('INVALID_REQUEST', '模型选择集查准率不足 60%，或未满足声明的准入方式。')
           const returned = await this.application.semanticResults.count(state.retrievalId, String(p.model_id))
           if (returned !== p.returned) throw new RetrievalError('PROTOCOL_MISMATCH', '数值集合与 Host 保存数量不一致。')
           const setHash = createHash('sha256').update(String(modelMetadata!.feature_id)); let after = -1
@@ -487,7 +511,7 @@ export class SemanticOperators {
     }, signal)
     await flush()
     await this.application.recordOperatorUsage(agent, generation, metrics)
-    return this.application.current(agent)
+    return deferFinish ? this.application.current(agent) : this.finishUnknown(agent)
   }
   async searchAndFilter(agent: Agent, signal?: AbortSignal): Promise<RetrievalState> {
     const state = await this.ensurePlan(agent, signal)
@@ -499,14 +523,14 @@ export class SemanticOperators {
     let learning: Promise<RetrievalState> | undefined
     const startLearning = () => {
       if (!learning) {
-        learning = this.filter(agent, undefined, combined)
+        learning = this.filter(agent, undefined, combined, true)
         // 任一分支失败便取消同行工作，Promise 保留到下方统一收束。
         void learning.catch(error => abort.abort(error))
       }
     }
     try { await this.discoverPlanned(agent, combined, startLearning); startLearning(); await learning }
     catch (error) { abort.abort(error); await learning?.catch(() => {}); throw error }
-    return this.application.current(agent)
+    return this.finishUnknown(agent)
   }
   private async discoverPlanned(agent: Agent, signal?: AbortSignal, firstCandidates?: () => void): Promise<RetrievalState> {
     const state = await this.ensurePlan(agent, signal), generation = state.inputGeneration ?? 0, plan = state.query.contract!.semanticPlan!

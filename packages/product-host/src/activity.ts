@@ -13,7 +13,8 @@ const learningNames: Record<string, string> = { scanning: '读取全范围数值
   ranked_sampling: '按原句 n-gram 与向量相似度排序样本',
   resuming_selection: '复用已训练模型，继续补充独立选择样本', resuming_discovery: '复用已有抽样池和标签，继续补充发现',
   sampling: '语言模型判断真实样本', training: '训练候选分类模型', selecting: '比较模型并选择阈值', predicting: '使用入选模型分块预测全范围',
-  auditing: '独立抽验匹配域与未返回域', quality_passed: '集合质量检验通过', quality_not_met: '集合质量尚未达标',
+  auditing: '历史独立抽验', quality_passed: '全集预测完成', quality_not_met: '模型选择已完成',
+  quality_fallback: '全集预测完成', model_unknown: '筛选已停止',
   needs_coverage: '样本类别覆盖不足，需补充发现', needs_information: '样本证据不足', needs_selection_coverage: '模型选择样本覆盖不足' }
 
 /** Project only committed public actions. Original expert work remains readable across input generations. */
@@ -29,7 +30,7 @@ export function activityItems(rows: Row[], state: RetrievalState): ActivityItem[
       }
       const text = a.kind === 'delegate' ? `分派 ${a.assignments.length} 项专项核查：${a.assignments.map(x => x.goal).join('；')}`
         : a.kind === 'inspect' ? `读取${a.candidateRefs?.length ? ` ${a.candidateRefs.length} 条工单` : '下一组'}依据`
-          : a.kind === 'clarify' ? a.question : a.kind === 'finish' ? a.explanation
+          : a.kind === 'clarify' ? a.question : a.kind === 'finish' ? '结束本轮检索'
             : a.continueRanking ? '继续获取检索结果下一页' : a.delta?.kind === 'rewrite_semantic_query' ? `补充语义搜索：${a.delta.text}` : '按更新的关键词或条件补充检索'
       return [item('main', '主检索 Agent', a.kind, text)]
     }
@@ -53,7 +54,7 @@ export function activityItems(rows: Row[], state: RetrievalState): ActivityItem[
       const phase = learning?.stop_reason ?? values.get('/budget/operatorUsage/learning/stop_reason')
       const selected = learning?.selected_model ?? values.get('/budget/operatorUsage/learning/selected_model')
       if (phase && learningNames[String(phase)]) milestones.push(item('learning', '学习式筛选', 'learning', learningNames[String(phase)]!))
-      if (selected) milestones.push(item('model', '模型选择', 'learning', `入选分类模型：${selected}；集合质量以独立抽验为准`))
+      if (selected) milestones.push(item('model', '模型选择', 'learning', `入选分类模型：${selected}；经验指标见模型选择集`))
       const updates = new Map<string, { index?: number; kind?: string; status?: string; query?: string; id?: string; domainId?: string }>()
       const addTask = (t: unknown) => {
         if (!t || typeof t !== 'object') return

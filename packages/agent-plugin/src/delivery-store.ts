@@ -35,6 +35,7 @@ export class MySqlDeliveryStore {
     const t = (await this.tasks.rows<TaskRecord>('SELECT * FROM ra_task WHERE id=? FOR UPDATE', [d.task_id], c))[0]
     const s = t?.state_json
     if (!s || s.phase !== 'stopped' || (s.frozenEvidence?.packId ?? s.stateId) !== d.spec_json.resultRevision
+      || d.operation_id.startsWith('auto-report-') && s.termination === 'cancelled'
       || ['snapshot_invalid', 'permission_blocked'].includes(s.termination)) throw new RetrievalError('INVALID_TRANSITION', '确认结果已变化，请重新复核并生成新工件。')
   }
   private fence(d: DeliveryRecord, job: DeliveryRecord): void {

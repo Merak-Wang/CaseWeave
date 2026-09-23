@@ -4,7 +4,7 @@ import { RetrievalError } from '@retrieval-agent/contracts'
 import { buildFastTicketRequest, buildSemanticTicketRequest, type TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
 import type { DurableRetrievalAgentService } from './durable-service.js'
 import type { TaskJob } from './task-store.js'
-import { compactRetrievalSurface } from './working-context.js'
+import { compactRetrievalSurface } from './context/surface.js'
 import { modelFailure } from './model-failure.js'
 
 /** Drives the installed DSH loop. Page connections and subscriptions never own this lifetime. */

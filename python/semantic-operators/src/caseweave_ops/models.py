@@ -124,7 +124,7 @@ def choose_model(models, views, y, *, corpus_size, precision_target=.95, recall_
     """Pick cheapest empirically feasible model, or best provisional challenger.
 
     Timings are selection-block microbenchmarks, not production latency promises.
-    Final deployment requires a NEW independent population audit after freezing.
+    Selection metrics describe this holdout only, not population quality bounds.
     """
     board = []
     feature_cost = feature_seconds_per_row or {}

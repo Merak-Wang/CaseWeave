@@ -2,7 +2,7 @@
 
 本文说明查询计划、MySQL 字面检索、Milvus 向量召回及索引一致性。运行命令见 [开发与运行](../DEVELOPMENT.md)，查询语义见 [产品规格](../PRODUCT_REQUIREMENTS.md)，验证场景见 [评测策略](../EVALUATION_STRATEGY.md)。
 
-主要实现入口为 [语义计划契约](../../packages/contracts/src/semantic-operators.ts)、[Python 规划器](../../python/semantic-operators/src/caseweave_ops/planner.py) 和 [数据库 Provider](../../packages/provider-database/src/provider.ts)。数据库当前物理表以 [store.ts 的 DDL](../../packages/provider-database/src/store.ts) 为事实源：`ra_generation`/`ra_ticket`/独立字段投影、`ra_index`/job/checkpoint/cache、原子 publication、每路 search_run/search_hit。它们存来源与检索产物；确认、反馈和合法转移仍由 Controller 和权威任务状态维护，不能用 SQL 命中直接替代 Agent 判断。
+主要实现入口为 [语义计划契约](../../packages/contracts/src/semantic-operators.ts)、[Python 规划器](../../python/semantic-operators/src/caseweave_ops/search.py) 和 [数据库 Provider](../../packages/provider-database/src/provider.ts)。数据库当前物理表以 [store.ts 的 DDL](../../packages/provider-database/src/store.ts) 为事实源：`ra_generation`/`ra_ticket`/独立字段投影、`ra_index`/job/checkpoint/cache、原子 publication、每路 search_run/search_hit。它们存来源与检索产物；确认、反馈和合法转移仍由 Controller 和权威任务状态维护，不能用 SQL 命中直接替代 Agent 判断。
 
 当前字段映射 `normalized-fields-v2` 遍历完整原始字段值，不沿用旧 searchText 的 256 值上限；NULL 保持未知，生成字段能力显式引用生成策略。NFKC 小写规范化与二进制 LOCATE 实现任意字面子串基线。可选 bigram 倒排只做必要条件，后置精确谓词始终保留；正向必要 gram 中选择最窄的 posting，超过语料 10% 时回退精确扫描，避免宽条件强制 join 的实测退化。OR 只使用全部分支共同需要的 gram，NOT 不提供正向剪枝。扫描及加速均用 keyset 全集枚举；最终排序页宽与向量工单 Top-K 分离。
 

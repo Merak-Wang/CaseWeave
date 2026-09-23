@@ -1,10 +1,18 @@
+import { bindRuntimeMetrics, renderRuntimeMetrics } from './workbench-metrics.js'
+import { workflowSteps } from './workbench-flow.js'
+import { renderJudgment } from './workbench-judgment.js'
 const $ = id => document.getElementById(id)
 const make = (tag, value = '', cls = '') => { const e = document.createElement(tag); e.textContent = value; e.className = cls; return e }
 const action = (label, run, cls = '') => { const b = make('button', label, cls); b.type = 'button'; b.onclick = run; return b }
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 const statusNames = { pending: '等待开始', running: '正在核查', completed: '已提交', failed: '未完成', superseded: '已更新' }
 const workNames = { starting: '正在阅读领域知识', inspect: '正在核对工单原文', search: '正在补充搜索', report: '正在整理核查发现' }
-const stages = [['search', '理解与召回'], ['review', '语义筛选'], ['experts', '专项核查'], ['synthesis', '结果交付']]
+
+export function knowledgeConsumers(orchestration, reference, id) {
+  const experts = (orchestration?.experts ?? []).filter(e => e.knowledge.some(k => k.reference === reference && k.used))
+  const sample = orchestration?.samplingKnowledge?.entries.find(k => k.reference ? k.reference === reference : k.id === id)
+  return [...experts, ...(sample ? [{ title: '抽样判断', requestCount: sample.requestCount }] : [])]
+}
 
 /** 连续重复事件折成一个进度项；保留次数与所有原始事件供展开追溯。 */
 export function activityGroups(items) {
@@ -29,14 +37,14 @@ export function revealText(el, value, animate = false) {
   if (animate && !reduced()) el.animate([{ clipPath: 'inset(0 100% 0 0)', opacity: .4 }, { clipPath: 'inset(0 0 0 0)', opacity: 1 }], { duration: Math.min(850, 250 + value.length * 7), easing: 'ease-out' })
 }
 
-export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, showView, expertDetail }) {
+export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, getReportStatus, showView, expertDetail, openCandidate }) {
   let epoch = 0, current, library, libraryRelease, libraryPending = false, filter = '', cardKeys = new Map(), initialized = false
   let lastActivity = '', returnFocus, returnScroll, knowledgeRequest = 0, disconnected = false
   const logKeys = new Map()
   const activityRecords = new Map()
   let activityAfter = 0, activityRevision = -1, activityLoading = false
   const valid = (e, s) => e === epoch && s === getSnapshot()?.orchestration?.inputGeneration
-  const usedBy = reference => (current?.experts ?? []).filter(e => e.knowledge.some(k => k.reference === reference && k.used))
+  const usedBy = (reference, id) => knowledgeConsumers(current, reference, id)
   function clock() {
     const elapsed = (current?.clock?.elapsedMs ?? 0) + (current?.clock?.running ? Math.max(0, Date.now() - Date.parse(current.updatedAt)) : 0)
     $('elapsed').textContent = current?.clock?.unavailable ? '历史耗时未记录' : current?.clock ? '本轮 ' + Math.floor(elapsed / 60000) + ':' + String(Math.floor(elapsed / 1000) % 60).padStart(2, '0') : ''
@@ -106,24 +114,6 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
     } catch { if (ownEpoch === epoch) $('activity-caption').textContent = '轨迹暂时无法读取，连接恢复后重试' }
     finally { if (ownEpoch === epoch) activityLoading = false }
   }
-  function contextMeter(context) {
-    const meter = $('context-meter'), label = $('context-label'), fill = $('context-fill')
-    const tokens = context?.measuredInputTokens ?? context?.estimatedInputTokens
-    const percent = context?.limit && tokens !== undefined ? Math.min(100, Math.round(tokens / context.limit * 100)) : undefined
-    label.textContent = percent === undefined ? tokens === undefined ? '待测量' : '约 ' + tokens.toLocaleString() : percent + '%'
-    fill.setAttribute('stroke-dasharray', `${(percent ?? 0) * 56.55 / 100} 56.55`)
-    meter.dataset.pressure = percent >= 80 ? 'high' : 'normal'
-    const stats = context?.compression, last = stats?.last
-    const compression = stats ? `工作上下文整理 ${stats.workingSetCount} 次 · 容量压缩 ${stats.capacityCount} 次` : `历史整理/压缩 ${context?.compactionCount ?? 0} 次（旧记录未区分原因）`
-    const trigger = last ? `\n最近一次：${{ working_set: '工作集达到整理阈值', window_pressure: '完整请求接近模型窗口', provider_overflow: '供应商返回上下文容量错误' }[last.reason]}；触发前约 ${last.beforeTokens.toLocaleString()} tokens${last.reason === 'provider_overflow' ? '' : '，阈值 ' + last.thresholdTokens.toLocaleString()}。` : ''
-    const description = context?.source === 'operator' ? `最近一次语义算子请求：${context.operation}${context.model ? ' · ' + context.model : ''}\n${context.measuredInputTokens === undefined ? '估算输入' : '实际输入'} ${tokens.toLocaleString()} tokens${context.limit ? ' / 配置窗口 ' + context.limit.toLocaleString() + '（' + percent + '%）' : '；历史记录未保存模型窗口大小'}\n算子按批次独立请求，此处显示单次窗口占用；累计用量见输出统计。`
-      : percent === undefined ? '上下文用量将在第一次模型请求后显示。' : `${context.measuredInputTokens === undefined ? '估算输入' : '实际输入'} ${tokens.toLocaleString()} / ${context.limit.toLocaleString()} tokens（${percent}%）\n输出与协议预留 ${context.reservedTokens.toLocaleString()} tokens\n${compression}${trigger}\n工作集整理不表示模型窗口已满。原始轨迹与来源保留，接近容量限制时压缩后继续。`
-    meter.title = description; meter.setAttribute('aria-label', description)
-    $('context-description').textContent = description
-    const usage = current?.usage
-    $('output-usage').textContent = usage ? `输出 ${usage.outputTokens.toLocaleString()} tokens` : '输出待计量'
-    $('usage-description').textContent = usage ? `累计输出 ${usage.outputTokens.toLocaleString()} tokens\n主 Agent：${usage.mainOutputTokens.toLocaleString()}\n专家合计：${usage.expertOutputTokens.toLocaleString()}\n语义算子：${(usage.operatorOutputTokens ?? 0).toLocaleString()}\n模型请求：${usage.modelRequests} 次（整个任务累计）\n主 Agent ${usage.mainRequests ?? '—'} 次 · 专家 ${usage.expertRequests ?? '—'} 次 · 语义算子 ${usage.operatorRequests ?? '—'} 次\n` + Object.entries(usage.operatorUsage?.calls_by_operation ?? {}).map(([op, count]) => `${{ query_plan: '检索规划', sem_filter: '样本判断与抽验', sem_agg: '证据汇总', sem_extract: '事实提取' }[op] ?? op}：${count} 次`).join('\n') + '\n聚类采样和分类模型训练在 Python 本地执行，不调用大模型。\n' + usage.experts.map(e => `${e.title}（第 ${e.inputGeneration + 1} 轮）：${e.outputTokens.toLocaleString()}`).join('\n') : '收到模型用量回执后更新。'
-  }
   function update(s, offline = false) {
     disconnected = offline
     const o = s.orchestration, wasInitialized = initialized
@@ -133,61 +123,74 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
     const busy = !unavailable && !o?.terminal && !s.node?.result && (!s.question || o?.experts.some(e => ['pending', 'running'].includes(e.status)))
     $('live-work').dataset.state = unavailable ? 'error' : disconnected ? 'offline' : busy ? 'running' : o?.terminal ? ['top_k_accepted', 'no_result'].includes(o.outcome) ? 'done' : 'stopped' : 'waiting'
     const working = o?.experts.filter(e => e.status === 'running') ?? []
-    const last = s.conversation?.filter(c => c.role === 'assistant').at(-1)
     const titles = { planning: '正在理解当前要求，制定检索计划', coverage: '尚未找到候选，正在核对搜索范围与后续方向', search: '正在从关键词与语义中寻找线索', review: '正在审阅标题与摘要，按需核实疑点', experts: working.length + ' 位领域专家正在独立核查', synthesis: '正在汇总发现，核对遗漏与分歧', finished: ['top_k_accepted', 'no_result'].includes(o?.outcome) ? '本轮检索已结束' : '本轮已停止，仍有未完成项' }
+    const reportStatus = getReportStatus(), reporting = ['queued', 'running'].includes(reportStatus)
+    if (reporting && !unavailable && !disconnected) $('live-work').dataset.state = 'running'
     const title = unavailable ? '检索暂时无法继续' : disconnected ? o?.terminal ? '连接已断开，显示已保存结果' : '正在重连，后台检索仍在继续' : s.question && !working.length ? '有一处范围需要你补充'
+      : s.node?.result && o?.outcome !== 'cancelled' ? reporting ? '语义筛选已结束，正在生成检索报告' : reportStatus === 'ready' ? '检索报告已生成，过程与依据已保留' : reportStatus === 'failed' ? '检索报告生成失败，可重试' : '语义筛选已结束，可生成检索报告'
       : !o?.terminal && o?.operation === 'sem_filter' ? '正在按当前业务判据筛选工单集合' : !o?.terminal && o?.operation === 'sem_extract' ? '正在从工单证据中提取所需事实' : !o?.terminal && o?.operation === 'sem_agg' ? '正在整理证据与引用' : !o?.terminal && o?.operation === 'sem_search' ? '正在执行本轮检索计划，补充候选' : titles[o?.stage] ?? '正在准备检索'
     revealText($('live-title'), title, wasInitialized)
-    const note = $('live-note')
-    const stoppedReason = o?.terminal && !['top_k_accepted', 'no_result'].includes(o.outcome) ? o.stopExplanation : undefined
-    const limitation = o?.blockers?.join('；')
-    note.hidden = disconnected || !(stoppedReason || limitation || busy && last)
-    if (stoppedReason || limitation || last) revealText(note, stoppedReason || limitation || last.text, wasInitialized)
     const learning = o?.retrieval?.learning
     $('live-metrics').replaceChildren(...(o ? [['已召回线索', o.counts.candidates], ...(typeof learning?.scopeCount === 'number' ? [['筛选范围', learning.scopeCount]] : [['已读原文', o.counts.inspected]]), ['已确认', o.counts.confirmed]].map(([label, count]) => { const e = make('span'); e.append(make('strong', Number(count).toLocaleString()), make('small', label)); return e }) : []))
-    const active = stages.findIndex(([key]) => key === (['planning', 'coverage'].includes(o?.stage) ? 'search' : o?.stage)), done = o?.terminal && ['top_k_accepted', 'no_result'].includes(o.outcome)
-    const railKey = [o?.stage, done, unavailable, o?.counts.experts, o?.counts.completedExperts, o?.counts.confirmed, learning?.status, o?.fastQueryComplete, disconnected].join(':')
+    const steps = workflowSteps(s, reportStatus), railKey = JSON.stringify([steps, disconnected])
     if ($('stage-rail').dataset.key !== railKey) {
       $('stage-rail').dataset.key = railKey
-      $('stage-rail').replaceChildren(...stages.map(([key, label], i) => {
-        const e = make('li'), skipped = key === 'experts' && !o?.counts.experts && (done || o?.terminal)
-        const observed = key === 'search' ? o?.fastQueryComplete || Boolean(s.node?.searchProgress?.channels.some(c => c.status === 'completed')) : key === 'review' ? (o?.counts.confirmed > 0 || learning?.status === 'quality_passed') && (active > 1 || o.terminal) : key === 'experts' ? o?.counts.experts > 0 && o.counts.completedExperts === o.counts.experts : done
-        e.dataset.state = skipped ? 'skipped' : i === active && !unavailable ? 'active' : observed ? 'done' : o?.terminal ? 'stopped' : 'upcoming'
-        if (i === active && !unavailable) e.setAttribute('aria-current', 'step')
-        e.append(make('span', skipped ? '−' : e.dataset.state === 'done' ? '✓' : e.dataset.state === 'stopped' ? '−' : String(i + 1), 'stage-number'), make('span', label), ...(skipped ? [make('small', '无需调用')] : [])); return e
+      $('stage-rail').replaceChildren(...steps.map((step, i) => {
+        const e = make('li'), link = action('', () => openStep(step), 'stage-link'); e.dataset.state = disconnected && step.state === 'active' ? 'stopped' : step.state
+        if (step.state === 'active') link.setAttribute('aria-current', 'step')
+        const copy = make('span', '', 'stage-copy'); copy.append(make('strong', step.label), make('small', step.note))
+        link.append(make('span', step.state === 'done' ? '✓' : String(i + 1), 'stage-number'), copy); e.append(link); return e
       }))
     }
     clock()
-    contextMeter(o?.context)
+    renderRuntimeMetrics(o?.context, o?.usage)
     $('activity-caption').textContent = busy ? '最近进展 · 同类批次合并更新' : '已保存的执行记录'
     $('activity-log').dataset.busy = String(busy && !disconnected)
     // Initial history is not replayed as fresh generation and never forces scrolling.
     void refreshActivity(s)
-    if (o) {
+    if (o && !unavailable) {
       renderTeam(o)
-      const consumption = JSON.stringify(o.experts.map(e => e.knowledge))
+      const consumption = JSON.stringify([o.experts.map(e => e.knowledge), o.samplingKnowledge])
       if (library && consumption !== lastActivity && !$('knowledge-dialog').open) { renderLibrary(); lastActivity = consumption }
     }
     if (libraryRelease !== o?.catalog.releaseId) { library = undefined; libraryRelease = o?.catalog.releaseId; if (!$('collaboration-view').hidden) void loadLibrary() }
     initialized = true
   }
+  function openStep(step) {
+    showView(step.view, true)
+    if (step.target) $(step.target).scrollIntoView({ block: 'start', behavior: reduced() ? 'instant' : 'smooth' })
+  }
   function renderTeam(o) {
-    $('team-count').textContent = o.experts.length ? o.counts.completedExperts + ' / ' + o.counts.experts + ' 专项已返回' : '按需求自动分工'
+    const hasSamples = Boolean(o.samplingKnowledge?.entries.length)
+    $('team-count').textContent = [hasSamples ? `${o.samplingKnowledge.requestCount} 次领域判断请求` : '', o.experts.length ? o.counts.completedExperts + ' / ' + o.counts.experts + ' 专项已返回' : ''].filter(Boolean).join(' · ')
     const mainWaiting = o.coordinatorActivity === 'waiting_experts'
     $('coordinator-node').dataset.state = !o.terminal && !mainWaiting && !o.waitingForInput && !disconnected ? 'running' : ''
     $('coordinator-state').textContent = o.terminal ? '本轮任务已结束' : o.waitingForInput ? '等待已提出问题的答复' : mainWaiting ? '等待所需专家结果 · 其余分支继续' : o.stage === 'experts' ? '与专家并行 · 继续取证和核对返回结果' : '理解需求 · 选择专家 · 核对结论'
     $('synthesis-node').dataset.state = o.stage === 'synthesis' && !disconnected ? 'running' : ''
-    $('synthesis-state').textContent = o.openConflicts ? o.openConflicts + ' 处判断分歧，继续核对证据' : o.terminal ? '已确认 ' + o.counts.confirmed + ' 条工单' : '专家发现经核实后，进入确认结果'
+    $('synthesis-state').textContent = o.openConflicts ? o.openConflicts + ' 处判断分歧，继续核对证据' : o.terminal ? `已确认 ${o.counts.confirmed} 条工单 · ${getReportStatus() === 'ready' ? '报告已生成' : ['queued', 'running'].includes(getReportStatus()) ? '报告生成中' : '可生成报告'}` : '筛选结果核对后生成检索报告'
     const box = $('expert-lanes')
-    if (!o.experts.length) {
+    if (!o.experts.length && !hasSamples) {
       const key = 'empty-' + o.stage
-      if (box.dataset.key !== key) { box.replaceChildren(make('p', o.terminal ? '本次由主 Agent 完成检索，未调用领域专家。' : o.stage === 'search' ? '快查完成后，按业务需要选择专家。' : '主 Agent 正在核查，需要专项分析时会自动分派。', 'team-empty')); box.dataset.key = key; cardKeys.clear() }
+      if (box.dataset.key !== key) { box.replaceChildren(make('p', o.terminal ? '本次直接依据业务判据与工单原文完成判断。' : '正在依据业务判据与工单原文核查，适用的领域知识将随判断展示。', 'team-empty')); box.dataset.key = key; cardKeys.clear() }
       return
     }
     if (box.dataset.key?.startsWith('empty')) box.replaceChildren()
     box.dataset.key = 'team'
-    const ids = new Set(o.experts.map(e => e.id))
+    const ids = new Set([...o.experts.map(e => e.id), ...(hasSamples ? ['sampling-judgment'] : [])])
     for (const c of [...box.children]) if (!ids.has(c.dataset.expertId)) { cardKeys.delete(c.dataset.expertId); c.remove() }
+    if (hasSamples) {
+      const key = JSON.stringify([o.samplingKnowledge, o.retrieval?.learning, library, o.terminal, disconnected])
+      if (cardKeys.get('sampling-judgment') !== key) {
+        const old = $('sampling-judgment'), node = renderJudgment(o, library, { openKnowledge, openCandidate,
+          showProcess: () => openStep({ view: 'process', target: 'learning-progress' }) })
+        node.dataset.expertId = 'sampling-judgment'
+        const trace = node.querySelector('details'), oldTrace = old?.querySelector('details')
+        if (trace && oldTrace) { trace.dataset.offset = oldTrace.dataset.offset ?? '0'; trace.open = oldTrace.open }
+        if (disconnected) node.dataset.state = 'paused'
+        if (old) old.replaceWith(node); else box.prepend(node)
+        cardKeys.set('sampling-judgment', key)
+      }
+    }
     for (const e of o.experts) {
       let card = [...box.children].find(c => c.dataset.expertId === e.id)
       if (!card) {
@@ -236,7 +239,8 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
     const visible = entries.filter(k => (!filter || k.domain === filter) && (!q || [k.title, k.scope, ...k.keywords].join(' ').toLowerCase().includes(q)))
     $('knowledge-list').replaceChildren(...visible.map(k => {
       const row = action('', () => void openKnowledge(k.id), 'knowledge-card'); row.disabled = k.revoked
-      const head = make('div', '', 'knowledge-card-meta'); head.append(make('span', library.domains.find(d => d.id === k.domain)?.title), make('span', k.revoked ? '已停用' : usedBy(k.reference).length ? '本次已引用' : '知识条目', usedBy(k.reference).length ? 'used-knowledge' : ''))
+      const users = usedBy(k.reference, k.id)
+      const head = make('div', '', 'knowledge-card-meta'); head.append(make('span', library.domains.find(d => d.id === k.domain)?.title), make('span', k.revoked ? '已停用' : users.length ? users.map(u => u.title).join('、') + '已使用' : '知识条目', users.length ? 'used-knowledge' : ''))
       row.append(head, make('strong', k.title), make('p', k.scope), make('small', k.keywords.slice(0, 3).join(' / '))); return row
     }))
     if (!visible.length) $('knowledge-list').append(make('p', entries.length ? '没有匹配的知识条目。' : library.status === 'preparing' ? '快查完成后可查看本次使用的知识目录。' : '暂未配置领域知识，专家仍可依据工单开展核查。', 'team-empty'))
@@ -250,9 +254,9 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
       if (!valid(e, gen) || request !== knowledgeRequest || data.inputGeneration !== gen) return
       const k = data.entry; if (!k) throw new Error('此条目暂时无法读取。')
       $('knowledge-title').textContent = k.title
-      const body = $('knowledge-body'), users = usedBy(k.reference)
+      const body = $('knowledge-body'), users = usedBy(k.reference, k.id)
       body.replaceChildren(make('span', k.kind === 'retrieval-observation' ? '检索经验' : '业务知识', 'badge'), make('p', k.scope, 'knowledge-scope'))
-      if (users.length) body.append(make('p', '本次引用：' + users.map(x => x.title).join('、'), 'knowledge-used'))
+      if (users.length) body.append(make('p', '本次使用：' + users.map(x => x.title + (x.requestCount ? `（${x.requestCount} 次请求）` : '')).join('、'), 'knowledge-used'))
       for (const block of k.bodyMarkdown.split(/\n\s*\n/u)) {
         for (const line of block.split('\n')) {
           if (!line.trim()) continue
@@ -266,14 +270,12 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, s
       }
       for (const [title, list] of [['核查要点', k.evidenceChecklist], ['适用限制', k.limitations]]) { if (list.every(t => k.bodyMarkdown.includes(t))) continue; const ul = make('ul'); ul.append(...list.map(t => make('li', t))); body.append(make('h3', title), ul) }
       const version = make('details', '', 'report-audit'); version.append(make('summary', '知识版本'), make('p', '修订 ' + k.revision), make('small', k.reference))
-      body.append(make('p', '知识用于辅助判断，工单结论仍以原文证据为准。', 'muted'), version)
+      body.append(version)
     } catch (err) { if (e === epoch && request === knowledgeRequest) $('knowledge-body').replaceChildren(make('p', err.message, 'notice'), action('重新读取', () => void openKnowledge(id))) }
   }
   $('show-activity').onclick = () => showView('process', true)
-  $('context-meter').onclick = () => $('context-dialog').showModal()
-  $('context-close').onclick = () => $('context-dialog').close()
-  $('output-usage').onclick = () => $('usage-dialog').showModal()
-  $('usage-close').onclick = () => $('usage-dialog').close()
+  $('synthesis-report').onclick = () => showView('report', true)
+  bindRuntimeMetrics()
   $('knowledge-search').oninput = renderLibrary
   $('knowledge-retry').onclick = () => void loadLibrary()
   $('close-knowledge').onclick = closeKnowledge

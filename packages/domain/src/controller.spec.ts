@@ -749,7 +749,9 @@ describe('RetrievalController', () => {
     }
     await expect(controller.decide(PRINCIPAL, state, input)).rejects.toThrow(/尚未收到/u)
     state = controller.recordModelRequest(state, { estimatedInputTokens: 100, serializationBytes: 400, wallClockElapsedMs: 1, accepted: true })
-    state = controller.recordModelResponse(state, { modelLatencyMs: 4, outputTokens: 80, wallClockElapsedMs: 5 })
+    state = controller.recordModelResponse(state, { modelLatencyMs: 4, outputTokens: 80, wallClockElapsedMs: 5,
+      runtimeMetrics: { tokenUsage: { uncachedInputTokens: 100, outputTokens: 80, cacheReadTokens: 20, cacheWriteTokens: 0 } } })
+    expect(state.budget?.runtimeMetrics?.tokenUsage?.cacheReadTokens).toBe(20)
     state = await controller.decide(PRINCIPAL, state, { ...input, judgments: [{
       candidateRef: CANDIDATE_REF, verdict: 'accept', evidenceRefs: [CANDIDATE_REF], reason: 'the visible summary addresses this account problem',
     }] })

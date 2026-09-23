@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared installer for Linux and Git for Windows. Never source .env as shell code.
+# Linux installer; Windows uses native setup.ps1. Never source .env as shell code.
 set +x
 set -Eeuo pipefail
 umask 077
@@ -7,9 +7,9 @@ umask 077
 usage() {
   cat <<'HELP'
 Usage: bash setup.sh [install|start|stop|status|logs] [options]
-  不带参数           已有配置时快速启动；首次使用进入安装
+  不带参数           自动构建更新并启动；首次使用自动初始化
   install            首次安装或代码更新：配置、构建、下载校验、预处理并启动
-  start              日常启动已有镜像，等待健康检查；不构建、不下载、不重建索引
+  start              构建应用/算子/模型服务更新并启动；已有安装不重复下载和索引准备
   stop               停止当前项目服务，保留容器和数据卷
   status             查看当前项目的容器状态
   logs               查看应用和模型服务最近 100 行日志
@@ -46,8 +46,9 @@ if [[ -z $action ]]; then
   if [[ -f $env_file && -z $device ]] && ! $check_only && $build; then action=start
   else action=install; fi
 fi
-if [[ $action != install ]] && { [[ -n $device ]] || $check_only || ! $build; }; then
-  printf '%s\n' '日常操作只接受 --env-file 和 --non-interactive；安装选项请配合 install 使用。' >&2; exit 2
+if [[ $action == start ]] && { [[ -n $device ]] || $check_only; }; then action=install; fi
+if [[ $action != install && $action != start ]] && { [[ -n $device ]] || $check_only || ! $build; }; then
+  printf '%s\n' '日常管理操作只接受 --env-file 和 --non-interactive。' >&2; exit 2
 fi
 if $check_only && [[ -n $device ]]; then
   printf '%s\n' '--check 不修改设备配置，请单独运行 --gpu 或 --cpu。' >&2; exit 2
@@ -63,6 +64,15 @@ failed() {
 trap failed ERR
 die() { printf '%s\n' "$1" >&2; return 1; }
 command -v docker >/dev/null || die '未找到 Docker。请先安装并启动 Docker Desktop 或 Docker Engine。'
+compose() { docker compose --env-file "$env_file" "$@"; }
+# 复用 Compose 的应用容器判断首次准备，不增加独立安装标记。
+if [[ $action == start ]]; then
+  if [[ ! -f $env_file ]]; then action=install
+  else
+    services=$(compose ps --all --services)
+    if [[ $'\n'"$services"$'\n' != *$'\napp\n'* ]]; then action=install; fi
+  fi
+fi
 # Installation verifies engine capabilities. Routine commands let Compose report
 # an unavailable/incompatible engine directly instead of repeating slow probes.
 if [[ $action == install ]]; then
@@ -76,14 +86,13 @@ fi
 
 created=false
 if [[ ! -f $env_file ]]; then
-  [[ $action == install ]] || die '尚无配置文件。首次使用请运行 setup.cmd 或 bash setup.sh 完成安装。'
+  [[ $action == install ]] || die '尚无配置文件。请运行 start.cmd 或 bash setup.sh start 完成首次初始化。'
   $check_only && die '配置文件不存在。先运行安装向导，或复制 .env.example 并填写模型配置。'
   cp -- "$root/.env.example" "$env_file"
   created=true
   printf '已创建配置：%s\n' "$env_file"
 fi
 env_file=$(cd -- "$(dirname -- "$env_file")" && printf '%s/%s' "$PWD" "$(basename -- "$env_file")")
-compose() { docker compose --env-file "$env_file" "$@"; }
 
 # Compose parses interpolation/quoting itself. Keep resolved credentials off stdout.
 load_config() {
@@ -138,7 +147,12 @@ if [[ $action != install ]]; then
   compose config --quiet 2>/dev/null || die 'Compose 配置校验失败，请检查本地配置。'
   case "$action" in
     start)
-      stage='启动已有服务（缺少镜像或初始化数据时请先运行安装入口）'
+      if $build; then
+        stage='构建应用、算子和模型服务更新（复用 Docker 缓存）'
+        printf '%s\n' "$stage"
+        compose build app semantic-operators model-service
+      fi
+      stage='启动更新后的服务，等待健康检查'
       printf '%s\n' "$stage"
       compose up -d --wait --no-build --pull never app
       port=$(value_of RETRIEVAL_AGENT_WEB_PORT); port=${port:-3080}
@@ -212,11 +226,11 @@ else
   printf '\n[1/8] 使用已有镜像\n'
 fi
 step '[2/8] 下载并校验模型（首次下载可能较慢）' run --rm --no-deps model-prepare prepare --download
-step '[3/8] 启动数据库、算子与模型服务，等待健康检查' up -d --wait mysql milvus model-service semantic-operators
+step '[3/8] 启动数据库、算子与模型服务，等待健康检查' up -d --wait --no-build mysql milvus model-service semantic-operators
 step '[4/8] 下载数据、清洗脱敏并校验' run --rm --no-deps app-prepare
 step '[5/8] 导入工单并建立向量索引（按进度输出，支持续跑）' run --rm --no-deps app-prepare node scripts/database.mjs prepare
 step '[6/8] 准备关键词索引' run --rm --no-deps app-prepare node scripts/database.mjs grams
 step '[7/8] 验证数据与检索索引' run --rm --no-deps app-prepare node scripts/database.mjs verify
-step '[8/8] 启动工作台，等待健康检查' up -d --wait app
+step '[8/8] 启动工作台，等待健康检查' up -d --wait --no-build app
 printf '\n部署完成：http://127.0.0.1:%s/retrieval\n' "$port"
 printf '%s\n' '请在工作台提交一次查询，确认主模型服务实际可用。关闭终端不会停止后台服务。'

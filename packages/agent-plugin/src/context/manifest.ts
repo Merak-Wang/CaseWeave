@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { ContextManifest, RetrievalState } from '@retrieval-agent/contracts'
 
-/** Recover only exact controlled projections from the actual immutable DSH request envelope. */
+/** 从实际发送的不可变请求中还原工单和片段视窗，登记本次模型可见来源。 */
 export function requestManifest(state: RetrievalState, options: GenerateOptions, roleId: string, estimatedTokens: number): ContextManifest {
   const strings = (v: unknown): string[] => typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(strings)
     : v && typeof v === 'object' ? Object.values(v).flatMap(strings) : []

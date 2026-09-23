@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import {
   RetrievalId,
@@ -15,6 +16,12 @@ import { candidateWindow, windowedNode } from './window.js'
 import { projectTicketCandidateState } from './presentation.js'
 import { createRetrievalReport, validateReportNarrative, reportMarkdown } from './report.js'
 import { candidateEvidence } from './evidence.js'
+
+function withoutReportFormat<T extends { format?: 'summary' }>(report: T): Omit<T, 'format'> {
+  const legacy = { ...report }
+  delete legacy.format
+  return legacy
+}
 
 describe('A4 phase8 judgment citation projection', () => {
   it('exposes only actually cited, model-visible, current-source and allowed-field spans', () => {
@@ -99,11 +106,53 @@ describe('A14 phase 5 delivery boundaries', () => {
     const report = createRetrievalReport(state, [{ kind: 'query', text: state.query.original }], 'handoff')
     expect(report.confirmedCount).toBe(1); expect(report.citations[0]?.id).toBe(CANDIDATE_REF)
     expect(report.coverage.semanticStatus).toBe('satisfied'); expect(report.coverage.complete).toBe(false)
+    expect(report.format).toBe('summary')
     expect(() => validateReportNarrative({ paragraphs: [{ text: 'bad', citations: ['unconfirmed'] }] }, report)).toThrow('引用')
     expect(validateReportNarrative({ paragraphs: [{ text: '概览支持登录场景。', citations: [CANDIDATE_REF] }] }, report).paragraphs).toHaveLength(1)
     expect(reportMarkdown(report)).toContain('交接报告')
+    expect(reportMarkdown(withoutReportFormat(report))).toContain('## 覆盖与停止')
+    const learning = { modelId: 'model', featureId: 'feature', hashBasis: 'test',
+      quality: { basis: 'selection' as const, precision: .903, recall: .915, precision_target: .9, recall_target: .9 } }
+    const selected = reportMarkdown(withoutReportFormat({ ...report, learning }))
+    expect(selected).toContain('模型选择集指标：Precision=0.903，Recall=0.915')
+    expect(selected).not.toContain('集合下界')
+    const sampled = withoutReportFormat({ ...report, learning: { ...learning, quality: { precision_lower: .827, recall_lower: .016,
+      precision_target: .9, recall_target: .9 } } })
+    expect(reportMarkdown(sampled)).toContain('历史抽验下界')
     const empty = createRetrievalReport({ ...state, selectedCandidateRefs: [], termination: 'partial', stopExplanation: '证据不足，未完成。' }, [])
     expect(empty.confirmedCount).toBe(0); expect(empty.examples).toEqual([]); expect(empty.coverage.stoppingReason).toBe('partial')
+  })
+
+  it('renders new reports as a short summary with readable citation mapping', () => {
+    const base = retrievalState()
+    const state = { ...base, modelVisibleCandidateRefs: [CANDIDATE_REF], judgments: [{ candidateRef: CANDIDATE_REF,
+      verdict: 'accept' as const, evidenceRefs: [CANDIDATE_REF], reason: '可见概览支持' }] }
+    const report = createRetrievalReport(state, [{ kind: 'query', text: state.query.original }], 'operator')
+    const markdown = reportMarkdown(report)
+    expect(markdown).toContain('查询：登录问题')
+    expect(markdown).toContain('确认数量：1')
+    expect(markdown).toContain('已确认 1 条工单。')
+    expect(markdown).not.toContain('## 引用')
+    expect(markdown).not.toContain('=unsafe title')
+    expect(markdown).not.toContain('+unsafe summary')
+    expect(markdown).not.toContain('覆盖与停止')
+    expect(markdown).not.toContain('交付与使用')
+    expect(() => validateReportNarrative({ paragraphs: [{ text: '简短总结'.repeat(76), citations: [CANDIDATE_REF] }] }, report)).toThrow('引用')
+
+    const narrative = { ...report, narrative: { status: 'model' as const,
+      paragraphs: [{ text: '登录恢复情况已确认。', citations: [CANDIDATE_REF] }] } }
+    expect(reportMarkdown(narrative)).toContain('登录恢复情况已确认。 [1](#ref-1)')
+    expect(reportMarkdown(narrative)).toContain('[1] INC-1（摘要）')
+  })
+
+  it('keeps the legacy Markdown byte output when its format marker is absent', () => {
+    const base = retrievalState()
+    const state = { ...base, modelVisibleCandidateRefs: [CANDIDATE_REF], judgments: [{ candidateRef: CANDIDATE_REF,
+      verdict: 'accept' as const, evidenceRefs: [CANDIDATE_REF], reason: '可见概览支持' }] }
+    const report = withoutReportFormat({ ...createRetrievalReport(state, [{ kind: 'query', text: state.query.original }], 'handoff'),
+      generatedAt: '2026-01-02T03:04:05.000Z' })
+    const digest = createHash('sha256').update(reportMarkdown(report)).digest('hex')
+    expect(digest).toBe('1b866e7a8b3fd735b12caa0ab44711dd13fff0573ed98131c8d2477faab75b74')
   })
 })
 

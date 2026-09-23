@@ -44,33 +44,17 @@ def memmap_blocks(ids_path, dense_path, shape, *, block_size=16384, available_pa
                            if available is None else available[start:end].astype(bool))
 
 
-def random_keys(ids, seed):
-    """每 ID 固定伪随机键；块宽改变不会改变抽样，也不占用全库随机数组。"""
-    with np.errstate(over="ignore"):
-        x = np.asarray(ids, dtype=np.uint64) + np.uint64(seed) + np.uint64(0x9e3779b97f4a7c15)
-        x = (x ^ (x >> 30)) * np.uint64(0xbf58476d1ce4e5b9)
-        x = (x ^ (x >> 27)) * np.uint64(0x94d049bb133111eb)
-        x ^= x >> 31
-    return (x >> 11).astype(np.float64) / 2**53
-
-
 class PrioritySample:
-    """Keep largest priorities for disjoint incoming IDs.
-
-    IID continuous random priorities give a uniform sample without replacement.
-    Other priorities are for LEARNING, never for a population-quality estimate.
-    """
+    """保留原句相关分数最高的有界 ID 池，供训练与留出选择读取。"""
     def __init__(self, size):
         if size < 1:
             raise ValueError("Sample size must be positive")
         self.size = size
         self.ids = np.empty(0, dtype=np.int64)
         self.keys = np.empty(0, dtype=np.float64)
-        self.seen = 0
 
     def add(self, ids, keys):
         ids, keys = np.asarray(ids, dtype=np.int64), np.asarray(keys, dtype=np.float64)
-        self.seen += len(ids)
         ids, keys = np.r_[self.ids, ids], np.r_[self.keys, keys]
         # 同分固定按 ID 排序，分页宽度不会改变有界候选池。
         keep = np.lexsort((ids, -keys))[:self.size]

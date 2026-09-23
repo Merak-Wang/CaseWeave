@@ -128,9 +128,6 @@ summary { cursor: pointer; width: fit-content; }
 .list-heading { margin-bottom: 16px; }
 .list-heading h2 { font-size: 14px; font-weight: 500; }
 .count { display: inline-flex; min-width: 23px; height: 22px; align-items: center; justify-content: center; padding: 0 6px; border-radius: 6px; margin-left: 6px; color: var(--accent); background: var(--tint); font-size: 12px; font-variant-numeric: tabular-nums; }
-.result-summary { padding: 10px 14px; border: 1px solid #e5e3e3; border-radius: 9px; font-size: 12px; color: var(--muted); margin-bottom: 12px; }
-.result-summary summary { color: #777575; }
-.result-summary p { padding-top: 6px; }
 #cards { overflow-anchor: none; border-radius: 10px; }
 .card { padding: 22px 0; border-bottom: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
 .ticket-card { position: relative; padding: 24px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 12px; background: var(--paper); }
@@ -185,11 +182,12 @@ select { max-width: 100%; background: var(--paper); padding: 8px 11px; border: 1
 .report-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; padding: 3px 0 24px; border-bottom: 1px solid var(--line); margin-bottom: 24px; }
 .report-heading h2 { font-size: 21px; font-weight: 500; }
 .report-tools { gap: 8px; }
-.report-tools button, .report-tools select { font-size: 12px; }
+.report-tools button { font-size: 12px; }
 .report h3 { margin: 28px 0 10px; }
 .report p { line-height: 1.95; font-size: 13px; }
-.report blockquote { margin-top: 15px; }
 .report .link { font-size: 12px; }
+.report .report-summary { margin: 24px 0; font-size: 15px; line-height: 2; }
+.report .report-reference { display: inline; min-height: 0; margin-left: 6px; font-size: 11px; vertical-align: super; white-space: nowrap; }
 .report-audit { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
 .report-audit small { display: block; margin-top: 10px; }
 blockquote { margin: 12px 0; padding: 12px 15px; border-left: 2px solid #a69192; border-radius: 0 7px 7px 0; background: #f3f1f1; white-space: pre-wrap; font-size: 13px; overflow-wrap: anywhere; line-height: 1.85; }
@@ -342,7 +340,6 @@ dialog select { width: 100%; }
   #detail { padding: 22px 20px 34px; }
   .report-heading { align-items: flex-start; }
   .report-tools { gap: 6px; }
-  .report-tools select { width: auto; }
   dialog { padding: 20px; }
   dialog.evidence { padding: 0; }
   .recent .history-list small { display: none; }

@@ -1,8 +1,9 @@
+import { projectUsage, projectContext, type TaskRuntimeMetrics } from './orchestration-metrics.js'
 import type { LearnedResult, RetrievalState } from '@retrieval-agent/contracts'
 import { confirmedCount, learnedResult } from '@retrieval-agent/domain/result'
 
 /** A public view of committed work. No prompts, private reasoning, raw tool arguments or invented percent. */
-export function projectOrchestration(state: RetrievalState) {
+export function projectOrchestration(state: RetrievalState, runtime?: TaskRuntimeMetrics) {
   const generation = state.inputGeneration ?? 0
   const tasks = (state.expertTasks ?? []).filter(t => t.inputGeneration === generation && t.status !== 'superseded')
   const manifests = (state.contextManifests ?? []).filter(m => m.inputGeneration === generation && m.measurement === 'dsh_request')
@@ -24,8 +25,6 @@ export function projectOrchestration(state: RetrievalState) {
     && ['open', 'unknown'].includes(g.status) && g.description).map(g => g.description!)]
   const roundStart = state.userFeedback?.at(-1)?.receivedAt ?? state.createdAt
   const elapsed = Date.parse(state.executionClock?.waitingSince ?? (terminal ? '' : state.updatedAt)) - Date.parse(roundStart)
-  const expertOutputTokens = (state.expertTasks ?? []).reduce((total, t) => total + (t.outputTokens ?? 0), 0)
-  const mainOutputTokens = state.budget?.totalOutputTokens ?? 0
   const operatorUsage = state.budget?.operatorUsage
   const plan = state.query?.contract?.semanticPlan
   const learning = operatorUsage?.learning as Record<string, unknown> | undefined
@@ -33,24 +32,42 @@ export function projectOrchestration(state: RetrievalState) {
   const currentLearning = learning?.input_revision === generation ? learning : undefined
   const sampleRequests = manifests.filter(m => m.operator?.operation === 'sem_filter')
   const sampleKnowledge = new Set(sampleRequests.flatMap(m => m.operator!.knowledgeIds ?? []))
+  const knowledgeRequests = sampleRequests.filter(m => m.operator!.knowledgeIds?.length)
+  const candidateDisplayIds = new Map<string, string>()
+  for (const candidate of [...(state.candidateHistory ?? []), ...state.candidates]) {
+    if (candidate.displayId) candidateDisplayIds.set(candidate.ref, candidate.displayId)
+  }
+  const samplingRequests = sampleRequests.map(m => ({
+    id: m.id,
+    knowledge: [...new Map((m.operator!.knowledgeIds ?? []).map((id, index) => {
+      const reference = m.knowledgeRefs?.[index]
+      return [reference ?? id, { id, ...(reference ? { reference } : {}) }] as const
+    })).values()],
+    candidates: [...new Set(m.candidateRefs ?? [])].map(ref => ({ ref,
+      ...(candidateDisplayIds.has(ref) ? { displayId: candidateDisplayIds.get(ref)! } : {}) })),
+  }))
+  const knowledgeUse = new Map<string, { id: string; reference?: string; requests: Set<object>; samples: Set<string> }>()
+  // 只汇总实际送入本轮判断请求的知识；重复复核计请求次数，工单数按身份去重。
+  for (const m of knowledgeRequests) {
+    const distinct = new Map((m.operator!.knowledgeIds ?? []).map((id, index) => {
+      const reference = m.knowledgeRefs?.[index]
+      return [reference ?? id, { id, ...(reference ? { reference } : {}) }] as const
+    }))
+    for (const [key, entry] of distinct) {
+      const use = knowledgeUse.get(key) ?? { ...entry, requests: new Set<object>(), samples: new Set<string>() }
+      use.requests.add(m)
+      for (const ref of m.candidateRefs ?? []) use.samples.add(ref)
+      knowledgeUse.set(key, use)
+    }
+  }
   const activity = state.operatorActivity?.inputGeneration === generation ? state.operatorActivity : undefined
-  const lastOperatorRequest = manifests.findLast(m => m.operator)
-  const requestContext = (lastOperatorRequest?.operator?.metrics?.context ?? operatorUsage?.context) as {
-    measuredInputTokens?: number; limit?: number; model?: string; operation?: string
-  } | undefined
-  // 算子请求有独立上下文；累积 token 用量不能冒充单次窗口占用。
-  const operatorContext = requestContext && lastOperatorRequest ? {
-    estimatedInputTokens: lastOperatorRequest.estimatedTokens, measuredInputTokens: requestContext.measuredInputTokens,
-    limit: requestContext.limit, reservedTokens: 4096, compactionCount: 0, source: 'operator',
-    model: requestContext.model, operation: requestContext.operation,
-  } : lastOperatorRequest ? { estimatedInputTokens: lastOperatorRequest.estimatedTokens,
-    reservedTokens: 4096, compactionCount: 0, source: 'operator', operation: lastOperatorRequest.operator!.operation } : undefined
-  const context = activity?.status === 'running' || !state.budget?.context ? operatorContext ?? state.budget?.context : state.budget.context
-  const operatorOutputTokens = Number(operatorUsage?.reported_completion_tokens ?? 0)
-  const measuredInput = state.budget?.totalMeasuredInputTokens ?? ((state.budget?.modelStepsUsed ?? 0) === 0 ? 0 : undefined)
-  const expertInput = (state.expertTasks ?? []).reduce((sum, t) => sum + (t.inputTokens ?? 0), 0)
-  const expertReceiptsComplete = !(state.expertTasks ?? []).some(t => (t.modelSteps ?? 0) > 0 && t.inputTokens === undefined)
   return {
+    samplingKnowledge: { requestCount: knowledgeRequests.length,
+      sampleCount: new Set(knowledgeRequests.flatMap(m => m.candidateRefs ?? [])).size,
+      entries: [...knowledgeUse.values()].map(({ requests, samples, ...entry }) => ({ ...entry,
+        requestCount: requests.size, sampleCount: samples.size })),
+      requests: samplingRequests,
+    },
     retrieval: {
       filterActivity: activity?.operation === 'sem_filter' ? activity.status : undefined,
       plan: plan?.inputGeneration === generation ? { instruction: plan.instruction, keywords: plan.keywords,
@@ -58,6 +75,9 @@ export function projectOrchestration(state: RetrievalState) {
       learning: currentLearning ? { status: String(currentLearning.stop_reason), resultAvailable: Boolean(learnedResult(state)),
         scopeCount: currentLearning.corpus_records || currentLearning.scanned_records, sampledCount: currentLearning.teacher_unique_records,
         trainingCount: currentLearning.training_records, auditCount: currentLearning.audit_records,
+        qualityBasis: currentLearning.quality_basis,
+        samplingRequests: currentLearning.sampling_requests, samplingRequestLimit: currentLearning.sampling_request_limit,
+        message: currentLearning.message,
         reusedTrainingCount: currentLearning.reused_training_records, reusedLabelCount: currentLearning.reused_label_records,
         reusedUnresolvedCount: currentLearning.reused_unresolved_records,
         samplingMethod: currentLearning.sampling_method, samplingPhase: currentLearning.sampling_phase,
@@ -72,19 +92,8 @@ export function projectOrchestration(state: RetrievalState) {
         selectionCount: currentLearning.selection_records,
         quality: currentLearning.quality as LearnedResult['quality'] | undefined } : undefined,
     },
-    usage: { outputTokens: mainOutputTokens + expertOutputTokens + operatorOutputTokens, mainOutputTokens, expertOutputTokens, operatorOutputTokens,
-      inputTokens: measuredInput !== undefined && expertReceiptsComplete && operatorUsage?.accounting_complete !== false
-        ? measuredInput + expertInput + Number(operatorUsage?.reported_prompt_tokens ?? 0) : null,
-      mainMeasuredInputTokens: measuredInput ?? null, expertInputTokens: expertInput,
-      operatorUsage,
-      mainRequests: state.budget?.modelStepsUsed ?? 0,
-      expertRequests: (state.expertTasks ?? []).reduce((total, t) => total + (t.modelSteps ?? 0), 0),
-      operatorRequests: Number(operatorUsage?.llm_adapter_calls ?? 0),
-      modelRequests: (state.budget?.modelStepsUsed ?? 0) + (state.expertTasks ?? []).reduce((total, t) => total + (t.modelSteps ?? 0), 0) + Number(operatorUsage?.llm_adapter_calls ?? 0),
-      experts: (state.expertTasks ?? []).map(t => ({ id: t.id, title: domains.find(d => d.id === t.domainId)?.description ?? t.domainId,
-        outputTokens: t.outputTokens ?? 0, inputGeneration: t.inputGeneration })),
-    },
-    context,
+    usage: projectUsage(state, runtime),
+    context: projectContext(state, runtime),
     coordinatorActivity: state.coordinatorActivity ?? 'working',
     clock: { elapsedMs: Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0,
       ...(!Number.isFinite(elapsed) ? { unavailable: true } : {}),

@@ -3,7 +3,7 @@ import type { RetrievalState, TicketCandidate, TicketResultCollection } from '@r
 
 export function learnedResult(state: RetrievalState): import('@retrieval-agent/contracts').LearnedResult | undefined {
   const learning = state.budget.operatorUsage?.learning as { input_revision?: number; stop_reason?: string; result_set?: import('@retrieval-agent/contracts').LearnedResult } | undefined
-  return learning?.input_revision === (state.inputGeneration ?? 0) && learning.stop_reason === 'quality_passed'
+  return learning?.input_revision === (state.inputGeneration ?? 0) && ['quality_passed', 'quality_fallback'].includes(learning.stop_reason ?? '')
     && !['permission_blocked', 'snapshot_invalid'].includes(state.termination) ? learning.result_set : undefined
 }
 export const confirmedCount = (state: RetrievalState): number => learnedResult(state)?.returned ?? state.selectedCandidateRefs.length

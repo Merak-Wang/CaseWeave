@@ -73,6 +73,27 @@ describe('public orchestration facts', () => {
     expect(view.retrieval.plan).toBeUndefined()
     expect(view.retrieval.learning).toBeUndefined()
   })
+  it('links current sample requests to selected knowledge and stable candidate refs', () => {
+    const s = { ...state(), expertTasks: [], candidateHistory: [{ ref: 'a', displayId: 'ESFT-10001' }, { ref: 'b' }], contextManifests: [
+      { id: 'old-request', inputGeneration: 1, measurement: 'dsh_request', knowledgeRefs: ['old@1'], candidateRefs: ['old'], operator: { operation: 'sem_filter', knowledgeIds: ['old'] } },
+      { id: 'estimate', inputGeneration: 2, measurement: 'conservative_estimate', knowledgeRefs: ['unused@1'], operator: { operation: 'sem_filter', knowledgeIds: ['unused'] } },
+      { id: 'plan', inputGeneration: 2, measurement: 'dsh_request', knowledgeRefs: ['plan@1'], operator: { operation: 'query_plan', knowledgeIds: ['plan'] } },
+      { id: 'request-1', inputGeneration: 2, measurement: 'dsh_request', knowledgeRefs: ['billing@2', 'quota@3', 'billing@2'], candidateRefs: ['a', 'b', 'a'], operator: { operation: 'sem_filter', knowledgeIds: ['billing', 'quota', 'billing'] } },
+      { id: 'request-2', inputGeneration: 2, measurement: 'dsh_request', knowledgeRefs: ['billing@2'], candidateRefs: ['b', 'c'], operator: { operation: 'sem_filter', knowledgeIds: ['billing'] } },
+      { id: 'request-empty', inputGeneration: 2, measurement: 'dsh_request', knowledgeRefs: [], candidateRefs: ['d'], operator: { operation: 'sem_filter', knowledgeIds: [] } },
+    ] } as unknown as RetrievalState
+    const sampling = projectOrchestration(s).samplingKnowledge
+    expect(sampling).toEqual({ requestCount: 2, sampleCount: 3, entries: [
+      { id: 'billing', reference: 'billing@2', requestCount: 2, sampleCount: 3 },
+      { id: 'quota', reference: 'quota@3', requestCount: 1, sampleCount: 2 },
+    ], requests: [
+      { id: 'request-1', knowledge: [{ id: 'billing', reference: 'billing@2' }, { id: 'quota', reference: 'quota@3' }], candidates: [
+        { ref: 'a', displayId: 'ESFT-10001' }, { ref: 'b' }] },
+      { id: 'request-2', knowledge: [{ id: 'billing', reference: 'billing@2' }], candidates: [{ ref: 'b' }, { ref: 'c' }] },
+      { id: 'request-empty', knowledge: [], candidates: [{ ref: 'd' }] },
+    ] })
+    expect(projectOrchestration({ ...s, inputGeneration: 3 }).samplingKnowledge).toEqual({ requestCount: 0, sampleCount: 0, entries: [], requests: [] })
+  })
   it('projects the Agent-selected knowledge and reasons from the current plan', () => {
     const routes = [{ entry_id: 'expiry', title: '宽带到期', reason: '解释到期后的资费状态' }]
     const view = projectOrchestration({ ...state(), query: { contract: { semanticPlan: {

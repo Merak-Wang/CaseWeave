@@ -3,19 +3,22 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type GenerateOptions, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { estimateContextTokens } from '@retrieval-agent/domain'
 import type { ContextCompressionStats } from '@retrieval-agent/contracts'
-import { compactRetrievalSurface } from './working-context.js'
+import type {} from '@deepseek-ai/dsh-compaction'
+import { compactRetrievalSurface } from './surface.js'
 
 /** Count logged automatic compactions, including those restored from a previous host. */
 export function contextCompactions(agent: Agent): number {
-  return agent.session.snapshotEvents().filter(e => e.type === 'user/message' && e.data.source.kind === 'plugin'
-    && e.data.source.plugin === 'retrieval-agent' && e.data.source.form === 'snapshot'
-    && e.data.source.sections.some(s => s.name === 'retrieval-agent:compaction')).length
+  const stats = contextCompressionStats(agent)
+  return stats.workingSetCount + stats.capacityCount + (stats.dshCount ?? 0)
 }
 
 /** Legacy working-set notes can be classified without rewriting saved events. */
 export function contextCompressionStats(agent: Agent): ContextCompressionStats {
   let workingSetCount = 0, capacityCount = 0, last: ContextCompressionStats['last']
+  let dshCount = 0, dshFailures = 0, dshActive = false
   for (const e of agent.session.snapshotEvents()) {
+    if (e.type === 'compaction/start') dshActive = true
+    if (e.type === 'compaction/end') { dshActive = false; if (e.data.error) dshFailures++; else dshCount++ }
     if (e.type !== 'user/message' || e.data.source.kind !== 'plugin' || e.data.source.plugin !== 'retrieval-agent' || e.data.source.form !== 'snapshot') continue
     const note = e.data.source.sections.find(s => s.name === 'retrieval-agent:compaction')
     if (!note) continue
@@ -26,7 +29,7 @@ export function contextCompressionStats(agent: Agent): ContextCompressionStats {
     else capacityCount++
     if (info) last = info
   }
-  return { workingSetCount, capacityCount, ...(last ? { last } : {}) }
+  return { workingSetCount, capacityCount, dshCount, dshFailures, dshActive, ...(last ? { last } : {}) }
 }
 
 /** Match explicit context overflow signals, never an arbitrary provider outage. */

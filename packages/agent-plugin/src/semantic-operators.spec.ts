@@ -26,7 +26,7 @@ import { SemanticOperators } from './semantic-operators.js'
 import { PythonOperatorBridge } from './python-operator-bridge.js'
 import { installAutomaticRetrievalStart } from './pre-step.js'
 import { installRetrievalTools } from './tools.js'
-import { installRetrievalRuntimeBudget } from './context-budget.js'
+import { installRetrievalRuntimeBudget } from './metrics/budget.js'
 
 class Principal extends TicketPrincipalProviderService {
   async resolve() { return { tenantId: 'operators', subjectId: 'reader', entitlementVersion: 'v1', purpose: 'ticket_retrieval' as const,
@@ -83,6 +83,10 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
         const planning = options.system?.includes('当前操作：query_plan')
         const knowledge = JSON.parse(options.system!.split('\n相关Wiki：')[1]!)
         if (planning) {
+          const evidenceFields = JSON.parse(data.confirmed_context).evidence_fields
+          expect(evidenceFields.some((field: any) => field.key === 'summary')).toBe(false)
+          expect(evidenceFields.every((field: any) => ['L2', 'L3'].includes(field.accessLevel)
+            && (!field.capability || field.capability.origin === 'source'))).toBe(true)
           const catalog = JSON.parse(data.confirmed_context).knowledge_catalog
           expect(catalog.length).toBeGreaterThan(0)
           expect(knowledge.entries).toEqual([])
@@ -132,7 +136,7 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
   } finally { await dispose?.(); await ctx.fiber.dispose() }
 }, 60000)
 
-it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for %i rows with incremental commits and replay', async (count) => {
+it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2048, 'unknown']] as const)('runs public DSH input through Python filtering for %i rows (fallback=%s) with commits and replay', async (count, fallback) => {
   const active = count === 2048
   const ctx = new Context(), searches: string[] = [], requests: GenerateOptions[] = []
   const ranker: RetrievalRanker = { profileVersion: 'operator-fixture', capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
@@ -173,7 +177,20 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
             discovery_remaining_records: 256, selection_remaining_records: 256 })
           return {}
         }
-        return run(input, callback, result, signal)
+        let predicting = false
+        return run(input, async (method, payload) => {
+          if (method === 'predictions.begin') predicting = true
+          if (predicting) expect(['rows.read', 'llm.generate']).not.toContain(method)
+          // Python 的真实 60% 边界另有数值用例；此处验证备用模型声明贯穿宿主交付与重放。
+          if (fallback && ['predictions.finish', 'learning.update'].includes(method)) {
+            const p = payload as Record<string, any>
+            if (p.quality) payload = { ...p, quality: { ...p.quality, precision: fallback === 'unknown' ? .59 : .6, recall: .8,
+              acceptance: fallback === 'unknown' ? 'unknown' : 'fallback' },
+              ...(fallback === 'unknown' ? { passed: false, message: '不知道：最佳模型选择集查准率低于 60%，仅返回已确认工单。' } : {}),
+              ...(p.stop_reason === 'quality_passed' ? { stop_reason: fallback === 'unknown' ? 'model_unknown' : 'quality_fallback' } : {}) }
+          }
+          return callback(method, payload)
+        }, result, signal)
       }
     }
     // Keep a real checked-cluster integration case alongside the strict default.
@@ -190,7 +207,7 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
         return { ...page, rows: page.rows.map(row => ({ ...row, ...features.find(f => f.ref === row.ref) })) }
       }, result, signal)
     }
-    new SemanticOperators(ctx, app, undefined, process.cwd(), bridge, active ? { batchSize: 4, options: { concurrency: 32, validation_size: 384 } } : { algorithm: 'baseline' })
+    new SemanticOperators(ctx, app, undefined, process.cwd(), bridge, active ? { batchSize: 4, options: { concurrency: 32 } } : { algorithm: 'baseline' })
     installAutomaticRetrievalStart(ctx, app, { analyzer: { async analyze() { throw new Error('legacy compiler must not run') } } })
     installRetrievalTools(ctx, app); installRetrievalRuntimeBudget(ctx, app)
     const errors: string[] = []
@@ -254,6 +271,29 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
     expect(state.phase, JSON.stringify({ candidates: state.candidates.length, judgments: state.judgments?.length,
       selected: state.selectedCandidateRefs.length, activity: state.operatorActivity, stop: state.stopExplanation,
       filterRequests: requests.filter(r => r.system?.includes('当前操作：sem_filter')).length })).toBe('stopped')
+    if (fallback === 'unknown') {
+      expect(state.termination).toBe('partial')
+      expect(state.stopExplanation).toContain('不知道')
+      expect(learnedResult(state)).toBeUndefined()
+      expect(confirmedCount(state)).toBeGreaterThan(0)
+      expect(confirmedCount(state)).toBeLessThan(count / 2)
+      expect(state.judgments!.filter(j => j.verdict === 'accept').every(j => j.operatorManifestId && j.basis !== 'proxy')).toBe(true)
+      const report = createRetrievalReport(state, [])
+      expect(report.learning).toBeUndefined()
+      expect(report.confirmedCount).toBe(state.selectedCandidateRefs.length)
+      expect(report.conclusion).toContain('不知道')
+      const exporter = new CandidateExportService(ctx.ticketRetrievalProvider, new InMemoryExportAuditSink(), { semanticResults: app.semanticResults })
+      const rows: string[] = []
+      await exporter.stream(await app.principal(agent, 'export'), state, { format: 'jsonl', template: 'summary' }, async row => { rows.push(row) })
+      expect(rows.join('').split('\n').filter(Boolean)).toHaveLength(state.selectedCandidateRefs.length)
+      const replay = foldRetrievalEvents(readRetrievalSessionEvents(agent.session))!
+      expect(replay.selectedCandidateRefs).toEqual(state.selectedCandidateRefs)
+      expect(learnedResult(replay)).toBeUndefined()
+      const requestsBefore = requests.length
+      await app.operators!.filter(agent, state.candidates.slice(0, 1).map(c => c.ref))
+      expect(requests).toHaveLength(requestsBefore)
+      return
+    }
     if (!active) expect(state.candidates.filter(c => state.selectedCandidateRefs.includes(c.ref)).map(c => c.displayId).sort()).toEqual(
       records.filter((_, i) => i % 2 === 0).map(r => r.displayId).sort())
     expect(state.query.spec.queryPlan).toBeUndefined()
@@ -282,8 +322,13 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
       expect(learning.concurrency).toBe(32)
       expect(filtering.every(m => m.operator!.records.length <= 4)).toBe(true)
       expect(learning.teacher_unique_records).toBeLessThan(count)
-      expect(learning.stop_reason).toBe('quality_passed')
-      expect(learning.quality.recall_lower).toBeGreaterThanOrEqual(.95)
+      expect(learning.stop_reason).toBe(fallback ? 'quality_fallback' : 'quality_passed')
+      expect(learning.sampling_requests).toBeLessThanOrEqual(128)
+      expect(learning.quality.basis).toBe('selection')
+      expect(learning.quality.recall).toBeGreaterThanOrEqual(fallback ? .8 : .95)
+      expect(learning.quality.precision_lower).toBeUndefined()
+      expect(learning.audit_records).toBeUndefined()
+      expect(new Set(filtering.flatMap(m => m.candidateRefs)).size).toBe(learning.teacher_unique_records)
       expect(learning.unresolved).toBe(0)
       const summary = (state.operatorArtifacts!.find(a => a.operation === 'sem_agg')!.events[0] as { value: { leaves: number; statistics: { population_count: number } } }).value
       expect(summary.leaves).toBe(3)
@@ -306,7 +351,9 @@ it.each([2, 24, 1536, 2048])('runs public DSH input through Python filtering for
       expect(hydrated.candidates.some(c => c.ref === proxy.candidateRef)).toBe(true)
       expect(confirmedCount(hydrated)).toBe(count/2)
       expect(learnedResult({ ...state, inputGeneration: (state.inputGeneration ?? 0) + 1 })).toBeUndefined()
-      expect(createRetrievalReport(state, []).confirmedCount).toBe(count / 2)
+      const learnedReport = createRetrievalReport(state, [])
+      expect(learnedReport.confirmedCount).toBe(count / 2)
+      expect(learnedReport.learning?.quality.basis).toBe('selection')
       const exporter = new CandidateExportService(ctx.ticketRetrievalProvider, new InMemoryExportAuditSink(), { semanticResults: app.semanticResults })
       const rows: string[] = []
       await exporter.stream(await app.principal(agent, 'export'), state, { format: 'jsonl', template: 'summary' }, async row => { rows.push(row) })

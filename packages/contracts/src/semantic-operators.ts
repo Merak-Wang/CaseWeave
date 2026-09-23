@@ -51,10 +51,15 @@ export interface OperatorArtifact {
 export interface LearnedResult {
   readonly model_id: string; readonly input_revision: number; readonly predicate_key: string;
   readonly feature_id: string; readonly returned: number; readonly scope_count: number;
-  readonly quality: { readonly precision_lower: number | null; readonly recall_lower: number | null;
-    readonly precision_target: number; readonly recall_target: number; readonly [key: string]: unknown };
+  readonly quality: LearnedQuality;
   readonly metadata: Readonly<Record<string, unknown>>;
 }
+/** 新集合只报告选择集经验指标；旧抽验口径仅供已有任务重放。 */
+export type LearnedQuality = { readonly precision_target: number; readonly recall_target: number; readonly [key: string]: unknown } & (
+  { readonly basis: 'selection'; readonly precision: number; readonly recall: number;
+    readonly acceptance?: 'target' | 'fallback' | 'unknown'; readonly minimum_precision?: number }
+  | { readonly basis?: 'independent_audit'; readonly precision_lower: number | null; readonly recall_lower: number | null }
+)
 export interface NumericPredictionBlock {
   readonly model_id: string; readonly offset: number; readonly ids: readonly number[];
   readonly labels: readonly number[]; readonly scores: readonly number[];

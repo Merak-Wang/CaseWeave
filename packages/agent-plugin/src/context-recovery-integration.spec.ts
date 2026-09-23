@@ -8,7 +8,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { describe, it, expect } from 'vitest'
-import { contextCompactions, installContextRecovery } from './context-recovery.js'
+import { contextCompactions, installContextRecovery } from './context/recovery.js'
 
 describe('context recovery and provider retry ownership', () => {
   it.each([

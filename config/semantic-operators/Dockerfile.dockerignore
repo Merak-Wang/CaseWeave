@@ -1,0 +1,16 @@
+**
+!pyproject.toml
+!uv.lock
+!python/
+!python/evals/
+!python/evals/pyproject.toml
+!python/evals/README.md
+!python/model-service/
+!python/model-service/pyproject.toml
+!python/model-service/README.md
+!python/semantic-operators/
+!python/semantic-operators/pyproject.toml
+!python/semantic-operators/README.md
+!python/semantic-operators/src/
+!python/semantic-operators/src/**
+**/__pycache__/**

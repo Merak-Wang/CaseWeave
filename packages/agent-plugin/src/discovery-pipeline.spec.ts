@@ -5,7 +5,7 @@ import { SemanticOperators } from './semantic-operators.js'
 
 it('starts sample learning while recall is unfinished and never drains the body cursor', async () => {
   const events: string[] = []
-  let state = { retrievalId: 't', inputGeneration: 0, snapshot: { snapshotId: 's' }, candidates: [],
+  let state = { retrievalId: 't', inputGeneration: 0, snapshot: { snapshotId: 's' }, candidates: [], budget: {},
     query: { original: '宽带到期扣费', spec: { mode: 'dense' }, contract: { semanticPlan: {
       keywords: ['宽带', '到期'], retrieval_expressions: ['包年变包月'], goal: { mode: 'all' },
     } } } } as unknown as RetrievalState

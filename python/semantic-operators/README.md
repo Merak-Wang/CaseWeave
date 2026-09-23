@@ -14,18 +14,25 @@ Explicit `direct`/candidate scopes serve small references; `baseline/cluster` re
 the old filter for matched migration comparisons only.
 
 Aligned IDs and float32/optional CSR blocks are separate from text. Index preparation
-aggregates and normalizes document chunks once. A bounded pool mixes discovery and
-exploration; only teacher samples read source text. Shared labels actually fit sklearn
-LR, LinearSVC, shallow MLP and HGB. Separate selection labels choose the model and
-threshold. After freezing, one full numerical scan writes block predictions and draws
-an independent audit. Linear inference folds the fitted scaler without quantization.
+aggregates and normalizes document chunks once. A bounded pool ranks records by
+original-query n-gram coverage and vector similarity; only training/selection samples
+read source text. Shared labels fit sklearn LR, LinearSVC, shallow MLP and HGB.
+Separate selection labels choose the model and threshold. Once both selection P/R
+targets pass, one numerical scan writes full-scope predictions without additional
+sampling or LLM calls. Linear inference folds the fitted scaler without quantization.
 
-Finite-population TP/FN intervals yield set Precision/Recall lower bounds. Missing
-features and unknown observations remain in the missed-positive bound. Historical audit
-labels used for training cannot enter a new independent audit. Repeated measurements
-allocate delta. Bounds assume truthful reference labels and SRS; they do not establish
-business truth or reproduce SUPG. Failure returns a concrete next action, never a hidden
-full teacher loop. Calls/tokens/time are metered, not task completion budgets.
+Quality metadata uses `basis=selection`, `precision` and `recall`: these are empirical
+model-selection metrics, not population lower bounds. Existing known labels override
+predictions; unknown labels and missing features remain unresolved. Initial labels and
+positive reviews share a maximum of 128 model requests per query generation, including
+failed attempts. Cache hits do not count; resumes and restarts reuse the same budget.
+When targets fail, use the best trained model by selection F1 (including earlier fits).
+Selection precision must be at least 0.60: `quality_fallback` identifies this weaker
+acceptance. Lower precision or insufficient selection evidence at the limit returns
+`model_unknown` and only already confirmed tickets; it never publishes a prediction set. Legacy
+`validation_size`/`delta` options are ignored by the default learned route; the explicit
+old baseline remains separate. The sampling limit does not prove completion; other
+call/token/time totals remain metering.
 
 The production MySQL result store saves accepted IDs in batches; state carries one
 model/quality descriptor. Paging, reports and downloads use that descriptor, not the
@@ -50,7 +57,7 @@ Python does not start another Agent or independently connect to model/data servi
 | Files | Responsibility |
 | --- | --- |
 | `filter.py`, `extract.py`, `aggregate.py` | The three operators; evidence-window selection belongs to aggregation |
-| `models.py`, `quality.py`, `features.py` | Model fitting, independent quality intervals, numeric blocks and sampling |
+| `models.py`, `features.py` | Model fitting/selection, numeric blocks and ranked sampling |
 | `search.py` | The existing one-call query plan and Host search callbacks |
 | `runtime.py`, `types.py` | Host model calls, cache/metering, source records and results |
 | `server.py`, `__init__.py` | One service for stdio/WebSocket, and public operator dispatch |

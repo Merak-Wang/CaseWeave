@@ -35,9 +35,9 @@ import { MySqlTaskStore, type TaskJob } from './task-store.js'
 import { TicketPrincipalProviderService, TicketRetrievalProviderService } from './provider-services.js'
 import { installAutomaticRetrievalStart } from './pre-step.js'
 import { installRetrievalTools } from './tools.js'
-import { installRetrievalRuntimeBudget } from './context-budget.js'
+import { installRetrievalRuntimeBudget } from './metrics/budget.js'
 import { ExpertCoordinator } from './experts.js'
-import { installWorkingContext } from './working-context.js'
+import { installWorkingContext } from './context/working.js'
 import { inject } from './index.js'
 import { WikiLearningService } from './wiki-learning.js'
 import { openWiki } from './wiki-store.js'
@@ -70,8 +70,10 @@ class Principal extends TicketPrincipalProviderService {
 class Adapter extends LlmAdapter {
   calls = 0
   readonly loopRequests: GenerateOptions[] = []
+  readonly reportInputs: unknown[] = []
+  readonly reportSystems: string[] = []
   reportCalls = 0
-  rejectReport = false
+  failReport = false
   failModel = false
   beforeAnswer?: () => Promise<void>
   constructor(readonly ask = false, readonly broken = false) { super() }
@@ -82,10 +84,15 @@ class Adapter extends LlmAdapter {
     }
     if (options.tools?.[0]?.name.startsWith('retrieval_report')) {
       this.reportCalls++
+      this.reportSystems.push(options.system ?? '')
+      if (this.failReport) {
+        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'MODEL_UNAVAILABLE', status: 503, message: 'fixture report unavailable' } } }
+        return
+      }
       const data = JSON.parse(options.messages[0]!.content.flatMap(b => b.type === 'text' ? [b.text] : []).join(''))
+      this.reportInputs.push(data)
       const name = options.tools[0].name
-      const args = name === 'retrieval_report_review' ? { supported: !this.rejectReport, reason: '可见概览支持副卡解绑场景。' }
-        : { paragraphs: [{ text: '已确认记录中的副卡解绑场景与本轮要求一致；应结合所列来源范围使用。', citations: [data.citations[0].id] }] }
+      const args = { paragraphs: [{ text: '上海副卡解绑后仍共享流量；处理记录显示重新同步解绑状态后恢复。', citations: [data.tickets[0].citations[0].id] }] }
       yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`report-${this.reportCalls}`), name, arguments: JSON.stringify(args) } }
       yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
     }
@@ -982,7 +989,122 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     } finally { await f.close() }
   }, 45000)
 
-  it('A14 phase5: interrupted staging fences old writers; invalid narrative falls back; saved chunks reject corruption and expiration', async () => {
+  it('A14 phase5: newly completed retrieval automatically publishes one operator report through the public task API', async () => {
+    const f = await fixture(false, false)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '找副卡解绑工单' })).status).toBe(202)
+      const done = await until(() => f.host.snapshot(id), s => Boolean(s.node?.result), 60000)
+      const revision = done.node!.result!.resultRevision
+      const get = async (suffix: string) => { const r = await fetch(f.url + '/' + id + suffix); return { status: r.status, body: await r.json() } }
+      const artifacts = await until(() => get('/artifacts'), r => r.body.some((d: any) => d.kind === 'report' && d.resultRevision === revision && d.status === 'ready'), 60000)
+      const report = artifacts.body.find((d: any) => d.kind === 'report' && d.resultRevision === revision)
+      expect(report).toMatchObject({ audience: 'operator', status: 'ready' })
+      expect(report.operationId).toMatch(/^auto-report-[a-f0-9]{40}$/u)
+      const before = (f.adapter as Adapter).reportCalls
+      expect(before).toBe(1)
+      const writerPrompt = (f.adapter as Adapter).reportSystems[0]!
+      expect(writerPrompt).toContain('150–300字')
+      expect(writerPrompt).toContain('不要逐条复述工单')
+      const input = (f.adapter as Adapter).reportInputs[0] as any
+      expect(Object.keys(input).sort()).toEqual(['conditions', 'confirmedCount', 'query', 'requirements', 'tickets'])
+      expect(input.tickets[0]).not.toHaveProperty('reason')
+      expect(input.tickets[0].citations[0]).toEqual(expect.objectContaining({ id: expect.any(String), field: expect.any(String), text: expect.any(String) }))
+      const narrative = await get('/report?resultRevision=' + revision)
+      expect(narrative.status).toBe(200)
+      expect(narrative.body.narrative.status).toBe('model')
+      expect((f.adapter as Adapter).reportCalls).toBe(before)
+      const activity = await get('/activity?after=0')
+      expect(activity.status).toBe(200)
+      expect(activity.body.items.length).toBeGreaterThan(0)
+
+      // Simulate duplicate worker recovery: the revision-derived operation key reuses the same delivery.
+      const ensured = await f.host.deliveries!.ensureAutomaticReport(id, revision)
+      expect(ensured!.id).toBe(report.id)
+      const duplicate = await f.host.deliveries!.ensureAutomaticReport(id, revision)
+      expect(duplicate!.id).toBe(report.id)
+      expect((await get('/artifacts')).body.filter((d: any) => d.kind === 'report' && d.resultRevision === revision)).toHaveLength(1)
+      expect((f.adapter as Adapter).reportCalls).toBe(before)
+
+      // Restoring a finished task and reading its report does not start another generation.
+      const restored = new TaskHost(store, f.host.options)
+      try {
+        await restored.snapshot(id)
+        expect((await restored.deliveries!.store.list(id)).filter(d => d.spec_json.kind === 'report' && d.spec_json.resultRevision === revision)).toHaveLength(1)
+      } finally { await restored.close() }
+      expect((f.adapter as Adapter).reportCalls).toBe(before)
+    } finally { await f.close() }
+  }, 90000)
+
+  it('A14 phase5: cancellation before automatic report execution fences report-model calls', async () => {
+    const f = await fixture(false, false)
+    const deliveries = f.host.deliveries!
+    const pump = deliveries.pump.bind(deliveries)
+    deliveries.pump = async () => {}
+    f.host.start()
+    try {
+      const id = randomUUID()
+      await f.post('', { operationId: id, kind: 'query', text: '找副卡解绑工单' })
+      const done = await until(() => f.host.snapshot(id), s => Boolean(s.node?.result), 60000)
+      const revision = done.node!.result!.resultRevision
+      const get = async (suffix: string) => { const r = await fetch(f.url + '/' + id + suffix); return { status: r.status, body: await r.json() } }
+      const queued = await until(() => get('/artifacts'), r => r.body.some((d: any) => d.kind === 'report' && d.resultRevision === revision), 30000)
+      expect(queued.body[0]).toMatchObject({ status: 'queued', audience: 'operator' })
+      expect((await f.post('/' + id, { operationId: randomUUID(), kind: 'cancel' })).status).toBe(202)
+      expect((await store.read(id))?.state_json?.termination).toBe('cancelled')
+      deliveries.pump = pump
+      await deliveries.pump()
+      await until(() => get('/artifacts'), r => r.body[0]?.status === 'failed', 15000)
+      expect((f.adapter as Adapter).reportCalls).toBe(0)
+    } finally { deliveries.pump = pump; await f.close() }
+  }, 90000)
+
+  it('A14 phase5: cancellation after report summary stops publication', async () => {
+    const f = await fixture(false, false)
+    const deliveries = f.host.deliveries!
+    let entered!: () => void, release!: () => void
+    const writerEntered = new Promise<void>(resolve => { entered = resolve })
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const model = deliveries.options.model!
+    deliveries.options.model = async (agent, id, input, signal, trace) => {
+      const result = await model(agent, id, input, signal, trace)
+      entered(); await gate
+      return result
+    }
+    f.host.start()
+    try {
+      const id = randomUUID()
+      await f.post('', { operationId: id, kind: 'query', text: '找副卡解绑工单' })
+      await until(() => f.host.snapshot(id), s => Boolean(s.node?.result), 60000)
+      await Promise.race([writerEntered, new Promise((_, reject) => setTimeout(() => reject(new Error('report writer did not start')), 30000))])
+      expect((f.adapter as Adapter).reportCalls).toBe(1)
+      expect((await f.post('/' + id, { operationId: randomUUID(), kind: 'cancel' })).status).toBe(202)
+      release()
+      await until(() => deliveries.store.list(id), ds => ds[0]?.status === 'failed', 15000)
+      expect((f.adapter as Adapter).reportCalls).toBe(1)
+    } finally { release(); await f.close() }
+  }, 90000)
+
+  it('A14 phase5: automatic report enqueue retries are bounded and do not fail completed retrieval', async () => {
+    const f = await fixture(false, false)
+    const deliveries = f.host.deliveries!
+    let attempts = 0
+    deliveries.ensureAutomaticReport = async () => { attempts++; throw new Error('controlled delivery queue outage') }
+    f.host.start()
+    try {
+      const id = randomUUID()
+      await f.post('', { operationId: id, kind: 'query', text: '找副卡解绑工单' })
+      const done = await until(() => f.host.snapshot(id), s => Boolean(s.node?.result), 60000)
+      await until(() => store.rows<{ status: string }>("SELECT status FROM ra_task_job WHERE task_id=? AND kind='agent'", [id]), jobs => jobs[0]?.status === 'completed', 15000)
+      expect(done.failure).toBeNull()
+      expect((await store.read(id))?.failure).toBeNull()
+      expect(attempts).toBe(3)
+      expect((await deliveries.store.list(id)).filter(d => d.spec_json.kind === 'report')).toHaveLength(0)
+    } finally { await f.close() }
+  }, 90000)
+
+  it('A14 phase5: interrupted staging fences old writers; saved chunks reject corruption and expiration', async () => {
     const f = await fixture(false, false)
     try {
       const id = randomUUID(); await f.post('', { operationId: id, kind: 'query', text: '找上海副卡解绑工单' })
@@ -1004,12 +1126,6 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
         expect(ready!.row_count).toBe(1)
         const savedChunks: Buffer[] = []; for await (const chunk of deliveries.store.chunks(ready!)) savedChunks.push(chunk)
         expect(Buffer.concat(savedChunks).toString()).not.toContain('partial')
-        // Explicitly exercise failed independent prose validation through DSH.
-        ;(f.adapter as Adapter).rejectReport = true
-        const report = await deliveries.request(id, { operationId: randomUUID(), kind: 'report', resultRevision: done.node!.result!.resultRevision })
-        const completed = await until(() => deliveries.store.read(report.id), r => r?.status === 'ready')
-        expect(completed!.meta_json!.report.narrative.status).toBe('structured')
-        expect(completed!.meta_json!.report.narrative.reason).toContain('校验')
         await store.pool.query('UPDATE ra_delivery_chunk SET body=? WHERE delivery_id=?', [Buffer.from('corrupt'), d.id])
         const res = { writeHead() { throw new Error('bytes must not escape') } } as any
         await expect(deliveries.content(ready!, res)).rejects.toMatchObject({ code: 'PROTOCOL_MISMATCH' })
@@ -1018,6 +1134,33 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       } finally { await restored.close() }
     } finally { await f.close() }
   }, 45000)
+
+  it('A14 phase5: one failed summary call marks the artifact failed and user retry generates once', async () => {
+    const f = await fixture(false, false)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      await f.post('', { operationId: id, kind: 'query', text: '找副卡解绑工单' })
+      const done = await until(() => f.host.snapshot(id), s => Boolean(s.node?.result), 60000)
+      const revision = done.node!.result!.resultRevision
+      await until(() => f.host.deliveries!.store.list(id), ds => ds.some(d => d.spec_json.kind === 'report' && d.status === 'ready'), 60000)
+      ;(f.adapter as Adapter).failReport = true
+      const operationId = randomUUID()
+      const failed = await f.post('/' + id + '/artifacts', { operationId, kind: 'report', audience: 'handoff', resultRevision: revision })
+      expect(failed.status).toBe(202)
+      const artifactId = String(failed.body.id)
+      const failedArtifact = await until(() => f.host.deliveries!.store.read(artifactId), d => d?.status === 'failed', 30000)
+      expect(failedArtifact?.error).toBeTruthy()
+      expect((f.adapter as Adapter).reportCalls).toBe(2)
+
+      ;(f.adapter as Adapter).failReport = false
+      const retry = await f.post('/' + id + '/artifacts', { operationId, kind: 'report', audience: 'handoff', resultRevision: revision, retry: true })
+      expect(retry.status).toBe(202)
+      const completed = await until(() => f.host.deliveries!.store.read(artifactId), d => d?.status === 'ready', 30000)
+      expect(completed?.meta_json?.report.narrative.status).toBe('model')
+      expect((f.adapter as Adapter).reportCalls).toBe(3)
+    } finally { await f.close() }
+  }, 90000)
 
   it('A13 phase5: a queued task can subscribe before its first source snapshot exists', async () => {
     const f = await fixture(false, false), abort = new AbortController()
@@ -1032,7 +1175,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     } finally { abort.abort(); await f.close() }
   })
 
-  it.skipIf(process.env.RETRIEVAL_AGENT_PHASE5_REAL_MODEL !== '1')('A14 phase5 real configured DSH source review and independently validated narrative', async () => {
+  it.skipIf(process.env.RETRIEVAL_AGENT_PHASE5_REAL_MODEL !== '1')('A14 phase5 real configured DSH summary report', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'ra-report-real-'))
     const f = await fixture(false, false, false, false, false, { root, adapter: new LearningAdapter(), live: true })
     const id = randomUUID(); let artifactId: string | undefined
@@ -1151,6 +1294,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     const first = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true)
     const id = randomUUID()
     let revision: string
+    let usage: NonNullable<TaskSnapshot['orchestration']>['usage']
     try {
       first.host.start()
       expect((await first.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
@@ -1160,12 +1304,20 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       expect(done!.state_json!.selectedCandidateRefs).toHaveLength(1)
       revision = done!.state_json!.frozenEvidence!.packId
       expect((await first.exportCsv(id, revision)).status).toBe(200)
+      const snapshot = await (await fetch(first.url + '/' + id)).json() as TaskSnapshot
+      usage = snapshot.orchestration!.usage
+      expect(usage.outputTokens).toBeGreaterThan(0)
+      expect(usage.speed.measuredSteps).toBeGreaterThan(0)
+      expect(done!.state_json!.contextManifests!.some(m => m.runtimeMetrics?.sessionStats)).toBe(true)
       expect(first.errors).toEqual([])
     } finally { await first.close() }
     const restored = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true)
     try {
       const snapshot = await fetch(restored.url + '/' + id)
       expect(snapshot.status).toBe(200)
+      const recovered = await snapshot.json() as TaskSnapshot
+      expect(recovered.orchestration!.usage.outputTokens).toBe(usage!.outputTokens)
+      expect(recovered.orchestration!.usage.speed).toEqual(usage!.speed)
       const exported = await restored.exportCsv(id, revision!)
       expect(exported.status).toBe(200)
       expect(exported.body.receipt).toMatchObject({ rowCount: 1, resultRevision: revision! })
@@ -1310,7 +1462,11 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
           payload = { state_id: state.stateId, judgments: [], semantic_gaps: [], action: { kind: 'finish', reason: 'satisfied', explanation: '所需案例已有证据支持',
             coverage: { checked: ['当前案例'], remaining: [], nextAction: '无需继续', nextActionValue: 'none' } } }
         }
-        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(randomUUID()), name, arguments: JSON.stringify(payload) } }
+        const callId = ToolCallId(randomUUID())
+        yield { type: 'tool-call-delta', index: 0, id: callId, name, argumentsDelta: JSON.stringify(payload) }
+        await new Promise(resolve => setTimeout(resolve, 5))
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name, arguments: JSON.stringify(payload) } }
+        yield { type: 'usage', usage: { inputTokens: 100, cacheReadTokens: 20, outputTokens: 80 } }
         yield { type: 'finish', reason: { kind: 'tool-calls' } }
       }
     }
@@ -1326,7 +1482,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       return agents.get(id)!
     }
     const host = new TaskHost(store, { agentFor, applicationFor: () => ctx.retrievalAgent as DurableRetrievalAgentService, analyzer,
-      providerFor: () => provider, reportModel: (agent, id, stage, input, signal, trace) => callReportModel(ctx, agent, id, stage, input, signal, trace),
+      providerFor: () => provider, reportModel: (agent, id, input, signal, trace) => callReportModel(ctx, agent, id, input, signal, trace),
       onError: (_job, error) => { errors.push(String(error)) } })
     const audit = new InMemoryExportAuditSink()
     const exportContext = { agentPresets: { serviceFor: (_agent: Agent, name: string) => name === 'retrievalAgent' ? application : provider } } as unknown as Context

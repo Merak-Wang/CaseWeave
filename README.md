@@ -18,7 +18,9 @@
 
 ## 快速开始
 
-准备 Git、Docker 和 Docker Compose v2.20 或以上版本。Windows 使用 Git for Windows 与 Docker Desktop 的 Linux 容器模式；GPU 模式需要 NVIDIA GPU 及可用的容器 GPU 支持。完整容器部署无需在宿主安装 Node.js 或 Python。
+获取源码可用 Git 或下载源码包。Windows 直接运行 `start.cmd`：自动准备 WSL 2，缺少 Docker 时从官方下载并安装 Docker Desktop（含 Compose），未运行时自动启动；无需 Git Bash。Linux 需先安装 Docker 和 Compose v2.20 或以上版本。GPU 模式需要 NVIDIA GPU 及可用的容器 GPU 支持。
+
+Node.js、pnpm、Python、uv 和项目依赖在镜像构建时自动安装，宿主无需另装。Windows 首次安装若要求管理员授权、接受 Docker 首次许可、开启虚拟化或重启，按系统提示完成后再次运行 `start.cmd` 即可继续；启动脚本不会自动重启电脑。
 
 获取项目后进入项目目录：
 
@@ -32,7 +34,7 @@ cd CaseWeave
 **Windows PowerShell**
 
 ```powershell
-.\setup.cmd
+.\start.cmd
 ```
 
 **Linux / Git Bash**
@@ -43,16 +45,23 @@ bash setup.sh
 
 首次运行会创建本地配置，引导选择 CPU/GPU、供应商和主模型，并准备应用、检索模型、示例数据及索引。模型密钥以隐藏方式输入。首次安装需要联网，耗时和磁盘占用取决于下载速度与所选模型。
 
-安装完成后打开 [检索工作台](http://127.0.0.1:3080/retrieval)。如有安装中断，修复问题后执行 `setup.cmd install` 或 `bash setup.sh install`，准备流程会校验并复用有效文件。
+安装完成后打开 [检索工作台](http://127.0.0.1:3080/retrieval)。如有安装中断，修复问题后再次运行同一启动入口，准备流程会校验并复用有效文件；也可用 `setup.cmd install` 或 `bash setup.sh install` 显式重新检查完整准备流程。
 
 配置、端口、数据卷及排障方法见 [部署与运行](docs/DEVELOPMENT.md#一键容器部署)。
 
 ## 使用工作台
 
-1. 输入业务问题，例如“查找 3 条副卡解绑后仍合账的工单”。需要限定时间、地区或排除场景时，一并写明。
+1. 输入业务问题，或点击首页示例后继续编辑。需要限定时间、地区或排除场景时，一并写明。
 2. 查看持续形成的确认结果。需要了解判断依据时，打开工单详情或检索过程。
 3. 在任务中补充条件，或对具体工单提交“相关 / 不相关”反馈，Agent 会复核受影响的判断。
 4. 查看检索报告，下载当前版本的确认工单。未判定线索保留在检索过程中，不计入交付集合。
+
+首页提供两个可直接尝试的示例：
+
+| 场景 | 检索问题 |
+| --- | --- |
+| 主副卡业务 | 找主副卡有关工单 |
+| 宽带故障 | 找宽带故障有关工单 |
 
 侧栏底部的“模型与供应商”可管理模型配置。任务运行时可主动停止；停止会保留已有结果，并说明尚未完成的范围。
 
@@ -60,23 +69,16 @@ bash setup.sh
 
 | 操作 | Windows | Linux / Git Bash |
 | --- | --- | --- |
-| 启动 | `setup.cmd start` 或双击 `start.cmd` | `bash setup.sh start` |
+| 构建更新并启动（首次自动初始化） | 双击 `start.cmd` | `bash setup.sh start` |
 | 停止 | `setup.cmd stop` | `bash setup.sh stop` |
 | 查看状态 | `setup.cmd status` | `bash setup.sh status` |
 | 查看日志 | `setup.cmd logs` | `bash setup.sh logs` |
 | 检查配置 | `setup.cmd --check` | `bash setup.sh --check` |
-| 安装或更新 | `setup.cmd install` | `bash setup.sh install` |
+| 重新检查完整安装 | `setup.cmd install` | `bash setup.sh install` |
 
-日常启动复用已有镜像、模型和索引；停止保留数据卷。电脑重启后，先启动 Docker，再启动项目。
+每次启动先准备 Docker，再构建应用、Python 算子和模型服务，Docker 自动复用未变化的构建层，再更新有变化的容器并等待健康检查。已有安装复用模型、索引和数据卷，不重新执行下载或索引准备。构建失败时停止部署，现有容器继续保留。电脑重启后直接运行 `start.cmd`。
 
-修改或更新源码后，`start.cmd` 不会自动构建新镜像。仅更新前端或 TypeScript 应用时，在项目根目录执行：
-
-```sh
-docker compose build app
-docker compose up -d --no-deps --wait app
-```
-
-同时更新 Python 算子时，将两条命令中的服务改为 `app semantic-operators`。上述更新保留原数据卷；后续日常启动仍使用 `start.cmd`。仅执行 `docker compose restart` 会继续运行原容器中的旧代码。模型服务升级及回退见 [部署与运行](docs/DEVELOPMENT.md#mysql--milvus-与持久任务入口)。
+仅需复用现有镜像时可显式运行 `start.cmd --no-build`。普通 `docker compose restart` 仍会运行原容器中的旧代码；源码更新使用启动入口即可。模型服务升级及回退见 [部署与运行](docs/DEVELOPMENT.md#mysql--milvus-与持久任务入口)。
 
 ## 数据与运行边界
 

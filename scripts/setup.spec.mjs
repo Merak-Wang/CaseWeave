@@ -18,7 +18,7 @@ const quote = value => '"' + value.replaceAll('\\', '\\\\').replaceAll('"', '\\"
 
 function fixture({ configured = true, mode = '' } = {}) {
   const dir = mkdtempSync(join(parent, 'path with spaces-'))
-  for (const path of ['setup.sh', 'setup.ps1', 'setup.cmd', '.env.example', 'config/database', 'config/model-service', 'config/semantic-operators', 'config/app']) {
+  for (const path of ['start.cmd', 'setup.sh', 'setup.ps1', 'setup.cmd', 'scripts/docker-windows.ps1', '.env.example', 'config/database', 'config/model-service', 'config/semantic-operators', 'config/app']) {
     cpSync(join(root, path), join(dir, path), { recursive: true, filter: source => !source.split(/[\\/]/u).includes('node_modules') })
   }
   const env = { ...process.env }
@@ -26,12 +26,15 @@ function fixture({ configured = true, mode = '' } = {}) {
   Object.assign(env, { SETUP_FIXTURE: dir, SETUP_REAL_DOCKER: docker, SETUP_TEST_MODE: mode })
   mkdirSync(join(dir, 'fake-bin'))
   writeFileSync(join(dir, 'fake-bin/docker'), '#!/usr/bin/env bash\nexec node "$SETUP_FIXTURE/fake-docker.mjs" "$@"\n', { mode: 0o755 })
+  writeFileSync(join(dir, 'fake-bin/docker.cmd'), '@echo off\r\n"' + process.execPath + '" "%SETUP_FIXTURE%\\fake-docker.mjs" %*\r\nexit /b %errorlevel%\r\n')
   writeFileSync(join(dir, 'fake-docker.mjs'), `
 import {spawnSync} from 'node:child_process'; import {appendFileSync} from 'node:fs'; import {join} from 'node:path';
 const args=process.argv.slice(2), mode=process.env.SETUP_TEST_MODE;
 if(args[0]==='info'){if(mode==='offline')process.exit(62);console.log(mode==='windows'?'windows':'linux');process.exit(0)}
 if(args[1]==='version'||args.includes('config')){const r=spawnSync(process.env.SETUP_REAL_DOCKER,args,{stdio:'inherit'});process.exit(r.status??1)}
+if(args.includes('ps')&&args.includes('--services')){if(mode!=='uninitialized')console.log('app');process.exit(0)}
 appendFileSync(join(process.env.SETUP_FIXTURE,'calls.jsonl'),JSON.stringify(args)+'\\n');
+if(mode==='build-failure'&&args.includes('build'))process.exit(41);
 if(mode==='index-failure'&&args.at(-1)==='prepare'&&args.includes('scripts/database.mjs'))process.exit(37);
 if(mode==='gpu-failure'&&args.includes('up')&&args.includes('model-service'))process.exit(42);
 if(mode==='start-failure'&&args.includes('up'))process.exit(43);
@@ -50,8 +53,16 @@ if(mode==='start-failure'&&args.includes('up'))process.exit(43);
   return {
     dir, env,
     run(args = [], input) {
-      const result = spawnSync(bash, ['-c', 'cd "$SETUP_FIXTURE"; export PATH="$PWD/fake-bin:$PATH"; exec bash ./setup.sh "$@"', 'setup', ...args],
-        { cwd: root, env, input, encoding: 'utf8', timeout: 120_000 })
+      const native = process.env.SETUP_TEST_SHELL === 'powershell'
+      const runnerEnv = { ...env }
+      if (native) {
+        const pathKey = Object.keys(runnerEnv).find(key => key.toLowerCase() === 'path')
+        runnerEnv[pathKey] = join(dir, 'fake-bin') + ';' + runnerEnv[pathKey]
+      }
+      const result = spawnSync(native ? 'powershell.exe' : bash,
+        native ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(dir, 'setup.ps1'), ...args]
+          : ['-c', 'cd "$SETUP_FIXTURE"; export PATH="$PWD/fake-bin:$PATH"; exec bash ./setup.sh "$@"', 'setup', ...args],
+        { cwd: root, env: runnerEnv, input, encoding: 'utf8', timeout: 120_000 })
       assert.ifError(result.error)
       assert.ok(!result.stdout.includes(sampleKey) && !result.stderr.includes(sampleKey), 'credential must not appear in output')
       return result
@@ -104,6 +115,15 @@ test('check is read-only and works with an env path containing spaces', () => {
   assert.equal(readFileSync(path, 'utf8'), before)
 })
 
+test('relative env paths resolve beside the launcher, not the callers working directory', () => {
+  const f = fixture()
+  mkdirSync(join(f.dir, 'local config'))
+  cpSync(join(f.dir, '.env'), join(f.dir, 'local config/custom.env'))
+  const result = f.run(['--check', '--env-file', 'local config/custom.env'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(f.calls(), [])
+})
+
 test('explicit GPU failure cannot fall back to CPU or announce completion', () => {
   const f = fixture({ mode: 'gpu-failure' })
   const result = f.run(['--gpu', '--non-interactive'])
@@ -116,22 +136,23 @@ test('explicit GPU failure cannot fall back to CPU or announce completion', () =
 for (const mode of ['offline', 'windows']) {
   test(`Docker ${mode} fails before creating local configuration`, () => {
     const f = fixture({ configured: false, mode })
-    const result = f.run(['--non-interactive'])
+    const result = f.run(['--check'])
     assert.notEqual(result.status, 0)
     assert.ok(!existsSync(join(f.dir, '.env')))
     assert.deepEqual(f.calls(), [])
   })
 }
 
-for (const args of [['start'], []]) test(`daily start ${JSON.stringify(args)} skips installation, preserves configuration and never builds or downloads`, () => {
+for (const args of [['start'], []]) test(`daily start ${JSON.stringify(args)} builds updated sources without repeating initialization`, () => {
   const f = fixture(), before = readFileSync(join(f.dir, '.env'), 'utf8')
   const result = f.run(args)
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /工作台已启动/u)
   const calls = f.calls()
-  assert.equal(calls.length, 1)
-  assert.ok(calls[0].includes('up') && calls[0].includes('--no-build') && calls[0].includes('never'))
-  assert.ok(!calls[0].includes('run') && !calls[0].includes('build'))
+  assert.equal(calls.length, 2)
+  assert.ok(calls[0].includes('build') && calls[0].includes('semantic-operators') && calls[0].includes('model-service'))
+  assert.ok(calls[1].includes('up') && calls[1].includes('--no-build') && calls[1].includes('never'))
+  assert.ok(calls.every(call => !call.includes('run')))
   assert.equal(readFileSync(join(f.dir, '.env'), 'utf8'), before)
 })
 
@@ -149,12 +170,35 @@ test('stop/status/logs remain usable with missing model credentials and do not r
   assert.ok(calls.every(call => !call.includes('run') && !call.includes('build') && !call.includes('down')))
 })
 
-test('daily start requires prior configuration and cannot silently become an installation', () => {
+test('start initializes a fresh checkout without redirecting the user to another launcher', () => {
   const f = fixture({ configured: false })
+  const result = f.run(['start'], ['cpu', 'deepseek', 'setup-demo', 'https://example.invalid/v1', sampleKey, ''].join('\n'))
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(existsSync(join(f.dir, '.env')))
+  assert.equal(f.calls().length, 8)
+})
+
+test('start initializes an existing configuration when the application has never been created', () => {
+  const f = fixture({ mode: 'uninitialized' })
+  const result = f.run(['start', '--non-interactive'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(f.calls().length, 8)
+})
+
+test('build failure leaves running containers alone and never announces startup success', () => {
+  const f = fixture({ mode: 'build-failure' })
   const result = f.run(['start'])
-  assert.notEqual(result.status, 0)
-  assert.ok(!existsSync(join(f.dir, '.env')))
-  assert.deepEqual(f.calls(), [])
+  assert.equal(result.status, 41, result.stderr)
+  assert.ok(!result.stdout.includes('工作台已启动'))
+  assert.equal(f.calls().length, 1)
+})
+
+test('explicit start --no-build reuses existing images without preparing data', () => {
+  const f = fixture()
+  const result = f.run(['start', '--no-build'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(f.calls().length, 1)
+  assert.ok(f.calls()[0].includes('up') && f.calls()[0].includes('--no-build'))
 })
 
 test('daily startup failure returns the Docker exit code without claiming success', () => {
@@ -162,5 +206,5 @@ test('daily startup failure returns the Docker exit code without claiming succes
   const result = f.run(['start'])
   assert.equal(result.status, 43, result.stderr)
   assert.ok(!result.stdout.includes('工作台已启动'))
-  assert.equal(f.calls().length, 1)
+  assert.equal(f.calls().length, 2)
 })

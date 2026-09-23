@@ -1,3 +1,3 @@
 @echo off
-call "%~dp0setup.cmd" start %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" start %*
 exit /b %errorlevel%
