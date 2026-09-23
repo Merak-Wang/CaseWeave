@@ -17,6 +17,8 @@ export function operatorRequiredFields(plan: SemanticQueryPlan | undefined, cata
     const readable = sourceEvidenceFields(catalog)
     const source = ['source.raw_dialogue', 'conversationOrUpdates', 'problemDescription'].find(key =>
       readable.some(f => f.key === key && f.capability?.availability === 'available'))
+      // 旧目录没有可用性标记时仍先读对话，不能由字段排序选到空的处理结果。
+      ?? readable.find(f => f.key === 'conversationOrUpdates')?.key
       ?? readable[0]?.key ?? 'conversationOrUpdates'
     return fields as string[] | undefined ?? (s.params.require_source === true ? [source] : [])
   }))]
