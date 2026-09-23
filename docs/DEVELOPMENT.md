@@ -6,13 +6,13 @@
 
 `pnpm operators:test` 运行 Python 验收。uv 的 `--inexact` 保留已有模型依赖，不删除环境内其他包。算子不重新下载模型权重，embedding/rerank 继续复用既有模型服务。模型供应商和凭据仍配置在 DSH；共享服务令牌用 `CASEWEAVE_OPERATORS_TOKEN` 同时配置服务和 Node，避免放进 URL。算子设计与计量定义见 [Python 算子](design/OPERATORS.md)。
 
-默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 使用 Provider 的 `featureBlock` 扫描对齐 ID 与连续数值块，共享样本拟合 LR/SVM/MLP/HGB，选择集 P/R 达标后直接预测全集；未达标时用选择集 F1 最好的已训练模型，查准率低于 60% 则返回“不知道”及已确认工单。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。缺特征与已有未决项保持未知，不自动逐条强判全库。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验与显式旧 baseline 命令见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
+默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 的学习与预测范围是关键词 OR 宽召回全部命中和语义召回结果按工单身份去重后的并集，不包含未进入该召回并集的授权工单。Provider 为并集内对齐 ID 提供连续数值块；共享样本拟合 LR/SVM/MLP/HGB，选择集 P/R 达标后预测并集；未达标时用选择集 F1 最好的已训练模型，查准率低于 60% 则返回“不知道”及已确认工单。关键词命中仍需完整枚举，语义分支按检索配置召回。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。缺特征与已有未决项保持未知，不自动逐条强判。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验与显式旧 baseline 命令见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
 
 从旧版算法升级 Docker 部署时，运行 `start.cmd` 或 `bash setup.sh start`，自动构建并更新应用、算子和排名服务。旧算子镜像不认识新筛选参数时可能返回 `ProtocolError`。若旧数据库尚无数值特征，另执行 `docker compose exec app node scripts/database.mjs index --dataset=esft-development`，复用已有向量和索引检查点补齐；自定义数据集替换名称。已有安装的日常启动不自动重新导入数据或重建索引。
 
-语言模型标注的并发与每次样本数由 `RETRIEVAL_AGENT_FILTER_CONFIG` 配置。例如在 `.env` 设置 `RETRIEVAL_AGENT_FILTER_CONFIG={"batchSize":4,"options":{"concurrency":32,"precision_target":0.9,"recall_target":0.9}}`，表示最多同时执行 32 个样本判断请求，每个请求包含至多 4 条工单，并要求模型选择集的查准率/召回率均不低于 0.90；这是选择集经验指标，不是全库质量下界；尾批及命中复核可能少于 4 条。抽样初判和命中复核累计最多 128 次模型请求，续跑共用额度；此配置不能提高累计上限，也不改变 Agent 证据窗口或分类器训练并行度。修改后执行 `docker compose up -d --no-deps --wait app`，未取消的后台任务在原任务内恢复。
+语言模型标注的并发与每次样本数由 `RETRIEVAL_AGENT_FILTER_CONFIG` 配置。例如在 `.env` 设置 `RETRIEVAL_AGENT_FILTER_CONFIG={"batchSize":4,"options":{"concurrency":32,"precision_target":0.9,"recall_target":0.9}}`，表示最多同时执行 32 个样本判断请求，每个请求包含至多 4 条工单，并要求模型选择集的查准率/召回率均不低于 0.90；这是选择集经验指标，不是全库质量下界；尾批及命中复核可能少于 4 条。抽样初判和命中复核累计最多 128 次独立判断请求，自动重试不重复占用额度，续跑共用额度；此配置不能提高累计上限，也不改变 Agent 证据窗口或分类器训练并行度。修改后执行 `docker compose up -d --no-deps --wait app`，未取消的后台任务在原任务内恢复。
 
-选择样本覆盖不足时，后续筛选复用同一查询、来源及配置下的有界排序 ID 池、已判断标签和已训练模型，只补充独立选择样本；训练标签更正后重新拟合。原文及证据要求未变化的未决样本沿用原结论，不重复请求模型。工作台显示复用与续补进度。批量判断可减少请求和重复提示开销，实际费用仍取决于训练/选择样本正文及命中复核数量，全集预测后不再另抽样调用大模型。
+选择样本覆盖不足时，后续筛选复用同一查询、来源及配置下召回并集中的有界排序 ID 池、已判断标签和已训练模型，只补充独立选择样本；训练标签更正后重新拟合。原文及证据要求未变化的未决样本沿用原结论，不重复请求模型。工作台显示复用与续补进度。批量判断可减少请求和重复提示开销，实际费用仍取决于训练/选择样本正文及命中复核数量；预测范围仍是当前召回并集。
 
 完整容器部署适合单机试用；源码入口供开发、集成与排障使用。产品概览见 [README](../README.md)，测试范围见 [评测与验收](EVALUATION_STRATEGY.md)。
 
@@ -77,7 +77,9 @@ docker compose up -d --wait app
 
 .env 的模型配置只作为启动种子；相同配置的重启不会覆盖页面里保存的设置。修改环境中的模型种子可显式更新默认值。首次升级会建立种子指纹；后续设置沿 DSH 私有状态卷保存。
 
-恢复任务时会核对保存的模型是否仍在当前 Provider 配置中。已失效的选择改用当前有效默认模型并显示说明；没有有效默认值时要求在模型设置中选择后继续。主 Agent 与语义算子共用当前选择。模型请求失败保留可公开的错误代码和 HTTP 状态，提示检查模型、凭据、地址或供应商额度；不把失败结束显示为业务检索完成，也不把供应商响应正文传给页面。
+恢复任务时会核对保存的模型是否仍在当前 Provider 配置中。已失效的选择改用当前有效默认模型并显示说明；没有有效默认值时要求在模型设置中选择后继续。主 Agent 与语义算子共用当前选择。查询规划和语义算子遇到连接中断、超时、临时限流、服务端错误，或模型 JSON 结构缺少必填字段/不符合输出 schema（`OUTPUT_SCHEMA`）时，只对失败的逻辑请求最多进行三次实际尝试，默认退避 1 秒、2 秒；供应商返回等待时间时优先等待较长值，单次等待最多 30 秒，取消可立即打断。凭据无效、模型不存在和额度耗尽不自动重试；引用身份、证据与业务规则校验仍严格执行，不因结构错误重试而放宽，也不自动重试整个检索作业。每次尝试独立计量，同一筛选请求的自动重试不重复占用同代次 128 次额度；重试耗尽后明确显示未完成并保留已确认结果。最终报告仍遵循单次生成、失败后显式重试的规则。
+
+模型失败提示保留可公开的错误代码和 HTTP 状态。私有 `.cache/semantic-operators/requests/<manifestId>.json` 为每次尝试保存模型、开始时间、耗时、用量及 `modelFailure`，其中仅提取 `ECONNRESET`、`CONNECTION_FAILED`、`STREAM_INTERRUPTED` 等稳定诊断原因，不保存供应商错误正文。请求文件含任务材料，应按私有执行数据处理；页面不会收到供应商错误正文或凭据。只有这些结构化信息不足时，不能将传输错误直接判定为限流或密钥问题。
 
 MySQL 数据文件位于 mysql-data 卷，Milvus/etcd 位于 milvus-data 卷。内存包括数据库页缓存、索引、Node 会话、PyTorch 和 embedding 权重。MySQL 默认页缓存从 1G 调为 256M，可用 RETRIEVAL_AGENT_MYSQL_BUFFER_POOL 调整；它不是数据库容量限制。Performance Schema 保持启用，语句摘要和长历史各保留 1000 项，减少单机试用中的诊断内存；调节依据见 [MySQL 官方变量说明](https://dev.mysql.com/doc/refman/8.0/en/performance-schema-system-variables.html)。MySQL/Milvus 设置 60 秒优雅退出窗口。GPU embedding 已按硬件使用 BF16/FP16，首版默认不加载 reranker。不同精度会改变向量，不能为了省内存直接换精度而沿用未经核对的索引。
 
@@ -125,6 +127,8 @@ pnpm start:database --no-open --port 3082
 打开 `http://127.0.0.1:3082/retrieval` 使用持久任务工作台，DSH 原设置界面在同一 Host 的根路径。启动自动创建缺失的任务表和快照表，不自动导入业务数据、旧 Session 或重新构建向量。已有已发布数据时跳过 `db:prepare`/`grams`，只启动数据库、模型和 Host 即可。
 
 工作台收到查询/补充后显示已保存回执；关闭或刷新页面只移除事件订阅，worker 继续执行。重启同一数据库/profile 后自动恢复未完成租约；通过任务 URL 或本浏览器的历史链接返回。取消停止后续工作，保存的输入仍保留。问题回复绑定 questionId，失效问题拒绝错答；相关性标记只作为 Agent 待复核反馈。来源/权限已变化则拒绝旧候选、报告和下载，保留已保存输入。CSV 下载按 SQL 当前 resultRevision 逐页重新核验。
+
+取消或故障暂停后，点击“恢复检索”沿用原查询条件、确认结果和筛选进度。对应接口为 `POST /api/retrieval-agent/tasks/:id`，请求体 `{ "operationId": "唯一幂等键", "kind": "resume" }`。恢复不增加查询条件代次，不重置该代次的 128 次独立判断额度；重复提交同一幂等键只返回原回执。需要改变业务条件时再提交补充。
 
 `db:prepare` 读取现有 `data/tickets/esft/summary-train.jsonl`，版本化导入 MySQL，使用真实 Qwen3-Embedding-0.6B 创建 Milvus 索引，全部片段确认后发布。摘要及完整原始对话按 360 Unicode 字符切片，实际模型再次检查 token 上限，拒绝静默截断。作业每批 checkpoint；中断后重跑同一命令复用已确认片段和带模型身份的 embedding 缓存。构建未完成不会发布部分向量索引。首批构建明显长于查询，不计入已就绪查询延迟。
 
@@ -369,7 +373,7 @@ pnpm retrieval-agent web --no-open --port 3081
 | `pnpm exec vitest run packages/agent-plugin/src/service.spec.ts` | 运行指定相邻测试；路径可换成受影响的现有 spec |
 | `pnpm test` | 运行默认行为/边界回归；不加载全量语料做假排名，实库专项需显式启用 |
 | `pnpm model:test` | 通过 uv 运行 Python model-service 测试；环境未就绪时可能同步依赖 |
-| `pnpm operators:test` | 三个核心算子、默认四模型/全域扫描、128 次抽样额度与 60% 查准率门槛、未知/缺特征、数值等价和旧 filter baseline；CI 使用同一入口 |
+| `pnpm operators:test` | 三个核心算子、默认四模型/召回并集预测、128 次抽样额度与 60% 查准率门槛、未知/缺特征、数值等价和旧 filter baseline；CI 使用同一入口 |
 | `pnpm eval:self-test` | Python 评测数据与 scorer 自检，不执行真实 Agent 任务 |
 
 跨包导入可能通过 package exports 读取 `lib/`。跨包源码变更后先显式 `pnpm build` 一次，再运行 `pnpm typecheck:code` 和所选行为检查；也可直接用 `pnpm typecheck` 完成构建与类型检查。单独 `--noEmit` 不能证明已有构建产物与源码一致。依赖开发语料的测试和运行入口要求事先显式准备数据，纯代码检查无需此步骤。

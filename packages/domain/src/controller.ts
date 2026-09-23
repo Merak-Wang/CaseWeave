@@ -477,7 +477,48 @@ export class RetrievalController {
     return this.#record(state, { phase: 'assessed', query: { ...state.query, spec }, searchProgress: progress,
       candidates, candidateHistory: merge(state.candidateHistory), lastPage: progress.page,
       allowedActions: [action('assess', candidates.map(c => c.ref)), action('repair_search'), action('read_state'),
-        ...(complete && progress.page.nextCursor ? [action('search_next')] : [])] })
+      ...(complete && progress.page.nextCursor ? [action('search_next')] : [])] })
+  }
+  /** 收紧当前学习结果到召回并集；候选历史保留为审计记录。 */
+  constrainRecallCandidates(state: RetrievalState, generation: number, allowedRefs: readonly TicketCandidateRef[]): RetrievalState {
+    if (generation !== (state.inputGeneration ?? 0)) throw new RetrievalError('INVALID_TRANSITION', '召回范围属于旧输入代次。')
+    const allowed = new Set(allowedRefs)
+    const candidates = state.candidates.filter(candidate => allowed.has(candidate.ref))
+    const selectedCandidateRefs = state.selectedCandidateRefs.filter(ref => allowed.has(ref))
+    const excludedCandidateRefs = state.excludedCandidateRefs.filter(ref => allowed.has(ref))
+    const judgments = state.judgments?.filter(judgment => allowed.has(judgment.candidateRef))
+    const promotedEvidence = state.promotedEvidence.filter(item => allowed.has(item.candidateRef))
+    const evidenceIds = new Set(promotedEvidence.map(item => item.evidenceId))
+    const modelVisibleCandidateRefs = state.modelVisibleCandidateRefs?.filter(ref => allowed.has(ref))
+    const modelVisibleEvidenceIds = state.modelVisibleEvidenceIds?.filter(id => evidenceIds.has(id))
+    const contextCandidateRefs = state.contextCandidateRefs?.filter(ref => allowed.has(ref))
+    const clarification = state.clarification && { ...state.clarification,
+      candidateRefs: state.clarification.candidateRefs.filter(ref => allowed.has(ref)) }
+    const progress = { ...state.progress,
+      newCandidateRefs: state.progress.newCandidateRefs.filter(ref => allowed.has(ref)),
+      ...(state.progress.newEvidenceIds ? { newEvidenceIds: state.progress.newEvidenceIds.filter(id => evidenceIds.has(id)) } : {}) }
+    const allowedActions = state.allowedActions.map(item => ({ ...item,
+      candidateAllowlist: item.candidateAllowlist.filter(ref => allowed.has(ref)) }))
+    const changed = candidates.length !== state.candidates.length
+      || selectedCandidateRefs.length !== state.selectedCandidateRefs.length
+      || excludedCandidateRefs.length !== state.excludedCandidateRefs.length
+      || judgments?.length !== state.judgments?.length
+      || promotedEvidence.length !== state.promotedEvidence.length
+      || modelVisibleCandidateRefs?.length !== state.modelVisibleCandidateRefs?.length
+      || modelVisibleEvidenceIds?.length !== state.modelVisibleEvidenceIds?.length
+      || contextCandidateRefs?.length !== state.contextCandidateRefs?.length
+      || clarification?.candidateRefs.length !== state.clarification?.candidateRefs.length
+      || progress.newCandidateRefs.length !== state.progress.newCandidateRefs.length
+      || progress.newEvidenceIds?.length !== state.progress.newEvidenceIds?.length
+      || state.frozenEvidence?.candidates.some(candidate => !allowed.has(candidate.ref))
+      || JSON.stringify(allowedActions) !== JSON.stringify(state.allowedActions)
+    if (!changed) return state
+    return this.#record(state, { candidates, selectedCandidateRefs, excludedCandidateRefs, promotedEvidence, progress, allowedActions,
+      ...(judgments === undefined ? {} : { judgments }),
+      ...(modelVisibleCandidateRefs === undefined ? {} : { modelVisibleCandidateRefs }),
+      ...(modelVisibleEvidenceIds === undefined ? {} : { modelVisibleEvidenceIds }),
+      ...(contextCandidateRefs === undefined ? {} : { contextCandidateRefs }),
+      ...(clarification === undefined ? {} : { clarification }), frozenEvidence: undefined })
   }
   registerResultCandidates(state: RetrievalState, generation: number, candidates: readonly import('@retrieval-agent/contracts').TicketCandidate[], modelId: string): RetrievalState {
     if (generation !== (state.inputGeneration ?? 0) || learnedResult(state)?.model_id !== modelId || candidates.some(c => c.snapshotId !== state.snapshot?.snapshotId)) throw new RetrievalError('INVALID_TRANSITION', '按需结果读取已过期。')
@@ -898,6 +939,19 @@ export class RetrievalController {
     if (explanation.trim().length === 0) throw new RetrievalError('INVALID_REQUEST', '未完成停止必须说明具体原因。')
     const current = this.#record(state, { stopExplanation: explanation })
     return current.snapshot === undefined ? this.stop(current, 'backend_error') : this.#freeze(current, current.selectedCandidateRefs, 'partial')
+  }
+  /** 保留查询代次与确认引用，只撤销未完成任务的终态交付。 */
+  resume(state: RetrievalState): RetrievalState {
+    if (state.phase !== 'stopped' || !state.snapshot
+      || !['cancelled', 'partial', 'backend_error', 'budget_exhausted', 'capacity_exceeded'].includes(state.termination)) {
+      throw new RetrievalError('INVALID_TRANSITION', '当前任务没有可恢复的未完成执行。')
+    }
+    const waitingSince = state.executionClock?.waitingSince ?? state.updatedAt
+    const waiting = Math.max(0, this.#now().getTime() - Date.parse(waitingSince))
+    return this.#record(state, { phase: state.lastPage ? 'assessed' : 'snapshot_opened', termination: 'active', stopExplanation: undefined, stopErrorCode: undefined,
+      frozenEvidence: undefined, executionClock: { totalWaitingMs: (state.executionClock?.totalWaitingMs ?? 0) + waiting },
+      allowedActions: state.lastPage ? [action('assess', state.candidates.map(candidate => candidate.ref)), action('repair_search'), action('read_state'),
+        ...(state.lastPage.nextCursor ? [action('search_next')] : [])] : [action('search'), action('read_state')] })
   }
   freezeForInterruption(state: RetrievalState, reason: 'budget_exhausted' | 'capacity_exceeded'): RetrievalState {
     if (state.candidates.length === 0 || state.snapshot === undefined) return this.stop(state, reason)

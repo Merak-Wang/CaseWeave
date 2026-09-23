@@ -9,13 +9,13 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { RetrievalError, type ContextManifest, type OperatorDecision, type OperatorRecord,
   type RetrievalState, type SemanticQueryPlan, type TicketCandidateRef, type TicketRetrievalSpec, type TicketSearchProgress } from '@retrieval-agent/contracts'
 import { estimateContextTokens, operatorRecords, operatorRequiredFields, sourceEvidenceFields, validateOperatorRecords } from '@retrieval-agent/domain'
-import { confirmedCount } from '@retrieval-agent/domain/result'
+import { confirmedCount, learnedResult } from '@retrieval-agent/domain/result'
 import { PythonOperatorBridge, type PythonOperatorRun } from './python-operator-bridge.js'
 import type { RetrievalAgentService } from './service.js'
 import { inputContextTokens } from './context/recovery.js'
 import { isDeepStrictEqual } from 'node:util'
 import { openWiki, revokedKnowledge } from './wiki-store.js'
-import { modelFailure } from './model-failure.js'
+import { modelFailure, type ModelFailureCause } from './model-failure.js'
 import { readTaskKnowledge } from './knowledge-view.js'
 import { installSessionMetrics } from './metrics/session.js'
 import { ModelCallMetrics } from './metrics/model-call.js'
@@ -120,6 +120,7 @@ export class SemanticOperators {
     const path = resolve(this.root, '.cache/semantic-operators/requests', `${input.manifest_id}.json`)
     await mkdir(resolve(this.root, '.cache/semantic-operators/requests'), { recursive: true })
     const started = Date.now(); let payload: unknown, usage: TokenUsage | undefined, finished = false, failure: string | undefined
+    let failureDetails: ModelFailureCause | undefined
     let aggregateReceipt: unknown
     let callMetrics: ModelCallMetrics | undefined
     try {
@@ -149,7 +150,9 @@ export class SemanticOperators {
             payload = JSON.parse(chunk.block.arguments)
           }
           if (chunk.type === 'finish') {
-            if (chunk.reason.kind === 'error') throw modelFailure(chunk.reason.failure)
+            if (chunk.reason.kind === 'error') throw modelFailure(chunk.reason.failure, true, usage ? {
+              prompt_tokens: inputContextTokens(usage), completion_tokens: usage.outputTokens, cached_prompt_tokens: usage.cacheReadTokens ?? null,
+            } : undefined)
             finished = ['stop', 'tool-calls'].includes(chunk.reason.kind)
           }
         }
@@ -169,7 +172,11 @@ export class SemanticOperators {
       }
       return { payload, usage: usage ? { prompt_tokens: inputContextTokens(usage), completion_tokens: usage.outputTokens,
         cached_prompt_tokens: usage.cacheReadTokens ?? null } : {} }
-    } catch (error) { failure = error instanceof RetrievalError ? error.code : 'model_failure'; throw error }
+    } catch (error) {
+      failure = error instanceof RetrievalError ? error.code : 'model_failure'
+      if (error instanceof RetrievalError) failureDetails = error.cause as ModelFailureCause | undefined
+      throw error
+    }
     finally {
       const runtimeMetrics = callMetrics?.finish(finished)
       // 将这一次模型回执附回对应清单，UI 据此显示算子窗口而不是任务累计量。
@@ -185,7 +192,8 @@ export class SemanticOperators {
       await writeFile(path, JSON.stringify({ operation: input.operation, pythonManifestId: input.manifest_id, provider: config.provider, model: config.model,
         taskScope: [scope.state.retrievalId, scope.state.inputGeneration ?? 0, scope.state.snapshot?.snapshotId, scope.state.principalBindingHash],
         request: { system: request.system, messages: request.messages, tools: request.tools }, manifests: scope.manifests.filter(m => m.operator?.pythonManifestId === input.manifest_id),
-        startedAt: new Date(started).toISOString(), elapsedMs: Date.now() - started, usage: usage ?? null, payload, aggregateReceipt, failure }), { mode: 0o600 })
+        startedAt: new Date(started).toISOString(), elapsedMs: Date.now() - started, usage: usage ?? null, payload, aggregateReceipt, failure,
+        ...(failureDetails?.modelFailure ? { modelFailure: failureDetails.modelFailure } : {}) }), { mode: 0o600 })
     }
   }
   private async receipt(state: RetrievalState, id: string) {
@@ -314,15 +322,40 @@ export class SemanticOperators {
   async filter(agent: Agent, refs?: readonly TicketCandidateRef[], signal?: AbortSignal, deferFinish = false): Promise<RetrievalState> {
     await this.application.ensureModelAccess(agent, signal)
     await this.application.coordinator?.prepare(agent, signal)
-    const state = await this.ensurePlan(agent, signal), generation = state.inputGeneration ?? 0
+    let state = await this.ensurePlan(agent, signal)
+    const generation = state.inputGeneration ?? 0
+    if (state.phase === 'stopped') return state
     const plan = state.query.contract!.semanticPlan!, knowledge = await this.knowledge(state)
-    const lastLearning = state.budget.operatorUsage?.learning as { input_revision?: number; stop_reason?: string; discovery_key?: string; discovery_remaining_records?: number } | undefined
-    // 全集抽样启动后，定向重判也回到同一学习过程，不能另开 direct 请求绕过额度。
-    const algorithm = plan.goal.mode === 'examples' || refs && lastLearning?.input_revision !== generation ? 'direct' : this.filterConfig.algorithm ?? 'auto'
+    // 完整检索中的定向重判仍使用同一召回并集与学习额度。
+    const algorithm = plan.goal.mode === 'examples' ? 'direct' : this.filterConfig.algorithm ?? 'auto'
     const fullScope = ['auto', 'active', 'learned'].includes(algorithm)
+    let recallScope: string | undefined
+    if (fullScope) {
+      state = await this.discoverPlanned(agent, signal)
+      if (state.searchProgress?.channels.some(channel => channel.status === 'failed')) throw new RetrievalError('PROVIDER_UNAVAILABLE', '召回通道失败，完整召回并集尚未建立。')
+      recallScope = state.lastPage?.recallScope
+      const provider = this.ctx.ticketRetrievalProvider
+      if (!recallScope || !provider.featureBlock || !provider.resolveFeatureIds) throw new RetrievalError('PROVIDER_UNAVAILABLE', '完整召回尚未提供数值筛选范围。')
+      // 首屏和旧任务样本先按完整并集收紧；历史保留，范围外判断不再进入本轮交付。
+      const principal = await this.application.principal(agent, 'detail_read', signal), allowed: TicketCandidateRef[] = []
+      const materializedRefs = [...new Set([...state.candidates.map(c => c.ref), ...state.selectedCandidateRefs,
+        ...state.excludedCandidateRefs, ...(state.judgments ?? []).map(j => j.candidateRef), ...state.promotedEvidence.map(e => e.candidateRef)])]
+      for (let offset = 0; offset < materializedRefs.length; offset += 2048) {
+        const block = await provider.featureBlock(principal, { snapshotId: state.snapshot!.snapshotId, recallScope,
+          refs: materializedRefs.slice(offset, offset + 2048), limit: 2048,
+          filters: state.query.confirmedConstraints }, signal ? { signal } : {})
+        const rows = await provider.resolveFeatureIds(principal, { snapshotId: state.snapshot!.snapshotId, ids: block.ids }, signal ? { signal } : {})
+        allowed.push(...rows.map(row => row.ref))
+      }
+      state = await this.application.constrainRecallCandidates(agent, generation, allowed)
+      const previous = state.budget.operatorUsage?.learning as { recall_scope_key?: string } | undefined
+      if (previous?.recall_scope_key !== recallScope) state = await this.application.recordOperatorUsage(agent, generation,
+        { ...state.budget.operatorUsage, learning: { input_revision: generation, recall_scope_key: recallScope, stop_reason: 'scanning' } })
+    }
+    const lastLearning = state.budget.operatorUsage?.learning as { input_revision?: number; recall_scope_key?: string; stop_reason?: string; discovery_key?: string; discovery_remaining_records?: number } | undefined
     const planFields = operatorRequiredFields(plan, state.snapshot?.fieldCatalog)
     const requiredFields = planFields
-    const discoveryKey = (s: RetrievalState) => hash(['ngram-vector-desc-v1', s.candidates.map(c => c.ref).sort(), s.promotedEvidence.map(e => e.evidenceId).sort(), this.filterConfig.options, requiredFields])
+    const discoveryKey = (s: RetrievalState) => hash(['ngram-vector-desc-v1', recallScope, s.candidates.map(c => c.ref).sort(), s.promotedEvidence.map(e => e.evidenceId).sort(), this.filterConfig.options, requiredFields])
     if (lastLearning?.input_revision === generation && lastLearning.stop_reason === 'model_unknown') return this.finishUnknown(agent)
     if (fullScope && lastLearning?.input_revision === generation
       && (['quality_passed', 'quality_fallback'].includes(lastLearning.stop_reason ?? '') || lastLearning.discovery_key === discoveryKey(state)
@@ -366,7 +399,7 @@ export class SemanticOperators {
       const missing = refs.filter(ref => !existing.has(ref))
       if (missing.length) {
         const provider = this.ctx.ticketRetrievalProvider
-        if (!provider.readCandidates) throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Provider 尚未提供全库按需取样。')
+        if (!provider.readCandidates) throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Provider 尚未提供召回工单按需取样。')
         const candidates = await provider.readCandidates(await this.application.principal(agent, 'detail_read', signal),
           { snapshotId: state.snapshot!.snapshotId, candidateRefs: missing }, signal ? { signal } : {})
         await this.application.updateExpert(agent, generation, { kind: 'candidates', candidates })
@@ -384,7 +417,7 @@ export class SemanticOperators {
     const predicate = [state.query.original, ...(state.userFeedback ?? []).map(f =>
       `用户补充：${f.question ? `针对“${f.question}”：` : ''}${f.text}`)].join('\n')
     const metrics = await this.run(agent, this.runInput(agent, state, knowledge, 'sem_filter', predicate,
-      { algorithm, scope_mode: fullScope ? 'full' : 'candidates', options: this.filterConfig.options ?? {}, initial_refs: state.candidates.map(c => c.ref),
+      { algorithm, scope_mode: fullScope ? 'full' : 'candidates', ...(recallScope ? { recall_scope_key: recallScope } : {}), options: this.filterConfig.options ?? {}, initial_refs: state.candidates.map(c => c.ref),
         batch_size: batchSize, require_source: plan.steps.some(s => s.op === 'sem_filter' && s.params.require_source === true),
         required_fields: requiredFields, replay_saved: true,
         host_labels: Object.fromEntries((state.judgments ?? []).filter(j => j.basis !== 'proxy').map(j =>
@@ -405,14 +438,14 @@ export class SemanticOperators {
         const principal = await this.application.principal(agent, 'detail_read', signal)
         const block = await provider.featureBlock(principal,
           { snapshotId: state.snapshot!.snapshotId, limit: p.page_size ? Math.min(2048, Number(p.page_size)) : Number((p.ids as number[] | undefined)?.length ?? (p.refs as string[] | undefined)?.length ?? 2048),
-            filters: state.query.confirmedConstraints, ...(method === 'features.seeds' || p.ranked === true ? { rankingQuery: predicate } : {}),
+            filters: state.query.confirmedConstraints, ...(recallScope ? { recallScope } : {}), ...(method === 'features.seeds' || p.ranked === true ? { rankingQuery: predicate } : {}),
             ...(p.cursor !== null && p.cursor !== undefined ? { cursor: String(p.cursor) } : {}),
             ...(p.ids ? { ids: p.ids as number[] } : {}), ...(p.refs ? { refs: p.refs as TicketCandidateRef[] } : {}) }, signal ? { signal } : {})
         if (method !== 'features.seeds') return block
         if (!provider.resolveFeatureIds) throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Provider 尚未提供数值来源映射。')
         const seedRows = await provider.resolveFeatureIds(principal, { snapshotId: state.snapshot!.snapshotId, ids: block.ids }, signal ? { signal } : {})
         const strong = new Map((state.judgments ?? []).filter(j => j.basis !== 'proxy').map(j => [j.candidateRef, j.verdict]))
-        // 使用与全域扫描相同的原句相关分数；只有不支持评分的旧 Provider 才沿用召回顺序。
+        // 使用与召回并集扫描相同的原句相关分数；未提供评分时沿用召回顺序。
         const seedScores = Object.fromEntries(seedRows.map((row, i) => { const candidate = byRef.get(row.ref)
           return [block.ids[i], block.scores?.[i] ?? (candidate ? 1 / (1 + candidate.rank) : 0)] }))
         // 种子只传数值 ID、抽样优先级和已有标签，向量随后按块取回。
@@ -458,7 +491,7 @@ export class SemanticOperators {
       if (method === 'learning.update') {
         const { _usage, ...learning } = object(payload)
         await this.application.recordOperatorUsage(agent, generation, { ...now.budget.operatorUsage,
-          ...(_usage ? object(_usage) : {}), learning: { ...learning, discovery_key: discoveryKey(now), ...(learnedSet ? { result_set: learnedSet } : {}) } })
+          ...(_usage ? object(_usage) : {}), learning: { ...learning, ...(recallScope ? { recall_scope_key: recallScope } : {}), discovery_key: discoveryKey(now), ...(learnedSet ? { result_set: learnedSet } : {}) } })
         return {}
       }
       if (method === 'rows.read') {
@@ -519,31 +552,21 @@ export class SemanticOperators {
       await this.searchPlanned(agent, signal)
       return this.filter(agent, undefined, signal)
     }
-    const abort = new AbortController(), combined = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal
-    let learning: Promise<RetrievalState> | undefined
-    const startLearning = () => {
-      if (!learning) {
-        learning = this.filter(agent, undefined, combined, true)
-        // 任一分支失败便取消同行工作，Promise 保留到下方统一收束。
-        void learning.catch(error => abort.abort(error))
-      }
-    }
-    try { await this.discoverPlanned(agent, combined, startLearning); startLearning(); await learning }
-    catch (error) { abort.abort(error); await learning?.catch(() => {}); throw error }
+    // 两路召回完成后固定并集，训练与预测共享完整成员集合。
+    await this.filter(agent, undefined, signal, true)
     return this.finishUnknown(agent)
   }
-  private async discoverPlanned(agent: Agent, signal?: AbortSignal, firstCandidates?: () => void): Promise<RetrievalState> {
+  private async discoverPlanned(agent: Agent, signal?: AbortSignal): Promise<RetrievalState> {
     const state = await this.ensurePlan(agent, signal), generation = state.inputGeneration ?? 0, plan = state.query.contract!.semanticPlan!
     const spec: TicketRetrievalSpec = { ...state.query.spec, mode: plan.keywords.length ? 'hybrid' : 'dense',
       normalizedQuery: plan.keywords.join(' '), semanticQuery: state.query.original, semanticHints: plan.retrieval_expressions,
       keywordQuery: { terms: plan.keywords, operator: 'or' } }
-    const key = hash(['parallel-discovery-v1', state.retrievalId, generation, state.snapshot?.snapshotId, spec])
-    if (state.semanticSearchKeys?.includes(key)) { firstCandidates?.(); return state }
+    const key = hash(['recall-scope-discovery-v1', state.retrievalId, generation, state.snapshot?.snapshotId, spec])
+    if (state.semanticSearchKeys?.includes(key) && state.lastPage?.recallScope && isDeepStrictEqual(state.query.spec, spec)) return state
     const principal = await this.application.principal(agent, 'search', signal)
     const progress = async (value: TicketSearchProgress, complete = false) => {
       signal?.throwIfAborted()
       await this.application.recordDiscovery(agent, generation, spec, value, complete)
-      if (value.page.candidates.length) firstCandidates?.()
     }
     // Provider 内部并行关键词与向量，枚举的 ID 留在数据侧；任务只接收首批窗口。
     const page = await this.ctx.ticketRetrievalProvider.search(principal, state.snapshot!.snapshotId, spec,
@@ -639,7 +662,9 @@ export class SemanticOperators {
         const selected = p.refs as TicketCandidateRef[]
         if (selected.some(ref => !refs.includes(ref))) throw new RetrievalError('CANDIDATE_NOT_FOUND', '证据池超出本次输入。')
         const principal = await this.application.principal(agent, 'detail_read', signal)
-        const block = await provider.featureBlock(principal, { snapshotId: state.snapshot!.snapshotId, refs: selected, limit: selected.length }, signal ? { signal } : {})
+        const recallScope = learnedResult(state)?.metadata.recall_scope_key
+        const block = await provider.featureBlock(principal, { snapshotId: state.snapshot!.snapshotId, refs: selected, limit: selected.length,
+          ...(typeof recallScope === 'string' ? { recallScope } : {}) }, signal ? { signal } : {})
         const sources = await provider.resolveFeatureIds(principal, { snapshotId: state.snapshot!.snapshotId, ids: block.ids }, signal ? { signal } : {})
         return { ...block, refs: sources.map(c => c.ref) }
       }

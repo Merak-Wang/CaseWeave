@@ -79,6 +79,60 @@ def test_selection_pass_predicts_full_scope_without_more_teacher_calls(make_runt
     assert not t & v and set(sampled) == t | v
 
 
+def test_recall_scope_key_is_part_of_learned_state_and_model_identity(make_runtime):
+    from caseweave_ops.types import digest
+
+    y = np.arange(3000) % 2
+    rt = make_runtime(); updates, _, _ = numeric_port(rt, np.eye(2, dtype=np.float32)[y], y)
+    port, model_ids = rt.resources, []
+    async def scoped_port(method, payload):
+        if method == 'predictions.begin': model_ids.append(payload['model_id'])
+        return await port(method, payload)
+    rt.resources = scoped_port
+
+    async def run_scope(scope_key):
+        return await collect(invoke_rows('sem_filter', rt, source([]), 'synthetic predicate', {
+            'scope_mode': 'full', 'algorithm': 'learned', 'recall_scope_key': scope_key,
+            'options': {'pool_size': 1024, 'sample_size': 128, 'selection_size': 256},
+        }))
+
+    predicate = rt.predicate_key('synthetic predicate')
+    asyncio.run(run_scope('recall-a'))
+    assert updates and all(row['recall_scope_key'] == 'recall-a' for row in updates)
+    updates.clear()
+    first_key = digest(['recall-scope-v1', 'recall-a', predicate])
+    first_labels = rt.store.output(rt.scope.key, 'learned_labels', first_key)
+    assert first_labels is not None
+    asyncio.run(run_scope('recall-b'))
+    assert updates and all(row['recall_scope_key'] == 'recall-b' for row in updates)
+    second_key = digest(['recall-scope-v1', 'recall-b', predicate])
+    assert rt.store.output(rt.scope.key, 'learned_labels', second_key) is not None
+    assert first_key != second_key and model_ids[0] != model_ids[1]
+
+
+def test_empty_recall_scope_does_not_fall_back_to_source_or_predict(make_runtime):
+    rt = make_runtime()
+    calls = []
+    async def empty_scope(method, payload):
+        calls.append(method)
+        if method == 'features.seeds': return {'ids': [], 'feature_id': 'empty-scope'}
+        if method == 'features.scan':
+            return {'ids': [], 'dense': '', 'dimensions': 2, 'available': '',
+                    'feature_id': 'empty-scope', 'next_cursor': None}
+        if method in {'learning.update', 'features.take'}: return {}
+        if method in {'predictions.begin', 'predictions.write', 'predictions.finish', 'rows.read'}:
+            raise AssertionError(f'empty scope must not call {method}')
+        raise AssertionError(method)
+    rt.resources = empty_scope
+    rows = [record('outside-1'), record('outside-2')]
+    result = asyncio.run(collect(invoke_rows('sem_filter', rt, source(rows), 'synthetic predicate', {
+        'scope_mode': 'full', 'algorithm': 'learned', 'recall_scope_key': 'empty-recall',
+    })))
+    assert not result
+    assert calls.count('features.scan') == 1
+    assert 'rows.read' not in calls and 'predictions.begin' not in calls
+
+
 def test_batch_width_changes_neither_samples_nor_set(make_runtime):
     y = np.arange(4000) % 2; X = np.eye(2, dtype=np.float32)[y]
     outputs = []

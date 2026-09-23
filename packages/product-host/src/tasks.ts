@@ -44,10 +44,10 @@ export function parseTaskCommand(value: unknown): { operationId: string; command
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RetrievalError('INVALID_REQUEST', '命令必须是 JSON 对象。')
   const v = value as Record<string, unknown>
   if (typeof v.operationId !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(v.operationId)) throw new RetrievalError('INVALID_REQUEST', '命令需要有效的幂等键。')
-  const fields: Record<string, string[]> = { query: ['text'], supplement: ['text'], feedback: ['text', 'candidateRef', 'relevance'], answer: ['text', 'questionId'], cancel: [] }
+  const fields: Record<string, string[]> = { query: ['text'], supplement: ['text'], feedback: ['text', 'candidateRef', 'relevance'], answer: ['text', 'questionId'], resume: [], cancel: [] }
   if (typeof v.kind !== 'string' || !Object.hasOwn(fields, v.kind)
     || Object.keys(v).some(key => !['kind', 'operationId', ...fields[v.kind as string]!].includes(key))) throw new RetrievalError('INVALID_REQUEST', '命令类型或字段无效。')
-  if (v.kind !== 'cancel' && (typeof v.text !== 'string' || !v.text.trim() || v.text.length > 2000)) throw new RetrievalError('INVALID_REQUEST', '请输入 1–2000 字的内容。')
+  if (v.kind !== 'cancel' && v.kind !== 'resume' && (typeof v.text !== 'string' || !v.text.trim() || v.text.length > 2000)) throw new RetrievalError('INVALID_REQUEST', '请输入 1–2000 字的内容。')
   const text = v.text as string
   let command: TaskCommand
   switch (v.kind) {
@@ -60,6 +60,7 @@ export function parseTaskCommand(value: unknown): { operationId: string; command
     case 'feedback':
       if (typeof v.candidateRef !== 'string' || !v.candidateRef || v.candidateRef.length > 512 || !['related', 'unrelated'].includes(String(v.relevance))) throw new RetrievalError('INVALID_REQUEST', '相关性反馈无效。')
       command = { kind: 'feedback', text, candidateRef: v.candidateRef, relevance: v.relevance as 'related' | 'unrelated' }; break
+    case 'resume': command = { kind: 'resume' }; break
     default: throw new RetrievalError('INVALID_REQUEST', '不支持的命令。')
   }
   return { operationId: v.operationId, command }
@@ -206,7 +207,8 @@ export class TaskHost {
       "SELECT seq,kind,data_json FROM ra_task_event WHERE task_id=? AND seq>? AND seq<=? AND kind='retrieval/decision-submitted' ORDER BY seq", [id, commands.at(-1)!.seq, task.event_seq]) : []
     const entries = [...commands, ...decisions].sort((a, b) => a.seq - b.seq)
     const conversation: TaskSnapshot['conversation'] = entries.slice(-60).flatMap<TaskSnapshot['conversation'][number]>(e => {
-      if (e.kind === 'command/accepted') return [{ seq: e.seq, role: 'user' as const, text: e.data_json.command.text ?? '取消本轮任务' }]
+      if (e.kind === 'command/accepted') return [{ seq: e.seq, role: 'user' as const,
+        text: e.data_json.command.kind === 'resume' ? '恢复检索' : e.data_json.command.text ?? '取消本轮任务' }]
       if (e.data_json.data.decision.judgments.some((j: { operatorManifestId?: string }) => j.operatorManifestId)) return []
       const a = e.data_json.data.decision.action
       const text = a.kind === 'clarify' ? a.question : a.kind === 'finish' ? a.explanation : a.kind === 'delegate' ? '已分派 ' + a.assignments.length + ' 项专项核查：' + a.assignments.map((item: { goal: string }) => item.goal).join('；')

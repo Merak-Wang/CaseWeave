@@ -57,6 +57,7 @@ export function foldRetrievalEvents(events: readonly RetrievalDomainEvent[], exp
       if (event.schemaVersion >= 12 && (stateSchemaVersion ?? 0) < 12) state = migrateLegacyRetrievalState(state)
       if (event.schemaVersion === 13 && stateSchemaVersion !== 13) state = migrateProjectionState(state)
       state = applyRetrievalStatePatch(state, event.data.patch)
+      if (state.phase !== 'stopped') stoppedAt = undefined
       stateSchemaVersion = event.schemaVersion
       if (state.retrievalId !== event.retrievalId) {
         throw new RetrievalError('PROTOCOL_MISMATCH', '状态增量改变了检索身份。')

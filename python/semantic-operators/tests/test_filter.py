@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 import pytest
 from caseweave_ops import *
+from caseweave_ops.runtime import ModelRequestError
 from caseweave_ops.types import verify_citations
 from caseweave_ops.filter import DECISION_SCHEMA
 from conftest import record, source, collect, decisions, ScriptedModel
@@ -108,8 +109,10 @@ def test_unknown_never_coerced_to_boolean(make_runtime):
 
 def test_bad_label_raises_structured_failure(make_runtime):
     rt = make_runtime(lambda p,r: decisions(p,r,"Unknown"))
-    with pytest.raises(ProtocolError): asyncio.run(judge_batch(rt, [record()], "x"))
-    assert rt.store.metrics("task")["failed_attempts"] == 1
+    with pytest.raises(ModelRequestError) as failure: asyncio.run(judge_batch(rt, [record()], "x"))
+    assert failure.value.code == "OUTPUT_SCHEMA"
+    assert rt.model.calls == 3
+    assert rt.store.metrics("task")["failed_attempts"] == 3
 
 
 def test_harmless_judgment_note_does_not_fail_a_valid_evidence_decision(make_runtime):

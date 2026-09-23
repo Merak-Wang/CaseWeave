@@ -75,6 +75,8 @@ export interface TicketRetrievalProvider {
   featureBlock?(principal: TrustedPrincipalContext, request: {
     readonly snapshotId: TicketSnapshotId; readonly limit: number; readonly cursor?: string;
     readonly ids?: readonly number[]; readonly refs?: readonly import('./brand.js').TicketCandidateRef[];
+    /** 已完成搜索运行的候选并集；传入时所有读取都限制在该集合内。 */
+    readonly recallScope?: string;
     readonly filters?: readonly import('./types.js').TicketFilter[];
     /** 原始业务查询；仅用于安排标注顺序，不产生相关性结论。 */
     readonly rankingQuery?: string;

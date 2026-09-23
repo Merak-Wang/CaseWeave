@@ -14,7 +14,7 @@ async def invoke_rows(op: str, runtime: Runtime, source: AsyncIterable[Record], 
     """不执行任意代码，也不接受模型覆盖配额、身份或服务端点。"""
     p = params or {}
     # 先按算子执行封闭参数白名单，任何未知操作或附加参数都立即拒绝。
-    allowed = {"sem_filter": {"scope_mode", "batch_size", "require_source", "required_fields", "example_count", "queries", "embedding_id", "keywords", "replay_saved", "algorithm", "options", "host_labels", "initial_refs"},
+    allowed = {"sem_filter": {"scope_mode", "batch_size", "require_source", "required_fields", "example_count", "queries", "embedding_id", "keywords", "replay_saved", "algorithm", "options", "host_labels", "initial_refs", "recall_scope_key"},
                "sem_extract": {"batch_size", "output_schema", "field_map"}, "sem_agg": {"fan_in", "numeric_fields", "evidence_window", "population_count"}}
     if op not in allowed or set(p)-allowed[op]: raise ProtocolError("Unknown operator/argument")
     if op == "sem_filter":
@@ -28,6 +28,7 @@ async def invoke_rows(op: str, runtime: Runtime, source: AsyncIterable[Record], 
                 required_fields=tuple(fields),
                 replay_saved=p.get("replay_saved", False),
                 scope_mode=p.get("scope_mode", "full"), initial_refs=p.get("initial_refs", []),
+                recall_scope_key=p.get("recall_scope_key"),
                 stop_after_accepted=p.get("example_count")):
             yield result if isinstance(result, dict) else {"type": "decision", "value": asdict(result)}
     elif op == "sem_extract":

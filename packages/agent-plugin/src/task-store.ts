@@ -11,6 +11,7 @@ export type TaskCommand = { kind: 'query'; text: string }
   | { kind: 'supplement'; text: string; information: RetrievalClarificationAnswer }
   | { kind: 'feedback'; text: string; candidateRef: string; relevance: 'related' | 'unrelated' }
   | { kind: 'answer'; text: string; questionId: string; information: RetrievalClarificationAnswer }
+  | { kind: 'resume' }
   | { kind: 'cancel' }
 export interface TaskRecord {
   id: string; session_id: string; owner_hash: string; original_query: string; event_seq: number;
@@ -157,20 +158,25 @@ export class MySqlTaskStore {
     if (command.kind === 'feedback' && !task.state_json?.candidates.some(candidate => candidate.ref === command.candidateRef)) {
       throw new RetrievalError('INVALID_REQUEST', '反馈候选不属于当前任务集合。')
     }
-    if (command.kind !== 'query' && command.kind !== 'answer') {
+    if (command.kind === 'resume' && (!task.state_json || task.state_json.phase !== 'stopped'
+      || !['cancelled', 'partial', 'backend_error', 'budget_exhausted', 'capacity_exceeded'].includes(task.state_json.termination))) {
+      throw new RetrievalError('INVALID_TRANSITION', '当前任务没有可恢复的未完成执行。')
+    }
+    if (command.kind !== 'query' && command.kind !== 'answer' && command.kind !== 'resume') {
       await c.query('UPDATE ra_task_question SET answered=TRUE WHERE task_id=? AND answered=FALSE', [task.id])
     }
     const hard = (command.kind === 'supplement' || command.kind === 'answer')
       && Boolean(command.information.filters?.length || command.information.removedFilterFields?.length)
-    task.input_revision++; task.semantic_revision++; if (hard || command.kind === 'query') task.query_revision++
+    task.input_revision++; if (command.kind !== 'resume') task.semantic_revision++; if (hard || command.kind === 'query') task.query_revision++
     task.failure = null
     await this.append(c, task, 'command/accepted', { operationId, command,
-      inputGeneration: (task.state_json?.inputGeneration ?? -1) + (command.kind === 'cancel' ? 0 : 1) })
+      inputGeneration: (task.state_json?.inputGeneration ?? -1) + (['cancel', 'resume'].includes(command.kind) ? 0 : 1) })
     if (task.state_json && command.kind !== 'query') {
       const journal = new TaskJournal([], await this.domainEventCount(task.id, c))
       // These transitions only validate already bound identities and alter task data. No Provider I/O.
       const controller = new RetrievalController({} as ConstructorParameters<typeof RetrievalController>[0], journal)
       task.state_json = command.kind === 'cancel' ? controller.stop(task.state_json, 'cancelled')
+        : command.kind === 'resume' ? controller.resume(task.state_json)
         : controller.acceptUserInformation(task.state_json, command.kind === 'feedback'
           ? { accepted: true, answer: `用户标记工单 ${command.candidateRef} 为${command.relevance === 'related' ? '相关' : '不相关'}。${command.text}` }
           : command.information, command.kind === 'answer')
@@ -178,10 +184,11 @@ export class MySqlTaskStore {
     }
     // Fence every old worker immediately; a cancelled HTTP/model call may still return later.
     await c.query("UPDATE ra_task_job SET status='superseded',fence=fence+1 WHERE task_id=? AND status IN ('queued','running','waiting')", [task.id])
-    if (this.learningEnabled && command.kind !== 'query') await this.enqueue(c, task, 'unlearn')
+    if (this.learningEnabled && !['query', 'resume'].includes(command.kind)) await this.enqueue(c, task, 'unlearn')
     if (command.kind !== 'cancel') {
       const state = task.state_json
-      const needsSearch = !state || hard || !state.lastPage || state.searchProgress?.channels.some(channel => channel.status === 'running')
+      const needsSearch = !state || (command.kind === 'resume' ? !state.lastPage
+        : hard || !state.lastPage || state.searchProgress?.channels.some(channel => channel.status === 'running'))
       await this.enqueue(c, task, needsSearch ? 'search' : 'agent')
     }
     const receipt: CommandReceipt = { taskId: task.id, operationId, eventSeq: task.event_seq, inputRevision: task.input_revision, status: 'accepted' }

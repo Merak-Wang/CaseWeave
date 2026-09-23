@@ -226,6 +226,9 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
     progress: import('@retrieval-agent/contracts').TicketSearchProgress, complete = false): Promise<RetrievalState> {
     return this.execute(agent, async (c, s) => c.recordDiscovery(s, generation, spec, progress, complete))
   }
+  override async constrainRecallCandidates(agent: Agent, generation: number, allowedRefs: readonly import('@retrieval-agent/contracts').TicketCandidateRef[]): Promise<RetrievalState> {
+    return this.execute(agent, async (c, s) => c.constrainRecallCandidates(s, generation, allowedRefs), { semantic: false })
+  }
   protected override async registerResultCandidates(agent: Agent, generation: number, candidates: readonly import('@retrieval-agent/contracts').TicketCandidate[], modelId: string): Promise<RetrievalState> {
     return this.execute(agent, async (c, s) => c.registerResultCandidates(s, generation, candidates, modelId), { semantic: false })
   }

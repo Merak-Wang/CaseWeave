@@ -188,7 +188,7 @@ def test_host_strong_correction_overrides_old_operator_label(make_runtime):
     asyncio.run(collect(sem_filter(rt, source([row]), 'x', scope_mode="candidates")))
     # A later real main/expert judgment is already in the authoritative state.
     events = asyncio.run(collect(invoke_rows('sem_filter', rt, source([row]), 'x',
-        {'scope_mode': 'candidates', 'host_labels': {row.ref: 0}, 'replay_saved': True})))
+        {'scope_mode': 'candidates', 'recall_scope_key': 'recall-v1', 'host_labels': {row.ref: 0}, 'replay_saved': True})))
     assert events == [] and rt.model.calls == 2
     rt.model.handler = lambda p, r: decisions(p, r, 'exclude')
     # A retraction forces a new strong decision, even with a matching old batch.

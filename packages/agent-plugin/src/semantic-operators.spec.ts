@@ -139,16 +139,20 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
 it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2048, 'unknown']] as const)('runs public DSH input through Python filtering for %i rows (fallback=%s) with commits and replay', async (count, fallback) => {
   const active = count === 2048
   const ctx = new Context(), searches: string[] = [], requests: GenerateOptions[] = []
+  const filteringScopes: (string | undefined)[] = []
+  let activeOperation = ''
   const ranker: RetrievalRanker = { profileVersion: 'operator-fixture', capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
     readFeatures: async documents => ({ embedding_id: 'synthetic-operator-fixture', rows: documents.map(d => ({ id: d.id,
       vector: Number(d.id.slice(1)) % 2 ? [0, 1] : [1, 0] })) }),
     rank: async (documents, query) => {
       searches.push(query.semanticText ?? query.text)
-      return { hits: (active ? documents.slice(0, 12) : documents).map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1, channels: [{ channel: 'vector', rank: i + 1, score: 1 }] })),
-        execution: { requestedMode: query.mode, executedMode: query.mode, strategyVersion: 'fixture', channels: [{ channel: 'vector', implementation: 'fixture', version: '1', resultCount: documents.length, elapsedMs: 0 }] },
-        scanned: documents.length, keywordEligible: 0, rankedHits: active ? 12 : documents.length, warnings: [] }
+      const recalled = active ? documents.filter(d => Number(d.id.slice(1)) < count) : documents
+      return { hits: recalled.map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1, channels: [{ channel: 'vector', rank: i + 1, score: 1 }] })),
+        execution: { requestedMode: query.mode, executedMode: query.mode, strategyVersion: 'fixture', channels: [{ channel: 'vector', implementation: 'fixture', version: '1', resultCount: recalled.length, elapsedMs: 0 }] },
+        scanned: documents.length, keywordEligible: 0, rankedHits: recalled.length, warnings: [] }
     } }
-  const records = Array.from({ length: count }, (_, i) => i % 2 ? '解绑已经完成，后续仅咨询账单。' : '解绑仍受阻，尚未完成。').map((summary, i) => normalizeFixtureTicket({
+  // 额外的 128 条与目标具有相同特征和正例，但未被召回，不能进入抽样与预测。
+  const records = Array.from({ length: count + (active ? 128 : 0) }, (_, i) => i % 2 ? '解绑已经完成，后续仅咨询账单。' : '解绑仍受阻，尚未完成。').map((summary, i) => normalizeFixtureTicket({
     ticketId: `r${i}`, displayId: `R-${i}`, tenantId: 'operators', allowedSubjectIds: [], requiredAttributes: {}, sourceVersion: 'v1', title: '副卡解绑', summary,
     problemDescription: summary, resolutionSteps: [], conversationOrUpdates: [summary], errorCodes: [], piiRedactionStatus: 'not_applicable',
   }))
@@ -159,6 +163,7 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
     new Principal(ctx); new Provider(ctx, new LocalTicketProvider(records, { ranker, defaultMode: 'hybrid' }))
     const featureBlock = ctx.ticketRetrievalProvider.featureBlock!.bind(ctx.ticketRetrievalProvider)
     const numericReads = vi.spyOn(ctx.ticketRetrievalProvider, 'featureBlock').mockImplementation(async (...args) => {
+      if (activeOperation === 'sem_filter') filteringScopes.push(args[1].recallScope)
       const block = await featureBlock(...args)
       return { ...block, scores: block.ids.map(id => id / count) }
     })
@@ -170,6 +175,7 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
     if (active) {
       const run = bridge.run.bind(bridge)
       bridge.run = async (input, callback, result, signal) => {
+        activeOperation = input.op
         // 模拟发现与选择缺类回执，验证公开入口都能直接继续有剩余样本的窗口。
         if (input.op === 'sem_filter' && pausedStages < 2) {
           await callback('learning.update', { input_revision: input.scope.input_revision,
@@ -315,6 +321,12 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
       expect(rankedReads.every(([, request]) => request.rankingQuery === query)).toBe(true)
       expect(learning.sampling_method).toBe('ngram_vector_desc')
       expect(learning.feature_records).toBe(count)
+      expect(learning.recall_scope_key).toBe(state.lastPage!.recallScope)
+      expect(filteringScopes.length).toBeGreaterThan(0)
+      expect(filteringScopes.every(scope => scope === state.lastPage!.recallScope)).toBe(true)
+      expect(state.candidates.every(c => Number(c.displayId.slice(2)) < count)).toBe(true)
+      const scopedRefs = new Set(state.candidates.map(c => c.ref))
+      expect(filtering.flatMap(m => m.candidateRefs).every(ref => scopedRefs.has(ref))).toBe(true)
       expect(learning.fit_count).toBeGreaterThan(0)
       expect(learning.predicted_records).toBe(count)
       expect(learning.fit_count).toBe(4)
@@ -342,7 +354,7 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
         const page = await learnedResultWindow(state, ctx.ticketRetrievalProvider, principal, app.semanticResults, cursor, 31)
         allRefs.push(...page.items.map(c => c.displayId)); cursor = page.nextCursor
       } while (cursor)
-      expect(allRefs.sort()).toEqual(records.filter((_, i) => i % 2 === 0).map(r => r.displayId).sort())
+      expect(allRefs.sort()).toEqual(records.slice(0, count).filter((_, i) => i % 2 === 0).map(r => r.displayId).sort())
       const page = await learnedResultWindow(state, ctx.ticketRetrievalProvider, principal, app.semanticResults, undefined, 200)
       const proxy = page.judgments.find(j => j.basis === 'proxy')!
       const resolved = await materializeLearnedRefs(state, ctx.ticketRetrievalProvider, principal, app.semanticResults, [proxy.candidateRef as TicketCandidateRef])
@@ -358,6 +370,7 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
       const rows: string[] = []
       await exporter.stream(await app.principal(agent, 'export'), state, { format: 'jsonl', template: 'summary' }, async row => { rows.push(row) })
       expect(rows.join('').split('\n').filter(Boolean)).toHaveLength(count / 2)
+      expect(rows.join('').split('\n').filter(Boolean).every(row => !records.slice(count).some(record => row.includes(record.displayId)))).toBe(true)
       const oldStrong = state.judgments!.find(j => j.operatorManifestId)!
       const oldManifest = state.contextManifests!.find(m => m.id === oldStrong.operatorManifestId)!
       const changed = admitDecision({ ...state, phase: 'assessed' }, { stateId: state.stateId, judgments: [{ ...oldStrong,

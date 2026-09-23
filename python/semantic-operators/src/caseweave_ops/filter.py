@@ -21,6 +21,7 @@ async def sem_filter(runtime: Runtime, source: AsyncIterable[Record], instructio
     elif algorithm in {"direct", "baseline", "cluster"} or scope_mode == "candidates" or kwargs.get("stop_after_accepted") is not None:
         from .baseline import clustered_filter
         kwargs.pop("initial_refs", None)
+        kwargs.pop("recall_scope_key", None)
         stream = clustered_filter(runtime, source, instruction, algorithm="cluster" if algorithm == "cluster" else "auto",
                                   options=options if algorithm in {"baseline", "cluster"} else None, **kwargs)
     else:
@@ -30,7 +31,8 @@ async def sem_filter(runtime: Runtime, source: AsyncIterable[Record], instructio
 
 
 async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
-                         initial_refs=(), host_labels=None, require_source=True, required_fields=(), **_):
+                         initial_refs=(), host_labels=None, require_source=True, required_fields=(),
+                         recall_scope_key=None, **_):
     cfg = {"block_size": 16384, "pool_size": 4096, "sample_size": 128,
            "selection_size": 256, "workers": 1,
            "precision_target": .95, "recall_target": .95,
@@ -48,18 +50,22 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
         raise ValueError("Quality targets and delta must be between zero and one")
     call = runtime.resources
     key = runtime.predicate_key(instruction)
-    checkpoint_key = digest(['learned-ranked-resume-v2', key, require_source, required_fields,
+    # 召回并集变化时，历史标签与模型状态必须随范围一起失效。
+    scoped_key = digest(['recall-scope-v1', recall_scope_key, key]) if recall_scope_key else key
+    checkpoint_key = digest(['learned-ranked-resume-v3' if recall_scope_key else 'learned-ranked-resume-v2',
+        scoped_key, require_source, required_fields,
         {k: v for k, v in cfg.items() if k not in {'block_size', 'workers', 'concurrency'}}])
     seeds = await call("features.seeds", {"refs": list(dict.fromkeys([*initial_refs, *(host_labels or {})]))})
     checkpoint = runtime.store.learning_checkpoint(runtime.scope.key, checkpoint_key)
     if checkpoint and checkpoint['stats']['feature_id'] != seeds.get('feature_id'):
         checkpoint = None
     stats = {"algorithm": "learned", "predicate_key": key, "input_revision": runtime.scope.input_revision,
+             **({"recall_scope_key": recall_scope_key} if recall_scope_key else {}),
              "corpus_records": 0, "feature_records": 0, "missing_features": 0,
              "scan_passes": 0, "fit_count": 0, "teacher_unique_records": 0,
              "training_records": 0, "selection_records": 0, "quality_basis": "selection",
              "scan_seconds": 0., "fit_seconds": 0., "predict_seconds": 0.,
-             "global_semantic_recall": "not_established", "task_semantics": "full_authorized_scope",
+             "global_semantic_recall": "not_established", "task_semantics": "recall_candidate_scope" if recall_scope_key else "full_authorized_scope",
              "sampling_phase": "discovery", "sampling_method": "ngram_vector_desc",
              "training_sampling_method": "ngram_vector_desc", "selection_sampling_method": "ranked_interleaved_holdout"}
     labels, models, pool_order, selection_ids = {}, [], np.array([], dtype=np.int64), np.array([], dtype=np.int64)
@@ -155,14 +161,22 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
                     stats['reused_unresolved_records'] = stats.get('reused_unresolved_records', 0) + 1
                 else:
                     fresh.append((ident, row))
-            jobs = await asyncio.gather(*(one([i for i, _ in fresh[start:start+batch_size]],
-                [row for _, row in fresh[start:start+batch_size]]) for start in range(0, len(fresh), batch_size)))
+            pending = [asyncio.create_task(one([i for i, _ in fresh[start:start+batch_size]],
+                [row for _, row in fresh[start:start+batch_size]])) for start in range(0, len(fresh), batch_size)]
+            try:
+                jobs = await asyncio.gather(*pending)
+            except BaseException:
+                # 一批任一模型请求失败时取消并收束同批请求，保证终态计量不留下 running。
+                for task in pending:
+                    if not task.done(): task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                raise
             for part, decisions in jobs:
                 for ident, decision in zip(part, decisions):
                     labels[ident] = {"accept": 1, "exclude": 0, "undetermined": -1}[decision.label]
                     yield {"type": "decision", "value": asdict(decision)}
             stats["teacher_unique_records"] = len(labels)
-            runtime.store.save(runtime.scope.key, "learned_labels", key,
+            runtime.store.save(runtime.scope.key, "learned_labels", scoped_key,
                 {"feature_id": stats["feature_id"], "labels": labels, 'unresolved_evidence': unresolved_evidence})
             await update('sampling', sampling_phase=phase)
 
@@ -182,7 +196,7 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
             await update('scanning', scanned_records=stats.get('scanned_records', 0) + len(block.ids))
         pool_order = pool.ids
         priorities.update(zip(map(int, pool.ids), map(float, pool.keys)))
-    history = runtime.store.output(runtime.scope.key, "learned_labels", key)
+    history = runtime.store.output(runtime.scope.key, "learned_labels", scoped_key)
     if history and history["feature_id"] == stats["feature_id"]:
         labels.update({int(i): int(v) for i, v in history["labels"].items()})
         unresolved_evidence.update({int(i): v for i, v in history.get('unresolved_evidence', {}).items()})
@@ -348,11 +362,12 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
         return
     stats['quality'] = quality
     await update('predicting', predicted_records=0)
-    model_id = digest([key, winner.name, threshold, sorted(labels.items()), str(uuid4())])
+    model_id = digest([scoped_key, winner.name, threshold, sorted(labels.items()), str(uuid4())])
     await call("predictions.begin", {"model_id": model_id, "predicate_key": key,
         "feature_id": stats["feature_id"], "input_revision": runtime.scope.input_revision,
         "training_records": len(train_ids), "fit_count": len(models), "model": winner.name,
-        "threshold": threshold, "task_semantics": "full_authorized_scope"})
+        "threshold": threshold, "task_semantics": "recall_candidate_scope" if recall_scope_key else "full_authorized_scope",
+        **({"recall_scope_key": recall_scope_key} if recall_scope_key else {})})
     # 选模后只做数值扫描；已有判断覆盖预测，未知项保留，不再读取正文或调用大模型。
     known_ids = np.array(sorted(labels), dtype=np.int64)
     known_labels = np.array([labels[int(i)] for i in known_ids], dtype=np.int8)

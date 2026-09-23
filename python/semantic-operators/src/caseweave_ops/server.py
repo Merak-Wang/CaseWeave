@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from . import invoke_rows
 from .types import Scope, Knowledge, Record, canonical
-from .runtime import Runtime, ModelReply, ArtifactStore, Usage
+from .runtime import Runtime, ModelReply, ArtifactStore, Usage, ModelRequestError
 from .search import sem_search, Hit, plan_query
 
 class Bridge:
@@ -103,7 +103,15 @@ class Bridge:
             self.send({"type": "error", "job": job, "error": "cancelled_or_superseded"})
         except Exception as exc:
             # 普通故障只返回异常类型和计量，不通过桥接协议泄露内部错误正文。
-            self.send({"type": "error", "job": job, "error": type(exc).__name__, "metrics": self.store.metrics(scope.task_id)})
+            frame = {"type": "error", "job": job, "error": type(exc).__name__, "metrics": self.store.metrics(scope.task_id)}
+            if isinstance(exc, ModelRequestError) and exc.retries_handled:
+                frame["model_failure"] = {"code": exc.code, "message": exc.message, "retryable": False,
+                    "requestRetryable": exc.retryable, "retryAfterMs": exc.retry_after_ms,
+                    "status": exc.status,
+                    "usage": {"prompt_tokens": exc.usage.prompt_tokens, "completion_tokens": exc.usage.completion_tokens,
+                              "cached_prompt_tokens": exc.usage.cached_prompt_tokens}}
+                if exc.diagnostic: frame["model_failure"]["diagnostic"] = exc.diagnostic
+            self.send(frame)
         finally:
             self.jobs.pop(job, None)
 
@@ -113,7 +121,14 @@ class Bridge:
             # 回调响应只结算仍在等待的 Future，迟到或重复响应不会二次写入。
             future = self.pending.get(value["id"])
             if future is not None and not future.done():
-                if "error" in value: future.set_exception(RuntimeError("Host callback failed"))
+                if "error" in value:
+                    failure = value["error"]
+                    if isinstance(failure, dict):
+                        future.set_exception(ModelRequestError(failure.get("code", "MODEL_ERROR"), failure.get("message", "Model request failed"),
+                            failure.get("retryable") is True, failure.get("retryAfterMs"), Usage(**failure.get("usage", {})),
+                            failure.get("diagnostic"), failure.get("status")))
+                    else:
+                        future.set_exception(RuntimeError("Host callback failed"))
                 else: future.set_result(value["payload"])
         elif kind == "run":
             job = value["job"]

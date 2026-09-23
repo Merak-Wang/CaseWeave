@@ -52,6 +52,19 @@ class SamplingLimitReached(Exception):
     """当前查询的样本判断请求已用完。"""
 
 
+class ModelRequestError(RuntimeError):
+    """宿主模型回调的安全错误契约；仅明确可重试的模型错误进入重试。"""
+    def __init__(self, code: str, message: str, retryable: bool,
+                 retry_after_ms: int | None = None, usage: Usage | None = None,
+                 diagnostic: str | None = None, status: int | None = None):
+        super().__init__(message)
+        self.code, self.message, self.retryable = code, message, retryable
+        self.retry_after_ms, self.usage, self.diagnostic = retry_after_ms, usage or Usage(), diagnostic
+        self.status = status
+        self.retries_handled = False
+        self.manifest_id: str | None = None
+
+
 class ArtifactStore:
     def __init__(self, path: str | Path = ":memory:", clock: Callable[[], float] = time.time):
         self.clock, self.lock = clock, threading.RLock()
@@ -83,6 +96,7 @@ class ArtifactStore:
     def sampling_calls(self, scope: Scope) -> int:
         with self.lock:
             return self.db.execute("""SELECT COUNT(*) FROM calls WHERE task=? AND op='sem_filter'
+                AND COALESCE(json_extract(request_json, '$.retry_attempt'),0)=0
                 AND (json_extract(request_json, '$.input_revision')=? OR scope=?)""",
                 (scope.task_id, scope.input_revision, scope.key)).fetchone()[0]
 
@@ -241,6 +255,29 @@ class Runtime:
     async def call(self, op: str, instruction: str, payload: Any, schema: dict[str, Any],
                    *, use_cache: bool | None = None, validate: Callable[[Any], Any] | None = None,
                    cache_if: Callable[[Any], bool] | None = None, sampling: bool = False) -> StructuredResult:
+        # 同一逻辑调用最多三次物理请求，每次由 _call_once 独立登记和结算。
+        previous_manifest = None
+        for attempt in range(3):
+            try:
+                return await self._call_once(op, instruction, payload, schema, use_cache=use_cache,
+                    validate=validate, cache_if=cache_if, sampling=sampling,
+                    retry_attempt=attempt, retry_of=previous_manifest if attempt else None)
+            except ModelRequestError as exc:
+                previous_manifest = exc.manifest_id
+                if not exc.retryable or op not in {"query_plan", "sem_filter", "sem_extract", "sem_agg"} or attempt == 2:
+                    exc.retries_handled = True
+                    raise
+                delay = min(30.0, max(1.0 * (2 ** attempt), (exc.retry_after_ms or 0) / 1000))
+                try:
+                    await asyncio.wait_for(self.scope.cancelled.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    continue
+                raise asyncio.CancelledError("Task cancelled during model retry backoff")
+
+    async def _call_once(self, op: str, instruction: str, payload: Any, schema: dict[str, Any],
+                   *, use_cache: bool | None = None, validate: Callable[[Any], Any] | None = None,
+                   cache_if: Callable[[Any], bool] | None = None, sampling: bool = False,
+                   retry_attempt: int = 0, retry_of: str | None = None) -> StructuredResult:
         # 记录初始作用域，调用或缓存复用结束时据此拒绝已经过期的结果。
         await self.scope.check()
         initial_scope = self.scope.key
@@ -276,9 +313,11 @@ class Runtime:
             self.store.observe(self.scope.task_id, "cache_hit", {"op": op, "source_manifest": saved["manifest_id"]})
             return StructuredResult(saved["payload"], saved["manifest_id"], True)
         # 发起网络请求前先落一条 running 记录，确保失败和取消也能完整结算。
+        # 独立判断的首次调用扣逻辑额度；后续重试保留物理调用与用量计量。
         ident = self.store.begin(self.scope.task_id, self.scope.key, op,
-                                 {"model_identity": self.model.identity, "input_revision": self.scope.input_revision, **request},
-                                 sampling_scope=self.scope if sampling else None)
+                                 {"model_identity": self.model.identity, "input_revision": self.scope.input_revision,
+                                  "retry_attempt": retry_attempt, **({"retry_of": retry_of} if retry_of else {}), **request},
+                                 sampling_scope=self.scope if sampling and retry_attempt == 0 else None)
         request = {**request, "manifest_id": ident, "operation": op}
         usage = Usage()
         settled = False
@@ -299,8 +338,9 @@ class Runtime:
             validator = Draft202012Validator(schema)
             error = next(validator.iter_errors(reply.payload), None)
             if error is not None:
-                # 校验错误不拼接模型内容，避免意外保留推理文本或敏感正文。
-                raise ProtocolError("Structured output did not match the requested schema")
+                # 保留严格 schema；结构化输出不合格时按同一逻辑请求额度重试。
+                raise ModelRequestError("OUTPUT_SCHEMA", "模型返回的结构化结果缺少必填字段或格式不符合要求。",
+                    True, usage=usage)
             if validate:
                 validate(reply.payload)
             result = StructuredResult(reply.payload, ident, False)
@@ -317,8 +357,11 @@ class Runtime:
             raise
         except Exception as exc:
             # 普通故障只持久化异常类型，避免把正文或敏感响应写入错误字段。
+            if isinstance(exc, ModelRequestError):
+                usage = exc.usage
+                exc.manifest_id = ident
             if not settled:
-                self.store.finish(ident, "error", usage, type(exc).__name__)
+                self.store.finish(ident, "error", usage, exc.code if isinstance(exc, ModelRequestError) else type(exc).__name__)
             raise
         finally:
             # 无论走成功、异常还是取消分支，都回收未完成的网络与取消等待任务。

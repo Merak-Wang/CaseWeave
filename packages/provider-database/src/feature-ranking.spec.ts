@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { createPool } from 'mysql2/promise'
 import { TicketDatabase, DatabaseTicketProvider, MilvusClient } from '@retrieval-agent/provider-database'
-import { normalizeFixtureTicket } from '@retrieval-agent/provider-local'
+import { normalizeFixtureTicket, principalBinding } from '@retrieval-agent/provider-local'
 import type { NumericFeatureBlock, TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import type { RetrievalModelGateway } from '@retrieval-agent/model-service-client'
 
@@ -90,6 +90,34 @@ describe.skipIf(process.env.RETRIEVAL_AGENT_DATABASE_TEST !== '1')('query-ranked
     expect((await p.featureBlock(principal, request)).scores).toEqual(scanned.scores)
     expect((await p.featureBlock(principal, { ...request, rankingQuery: '副' })).scores).toEqual([0, .5, .5, 1, .5])
     expect((await p.featureBlock(principal, { snapshotId: snapshot.snapshotId, limit: 20 })).scores).toBeUndefined()
+  })
+
+  it('pages only the completed recall run and binds feature identity to that scope', async () => {
+    const p = provider(), snapshot = await p.openSnapshot(principal), scope = randomUUID().replaceAll('-', '').padEnd(64, '0')
+    await db.pool.query('INSERT INTO ra_search_run(id,generation,binding_hash,fingerprint,status_json) VALUES (?,?,?,?,?)',
+      [scope, generation, principalBinding(principal), 'f'.repeat(64), JSON.stringify({ channels: [], timings: {}, total: 2, eligible: 6, authorized: 6, finished: true })])
+    await db.pool.query('INSERT INTO ra_search_candidate(run_id,ticket_id) VALUES ?', [[['010-vector'], ['030-full']].map(([id]) => [scope, id])])
+    const ordinals = await db.rows<{ ordinal: number }>(
+      'SELECT f.ordinal FROM ra_numeric_feature f JOIN ra_search_candidate c ON c.ticket_id=f.ticket_id WHERE f.index_id=? AND c.run_id=? ORDER BY f.ordinal',
+      ['fixture-index', scope])
+
+    const first = await p.featureBlock(principal, { snapshotId: snapshot.snapshotId, recallScope: scope, limit: 1 })
+    expect(first.ids).toEqual([Number(ordinals[0]!.ordinal)]); expect(first.next_cursor).toBe(String(ordinals[0]!.ordinal))
+    const second = await p.featureBlock(principal, { snapshotId: snapshot.snapshotId, recallScope: scope, limit: 1, cursor: first.next_cursor! })
+    expect(second.ids).toEqual([Number(ordinals[1]!.ordinal)]); expect(second.next_cursor).toBe(String(ordinals[1]!.ordinal))
+    expect(second.feature_id).not.toBe('fixture-index')
+    const outside = [0, 1, 2, 3, 4].find(id => !ordinals.some(row => Number(row.ordinal) === id))!
+    await expect(p.featureBlock(principal, { snapshotId: snapshot.snapshotId, recallScope: scope, ids: [outside], limit: 1 }))
+      .rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+
+    const emptyScope = `${scope.slice(0, -1)}1`
+    await db.pool.query('INSERT INTO ra_search_run(id,generation,binding_hash,fingerprint,status_json) VALUES (?,?,?,?,?)',
+      [emptyScope, generation, principalBinding(principal), 'e'.repeat(64), JSON.stringify({ channels: [], timings: {}, total: 0, eligible: 6, authorized: 6, finished: true })])
+    const empty = await p.featureBlock(principal, { snapshotId: snapshot.snapshotId, recallScope: emptyScope, limit: 1 })
+    expect(empty.ids).toEqual([]); expect(empty.next_cursor).toBeNull()
+    await db.pool.query('UPDATE ra_search_run SET status_json=JSON_SET(status_json,\'$.finished\',FALSE) WHERE id=?', [scope])
+    await expect(p.featureBlock(principal, { snapshotId: snapshot.snapshotId, recallScope: scope, limit: 1 }))
+      .rejects.toMatchObject({ code: 'INVALID_REQUEST' })
   })
 
   it('retries a cancelled query embedding without poisoning the resumed snapshot', async () => {

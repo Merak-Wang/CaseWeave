@@ -4,6 +4,7 @@ import {
   type RetrievalErrorCode,
   TicketCandidateRef,
   TicketEvidenceId,
+  RetrievalStateId,
   TicketSnapshotId,
   type RetrievalDecision,
   type RetrievalState,
@@ -328,6 +329,78 @@ function accept(ref: TicketCandidateRef) {
 }
 
 describe('RetrievalController', () => {
+  it('constrains current learning state to recall members and replays the same confirmed result', async () => {
+    const { controller } = setup()
+    const state = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡' })
+    const [insideAccepted] = state.candidates
+    expect(insideAccepted).toBeDefined()
+    const insideExcluded = { ...insideAccepted!, ref: TicketCandidateRef('inside-excluded'), displayId: 'IN-2', contentHash: 'inside-2' }
+    const outsideAccepted = { ...insideAccepted!, ref: TicketCandidateRef('outside-accepted'), displayId: 'OUT-1', contentHash: 'outside-1' }
+    const outsideExcluded = { ...insideAccepted!, ref: TicketCandidateRef('outside-excluded'), displayId: 'OUT-2', contentHash: 'outside-2' }
+    const outsideEvidence = (candidate: typeof outsideAccepted, evidenceId: string) => ({
+      evidenceId: TicketEvidenceId(evidenceId), candidateRef: candidate.ref, displayId: candidate.displayId,
+      sourceVersion: candidate.sourceVersion, contentHash: candidate.contentHash, field: 'problemDescription' as const,
+      text: '同一条授权来源证据。', start: 0, end: 10, estimatedTokens: 5,
+      trust: 'untrusted_ticket_evidence' as const, truncated: false,
+    })
+    const allCandidates = [insideAccepted!, insideExcluded, outsideAccepted, outsideExcluded]
+    const allRefs = allCandidates.map(candidate => candidate.ref)
+    const { previousStateId: _previousStateId, ...initialState } = state
+    const fixture: RetrievalState = { ...initialState, revision: 0, stateId: RetrievalStateId('fixture-state'),
+      candidates: allCandidates, candidateHistory: allCandidates,
+      selectedCandidateRefs: [insideAccepted!.ref, outsideAccepted.ref],
+      excludedCandidateRefs: [insideExcluded.ref, outsideExcluded.ref],
+      judgments: [
+        { candidateRef: insideAccepted!.ref, verdict: 'accept', evidenceRefs: ['inside-evidence'], reason: '在范围内且确认。' },
+        { candidateRef: insideExcluded.ref, verdict: 'exclude', evidenceRefs: [insideExcluded.ref], reason: '在范围内但排除。' },
+        { candidateRef: outsideAccepted.ref, verdict: 'accept', evidenceRefs: ['outside-evidence'], reason: '旧全库结果。' },
+        { candidateRef: outsideExcluded.ref, verdict: 'exclude', evidenceRefs: [outsideExcluded.ref], reason: '旧全库结果。' },
+      ],
+      promotedEvidence: [outsideEvidence(insideAccepted!, 'inside-evidence'), outsideEvidence(outsideAccepted, 'outside-evidence')],
+      modelVisibleCandidateRefs: allRefs, modelVisibleEvidenceIds: [TicketEvidenceId('inside-evidence'), TicketEvidenceId('outside-evidence')],
+      allowedActions: state.allowedActions.map(item => ({ ...item, candidateAllowlist: allRefs })),
+      frozenEvidence: {
+        packId: 'old-full-pack', retrievalId: state.retrievalId, query: { original: state.query.original, normalized: state.query.spec.normalizedQuery },
+        target: state.task.target, confirmedConstraints: [], snapshot: state.snapshot!,
+        candidates: [insideAccepted!, outsideAccepted].map(candidate => ({ ref: candidate.ref, displayId: candidate.displayId,
+          sourceVersion: candidate.sourceVersion, contentHash: candidate.contentHash, evidenceLevel: 'L1' as const,
+          evidenceIds: [TicketEvidenceId(candidate.ref === insideAccepted!.ref ? 'inside-evidence' : 'outside-evidence')] })),
+        stoppingReason: 'top_k_accepted', remainingGaps: [], budget: state.budget, complete: false,
+        decisionFinalized: true, topKAccepted: true, resultPagesExhausted: true, semanticRecallKnown: false,
+        resultMayBeIncomplete: true, nextPageAvailable: false, providerId: 'fixture', promptVersion: 'fixture',
+      },
+    }
+    const ids = deterministicIds()
+    const journal = new InMemoryRetrievalEventJournal({ now: () => NOW, eventId: ids })
+    journal.append(fixture.retrievalId, 'retrieval/state-recorded', { state: fixture })
+    const scopedController = new RetrievalController(provider(), journal, undefined,
+      { now: () => NOW, id: ids, retrievalId: fixture.retrievalId })
+    const scoped = scopedController.constrainRecallCandidates(fixture, fixture.inputGeneration ?? 0,
+      [insideAccepted!.ref, insideExcluded.ref])
+
+    expect(scoped.candidates.map(candidate => candidate.ref)).toEqual([insideAccepted!.ref, insideExcluded.ref])
+    expect(scoped.candidateHistory).toEqual(fixture.candidateHistory)
+    expect(scoped.selectedCandidateRefs).toEqual([insideAccepted!.ref])
+    expect(scoped.excludedCandidateRefs).toEqual([insideExcluded.ref])
+    expect(scoped.judgments?.map(judgment => judgment.candidateRef)).toEqual([insideAccepted!.ref, insideExcluded.ref])
+    expect(scoped.promotedEvidence.map(evidence => evidence.candidateRef)).toEqual([insideAccepted!.ref])
+    expect(scoped.frozenEvidence).toBeUndefined()
+    expect(scoped.inputGeneration).toBe(fixture.inputGeneration)
+    expect(scoped.budget).toEqual(fixture.budget)
+    expect(foldRetrievalEvents(journal.read(scoped.retrievalId), scoped.retrievalId)).toEqual(scoped)
+    expect(scopedController.constrainRecallCandidates(scoped, scoped.inputGeneration ?? 0,
+      [insideAccepted!.ref, insideExcluded.ref])).toBe(scoped)
+    expect(() => scopedController.constrainRecallCandidates(scoped, (scoped.inputGeneration ?? 0) + 1, []))
+      .toThrow(/旧输入代次/)
+
+    const ended = scopedController.stopIncomplete(scoped, '仅完成召回范围内的确认。')
+    const result = createTicketResultCollection(ended)
+    expect(result.tickets.map(candidate => candidate.ref)).toEqual([insideAccepted!.ref])
+    expect(result.evidence.map(evidence => evidence.candidateRef)).toEqual([insideAccepted!.ref])
+    expect(result.judgments.map(judgment => judgment.candidateRef)).toEqual([insideAccepted!.ref])
+    expect(foldRetrievalEvents(journal.read(ended.retrievalId), ended.retrievalId)).toEqual(ended)
+  })
+
   it('merges discovery beside learning without replacing judgments and rejects an obsolete generation', async () => {
     const { controller, journal } = setup()
     const initial = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡' })
@@ -504,6 +577,25 @@ describe('RetrievalController', () => {
     expect(state.selectedCandidateRefs).toEqual([])
     expect(state.allowedActions.some(a => a.kind === 'repair_search')).toBe(true)
     expect(state.candidates.map(candidate => candidate.ref)).toEqual([CANDIDATE_REF])
+  })
+
+  it('reopens a stopped first-pass task in snapshot_opened so resume performs the initial search', async () => {
+    const base = provider()
+    let searches = 0
+    const { controller, journal } = setup({ ...base, async search(principal, snapshotId, query, options) {
+      if (searches++ === 0) throw new RetrievalError('PROVIDER_UNAVAILABLE', '暂时不可用。', { retryable: true })
+      return base.search(principal, snapshotId, query, options)
+    } })
+    const stopped = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    expect(stopped).toMatchObject({ phase: 'stopped', termination: 'backend_error', snapshot: { snapshotId: 'snapshot-1' } })
+    expect(stopped.lastPage).toBeUndefined()
+    const resumed = controller.resume(stopped)
+    expect(resumed).toMatchObject({ phase: 'snapshot_opened', termination: 'active', inputGeneration: stopped.inputGeneration,
+      selectedCandidateRefs: stopped.selectedCandidateRefs, judgments: stopped.judgments })
+    expect(foldRetrievalEvents(journal.read(resumed.retrievalId), resumed.retrievalId)).toEqual(resumed)
+    const searched = await controller.refreshSearch(PRINCIPAL, resumed)
+    expect(searched.lastPage?.trace.stage).toBe('initial_hybrid')
+    expect(searched.phase).toBe('assessed')
   })
 
   it('asks from actual visible differences, preserves a free reply and excludes long waiting from online time', async () => {

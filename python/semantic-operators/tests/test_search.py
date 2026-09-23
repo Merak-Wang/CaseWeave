@@ -3,6 +3,7 @@ import copy
 import json
 import pytest
 from caseweave_ops import *
+from caseweave_ops.runtime import ModelRequestError
 from caseweave_ops.search import PLAN_SCHEMA, validate_plan
 from conftest import record, source, collect
 
@@ -35,9 +36,16 @@ def test_planning_routes_only_catalog_knowledge_in_the_same_call(make_runtime, r
 def test_routing_rejects_missing_invented_or_duplicate_choices(make_runtime, routes):
     context = json.dumps({"knowledge_catalog": [{"id": "broadband", "entries": [{"id": "expiry"}]}]})
     rt = make_runtime(lambda p, r: {**plan(), **({"knowledge_routes": routes} if routes is not None else {})})
-    with pytest.raises(ProtocolError):
+    # 缺失必填字段属于输出 schema 错误，由 Runtime 对同一请求做三次物理尝试；
+    # 编造或重复条目通过结构校验后仍由路由业务校验拒绝并反馈修复一次。
+    expected = ModelRequestError if routes is None else ProtocolError
+    with pytest.raises(expected) as failure:
         asyncio.run(plan_query(rt, "宽带到期扣费", context))
-    assert rt.model.calls == 2
+    if routes is None:
+        assert failure.value.code == "OUTPUT_SCHEMA"
+        assert rt.model.calls == 3
+    else:
+        assert rt.model.calls == 2
 
 
 def test_planner_repairs_search_index_name_instead_of_requiring_nonexistent_evidence(make_runtime):

@@ -21,7 +21,7 @@ const learningNames: Record<string, string> = { scanning: '读取全范围数值
 export function activityItems(rows: Row[], state: RetrievalState): ActivityItem[] {
   const items = rows.flatMap(row => {
     const item = (suffix: string, actor: string, kind: string, text: string): ActivityItem => ({ id: `${row.seq}:${suffix}`, seq: row.seq, actor, kind, text, at: row.at })
-    if (row.command) return [item('user', '你', 'user', row.command.text ?? '停止检索')]
+    if (row.command) return [item('user', '你', 'user', row.command.text ?? (row.command.kind === 'resume' ? '恢复检索' : '停止检索'))]
     if (row.action) {
       const a = row.action
       // 算子判断提交复用了 inspect 事件；新记录带来源，旧记录依据算子清单识别。

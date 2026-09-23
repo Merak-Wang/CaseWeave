@@ -11,6 +11,18 @@ import { modelFailure } from './model-failure.js'
 export async function executeTaskJob(application: DurableRetrievalAgentService, agent: Agent, job: TaskJob,
   analyzer: TicketQueryAnalyzer, signal: AbortSignal): Promise<void> {
   await application.withJob(agent, job, async () => {
+    const runOperators = async () => {
+      try { await application.operators!.searchAndFilter(agent, signal) }
+      catch (error) {
+        // 请求重试耗尽后明确保存未完成终态；取消与旧代次继续由原作业栅栏处理。
+        if (!signal.aborted && error instanceof RetrievalError && !error.retryable
+          && (error.cause as { modelFailure?: unknown } | undefined)?.modelFailure
+          && application.currentOrUndefined(agent)?.phase !== 'stopped') {
+          await application.stopIncomplete(agent, error.publicMessage)
+        }
+        throw error
+      }
+    }
     if (job.kind === 'learn' || job.kind === 'unlearn' || job.kind === 'source_check') {
       if (!application.learning) throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Wiki 学习服务尚未装配，作业保留供恢复。', { retryable: true })
       await application.learning.run(agent, job, signal)
@@ -36,13 +48,13 @@ export async function executeTaskJob(application: DurableRetrievalAgentService, 
         : await application.start(agent, application.operators ? buildSemanticTicketRequest(query!.original_query)
           : await buildFastTicketRequest(query!.original_query, { analyzer, signal }), signal)
       if (state.termination === 'backend_error') throw new RetrievalError('PROVIDER_UNAVAILABLE', state.stopExplanation ?? '检索来源暂时不可用。', { retryable: true })
-      if (application.operators) await application.operators.searchAndFilter(agent, signal)
+      if (application.operators) await runOperators()
       return
     }
     const state = await application.ensureModelAccess(agent, signal)
     if (!state || state.phase === 'stopped') return
     if (application.operators && state.phase !== 'awaiting_clarification') {
-      await application.operators.searchAndFilter(agent, signal)
+      await runOperators()
     }
     if (state.phase === 'awaiting_clarification') {
       // A replacement worker resumes unfinished independent branches with its new lease.

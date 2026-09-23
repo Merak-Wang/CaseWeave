@@ -9,7 +9,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import LlmRuntime, { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { LlmAdapter, LlmError, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
@@ -1393,7 +1393,215 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     } finally { await operator.close() }
   }, 320000)
 
-  async function fixture(ask: boolean, slow: boolean, extraPage = false, experts = false, broken = false, learning?: { root: string; adapter: LearningAdapter; live?: boolean }, deliveryScale = 0, expertWikiRoot?: string, reviewBatchSize = 8, operatorMode = false) {
+  it.each(['finish', 'throw'] as const)('recovers a transient Python filter transport failure through DSH %s errors', async transportStyle => {
+    const f = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true, 1, transportStyle)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
+      const done = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped', 60000)
+      expect(done?.state_json?.termination, JSON.stringify({ failure: done?.failure, operatorCalls: (f.adapter as any).operatorCalls })).toBe('top_k_accepted')
+      expect(done?.state_json?.selectedCandidateRefs.length).toBeGreaterThan(0)
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
+      expect((await store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status='failed'", [id])).length).toBe(0)
+      expect((f.adapter as any).operatorCalls).toBe(5) // plan + two filter batches, including one extra retry call
+      expect(f.errors).toEqual([])
+    } finally { await f.close() }
+  }, 90000)
+
+  it('cancellation during a Python filter retry delay cannot commit a stale judgment', async () => {
+    const f = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true, 10)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
+      await until(async () => (f.adapter as any).operatorCalls, n => n === 2, 60000)
+      expect((await f.post('/' + id, { operationId: 'cancel-during-operator-retry', kind: 'cancel' })).status).toBe(202)
+      const stopped = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped', 60000)
+      expect(stopped?.state_json?.termination).toBe('cancelled')
+      expect(stopped?.state_json?.selectedCandidateRefs).toEqual([])
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
+      expect((f.adapter as any).operatorCalls).toBe(2)
+    } finally { await f.close() }
+  }, 90000)
+
+  it('a revised condition during Python filter backoff fences the old input generation', async () => {
+    const f = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true, 1)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
+      await until(async () => (f.adapter as any).operatorCalls, n => n === 2, 60000)
+      const oldFilterSession = (f.adapter as any).operatorSessions[1]
+      await new Promise(resolve => setTimeout(resolve, 50)) // Transport failure has entered its one-second retry backoff.
+      expect((await f.post('/' + id, { operationId: 'revise-during-operator-retry', kind: 'supplement', text: '只查询上海工单' })).status).toBe(202)
+      const stopped = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped' && t.state_json.inputGeneration === 1, 60000)
+      expect(stopped?.state_json?.userFeedback?.at(-1)?.text).toBe('只查询上海工单')
+      expect(stopped?.state_json?.query.contract?.semanticPlan?.inputGeneration).toBe(1)
+      expect(stopped?.state_json?.selectedCandidateRefs).toEqual([stopped?.state_json?.candidates.find(c => c.displayId === 'T-2')?.ref])
+      const decisions = (await store.domainEvents(id)).filter(e => e.type === 'retrieval/decision-submitted')
+      expect(decisions.every(e => (e.data as any).inputGeneration === 1)).toBe(true)
+      expect((f.adapter as any).operatorSessions.filter((s: string) => s === oldFilterSession)).toHaveLength(1)
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
+      expect((await store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status='failed'", [id])).length).toBe(0)
+    } finally { await f.close() }
+  }, 90000)
+
+  it('stops an exhausted Python filter transport retry as partial with a failed job', async () => {
+    const f = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true, 3)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
+      const stopped = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped', 60000)
+      expect(stopped?.state_json?.termination, JSON.stringify({ failure: stopped?.failure, operatorCalls: (f.adapter as any).operatorCalls })).toBe('partial')
+      expect(stopped?.state_json?.selectedCandidateRefs).toEqual([])
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
+      const failed = await store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status='failed'", [id])
+      expect(failed).toHaveLength(1)
+      expect((f.adapter as any).operatorCalls).toBe(4) // plan + three bounded filter attempts
+    } finally { await f.close() }
+  }, 90000)
+
+  it('retries a Python filter schema failure once and commits the recovered confirmation', async () => {
+    const f = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true, 0, 'finish', false, 1)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
+      const done = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped', 60000)
+      expect(done?.state_json?.termination, JSON.stringify({ failure: done?.failure,
+        operatorCalls: (f.adapter as any).operatorCalls })).toBe('top_k_accepted')
+      expect(done?.state_json?.selectedCandidateRefs.length).toBeGreaterThan(0)
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
+      expect((await store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status='failed'", [id])).length).toBe(0)
+      expect((f.adapter as any).operatorSchemaFailuresInjected).toBe(1)
+      expect((f.adapter as any).operatorCalls).toBe(5) // 正常4次请求外，多一次格式校验重试
+      expect(f.errors).toEqual([])
+    } finally { await f.close() }
+  }, 90000)
+
+  it('settles three Python filter schema failures as partial with a failed job', async () => {
+    const f = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true, 0, 'finish', false, 3)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
+      const stopped = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped', 60000)
+      expect(stopped?.state_json?.termination, JSON.stringify({ failure: stopped?.failure,
+        operatorCalls: (f.adapter as any).operatorCalls })).toBe('partial')
+      expect(stopped?.state_json?.query.original).toBe('查找副卡解绑案例')
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
+      expect(await store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status='failed'", [id])).toHaveLength(1)
+      const failedTask = await until(() => store.read(id), task => Boolean(task?.failure))
+      expect(failedTask?.failure).toContain('OUTPUT_SCHEMA')
+      expect(failedTask?.failure).toContain('模型返回的结构化结果缺少必填字段或格式不符合要求')
+      expect(failedTask?.state_json?.budget.operatorUsage).toMatchObject({ running: 0, failed_attempts: 3 })
+      expect((f.adapter as any).operatorSchemaFailuresInjected).toBe(3)
+      expect((f.adapter as any).operatorCalls).toBe(4) // 查询规划一次，筛选请求按3次上限耗尽
+      expect(f.errors).toHaveLength(1)
+    } finally { await f.close() }
+  }, 90000)
+
+  it('resumes a stopped model-failure task in the same generation and deduplicates the resume command', async () => {
+    const f = await fixture(false, false, false, false, false, undefined, 0, undefined, 1, true, 3, 'finish', true)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
+      const stopped = await until(() => store.read(id), t => t?.state_json?.phase === 'stopped', 60000)
+      expect(stopped?.state_json?.termination).toBe('partial')
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status='failed'", [id]), jobs => jobs.length === 1)
+      const before = await store.read(id)
+      const failedPlan = before!.state_json!.query.contract!.semanticPlan
+      const failedGeneration = before!.state_json!.inputGeneration
+      const failedRevision = before!.query_revision
+      const failedInputRevision = before!.input_revision
+      const selectedBefore = before!.state_json!.selectedCandidateRefs
+      const evidenceBefore = before!.state_json!.promotedEvidence
+      expect(selectedBefore.length).toBeGreaterThan(0)
+      const callsBeforeResume = (f.adapter as any).operatorCalls
+      const planCallsBefore = (f.adapter as any).operatorPrompts.filter((prompt: string) => prompt.includes('当前操作：query_plan')).length
+      ;(f.adapter as any).operatorTransportFailures = 0
+
+      const resume = { operationId: 'resume-after-model-failure', kind: 'resume' }
+      const receipt = await f.post('/' + id, resume)
+      expect(receipt.status, JSON.stringify(receipt.body)).toBe(202)
+      expect(receipt.body.inputRevision).toBe(failedInputRevision + 1)
+      const duplicate = await f.post('/' + id, resume)
+      expect(duplicate.status).toBe(202)
+      expect(duplicate.body).toEqual(receipt.body)
+      const done = await until(() => store.read(id), t => t?.state_json?.termination === 'top_k_accepted', 60000)
+      expect(done?.state_json?.inputGeneration).toBe(failedGeneration)
+      expect(done?.query_revision).toBe(failedRevision)
+      expect(done?.input_revision).toBe(failedInputRevision + 1)
+      expect(done?.state_json?.query.contract?.semanticPlan).toEqual(failedPlan)
+      expect(done?.state_json?.selectedCandidateRefs).toEqual(expect.arrayContaining([...selectedBefore]))
+      expect(done?.state_json?.promotedEvidence).toEqual(expect.arrayContaining([...evidenceBefore]))
+      const replay = foldRetrievalEvents(await store.domainEvents(id))
+      expect(replay!.inputGeneration).toBe(failedGeneration)
+      expect(replay!.selectedCandidateRefs).toEqual(done?.state_json?.selectedCandidateRefs)
+      expect(replay!.promotedEvidence).toEqual(done?.state_json?.promotedEvidence)
+      expect((f.adapter as any).operatorCalls).toBeGreaterThan(callsBeforeResume)
+      expect((f.adapter as any).operatorPrompts.filter((prompt: string) => prompt.includes('当前操作：query_plan')).length).toBe(planCallsBefore)
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status IN ('queued','running')", [id]), jobs => jobs.length === 0)
+      expect((await store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND status='queued'", [id])).length).toBe(0)
+      expect(f.errors).toHaveLength(1) // Only the exhausted pre-resume turn is reported.
+    } finally { await f.close() }
+  }, 120000)
+
+  it('preserves confirmed evidence and replay when a completed task is stopped then resumed', async () => {
+    const f = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true)
+    f.host.start()
+    try {
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
+      const completed = await until(() => store.read(id), t => t?.state_json?.termination === 'top_k_accepted', 60000)
+      const selected = completed!.state_json!.selectedCandidateRefs
+      const evidence = completed!.state_json!.promotedEvidence
+      const judgments = completed!.state_json!.judgments!
+      expect(selected.length).toBeGreaterThan(0)
+      expect(judgments.length).toBeGreaterThan(0)
+      const frozenCandidates = completed!.state_json!.frozenEvidence!.candidates
+      expect(selected.some(ref => judgments.some(judgment => judgment.candidateRef === ref && judgment.evidenceRefs.length > 0))).toBe(true)
+      const generation = completed!.state_json!.inputGeneration
+      const plan = completed!.state_json!.query.contract!.semanticPlan
+      const queryRevision = completed!.query_revision
+      const inputRevision = completed!.input_revision
+      const operatorCalls = (f.adapter as any).operatorCalls
+      const planCalls = (f.adapter as any).operatorPrompts.filter((prompt: string) => prompt.includes('当前操作：query_plan')).length
+
+      expect((await f.post('/' + id, { operationId: 'stop-completed-fixture', kind: 'cancel' })).status).toBe(202)
+      const cancelled = await until(() => store.read(id), t => t?.state_json?.termination === 'cancelled', 60000)
+      expect(cancelled?.state_json?.selectedCandidateRefs).toEqual(selected)
+      expect(cancelled?.state_json?.promotedEvidence).toEqual(evidence)
+      expect(cancelled?.state_json?.frozenEvidence?.candidates).toEqual(frozenCandidates)
+      expect(cancelled?.state_json?.judgments).toEqual(judgments)
+
+      const resume = { operationId: 'resume-completed-fixture', kind: 'resume' }
+      const receipt = await f.post('/' + id, resume)
+      expect(receipt.status, JSON.stringify(receipt.body)).toBe(202)
+      expect(receipt.body.inputRevision).toBe(inputRevision + 2)
+      expect((await f.post('/' + id, resume)).body).toEqual(receipt.body)
+      const resumed = await until(() => store.read(id), t => t?.state_json?.termination === 'top_k_accepted' && t.input_revision === inputRevision + 2, 60000)
+      expect(resumed?.state_json?.inputGeneration).toBe(generation)
+      expect(resumed?.query_revision).toBe(queryRevision)
+      expect(resumed?.state_json?.query.contract?.semanticPlan).toEqual(plan)
+      expect(resumed?.state_json?.selectedCandidateRefs).toEqual(selected)
+      expect(resumed?.state_json?.promotedEvidence).toEqual(evidence)
+      expect(resumed?.state_json?.frozenEvidence?.candidates).toEqual(frozenCandidates)
+      expect(resumed?.state_json?.judgments).toEqual(judgments)
+      expect((f.adapter as any).operatorCalls).toBe(operatorCalls + 1)
+      expect((f.adapter as any).operatorPrompts.filter((prompt: string) => prompt.includes('当前操作：query_plan')).length).toBe(planCalls)
+      const replay = foldRetrievalEvents(await store.domainEvents(id))
+      expect(replay!.inputGeneration).toBe(generation)
+      expect(replay!.selectedCandidateRefs).toEqual(selected)
+      expect(replay!.promotedEvidence).toEqual(evidence)
+      expect(replay!.judgments).toEqual(judgments)
+    } finally { await f.close() }
+  }, 120000)
+
+  async function fixture(ask: boolean, slow: boolean, extraPage = false, experts = false, broken = false, learning?: { root: string; adapter: LearningAdapter; live?: boolean }, deliveryScale = 0, expertWikiRoot?: string, reviewBatchSize = 8, operatorMode = false, operatorTransportFailures = 0, operatorTransportStyle: 'finish' | 'throw' = 'finish', operatorFailAfterFirstFilter = false, operatorSchemaFailures = 0) {
     let liveSelection: { provider: string; model: string } | undefined
     let liveConfig: Parameters<typeof piAi.apply>[1] | undefined
     let credentialRef: string | undefined, previousCredential: string | undefined
@@ -1446,7 +1654,36 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     const assignments = expertWikiRoot ? (await openWiki(expertWikiRoot)).catalog().slice(0, 3).map((d, i) => ({ domain_id: d.id,
       goal: '核对' + d.title + '的业务边界与处理记录', scope: i === 0 ? '范围确认' : '独立取证', candidate_aliases: ['c1'], knowledge_ids: [d.knowledgeRefs[0]!] })) : undefined
     class OperatorAdapter extends Adapter {
+      operatorCalls = 0
+      operatorTransportFailures = operatorTransportFailures
+      operatorSchemaFailures = operatorSchemaFailures
+      operatorSchemaFailuresInjected = 0
+      readonly operatorSessions: string[] = []
+      readonly operatorPrompts: string[] = []
+      firstFilterBatch?: string
+      readonly laterFilterAttempts = new Map<string, number>()
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        this.operatorCalls++
+        this.operatorSessions.push(String(options.sessionId))
+        this.operatorPrompts.push(options.system ?? '')
+        let transportFailure = this.operatorCalls > 1 && this.operatorCalls <= this.operatorTransportFailures + 1
+        if (operatorFailAfterFirstFilter && options.system?.includes('当前操作：sem_filter')) {
+          const data = JSON.parse(options.messages[0]!.content.flatMap(b => b.type === 'text' ? [b.text] : []).join(''))
+          const batch = data.records.map((r: any) => r.ref).join(',')
+          this.firstFilterBatch ??= batch
+          if (batch !== this.firstFilterBatch) {
+            const attempt = (this.laterFilterAttempts.get(batch) ?? 0) + 1
+            this.laterFilterAttempts.set(batch, attempt)
+            transportFailure = attempt <= this.operatorTransportFailures
+          } else transportFailure = false
+        }
+        if (transportFailure) {
+          if (operatorTransportStyle === 'throw') throw new LlmError('fixture transport interrupted', 'TRANSPORT')
+          yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: 'fixture connection interrupted' } } }
+          return
+        }
+        const omitRequiredFilterField = this.operatorSchemaFailures > 0 && options.system?.includes('当前操作：sem_filter') === true
+        if (omitRequiredFilterField) { this.operatorSchemaFailures--; this.operatorSchemaFailuresInjected++ }
         this.calls++
         let name = 'submit_result', payload: unknown
         if (options.sessionId?.startsWith('operator-')) {
@@ -1454,8 +1691,13 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
           payload = options.system?.includes('当前操作：query_plan') ? {
             keywords: ['副卡'], instruction: '查找副卡解绑案例', retrieval_expressions: [], goal: { mode: 'adaptive', count: null },
             steps: [{ id: 'filter', op: 'sem_filter', inputs: ['$source'], instruction: '核对工单', params: {} }],
-          } : { rows: data.records.map((r: any, i: number) => ({ ref: r.ref, label: i === 0 ? 'accept' : 'exclude', reason: '受控接线验收判断', knowledge_ids: [],
+          } : { rows: data.records.map((r: any, i: number) => ({ ref: r.ref,
+            label: options.system?.includes('只查询上海工单') ? JSON.stringify(r).includes('上海') ? 'accept' : 'exclude' : i === 0 ? 'accept' : 'exclude',
+            reason: '受控接线验收判断', knowledge_ids: [],
             citations: [{ ref: r.ref, passage_id: 'summary', quote: r.passages.find((p: any) => p.id === 'summary').text }] })) }
+          if (omitRequiredFilterField && typeof payload === 'object' && payload !== null && 'rows' in payload) {
+            delete (payload as { rows: { knowledge_ids?: string[] }[] }).rows[0]!.knowledge_ids
+          }
         } else {
           name = 'ticket_decide'
           const state = application.current(ctx.agents.get(options.sessionId!)!)

@@ -124,6 +124,10 @@ function acceptReceipt(r, kind = 'revise') {
     $('status').textContent = '正在停止检索'; $('receipt').textContent = '正在停止主 Agent 和专家，已有结果与轨迹将保留…'
     return
   }
+  if (kind === 'resume') {
+    $('status').textContent = '正在恢复检索'; $('receipt').textContent = '沿用当前条件和已保存进度继续检索'
+    return
+  }
   invalidateViews(); snapshot = undefined
   $('confirmed-count').textContent = '0'; $('counts').textContent = '已保存新输入，正在重新核查'; $('early-progress').hidden = false
   $('early-progress').replaceChildren(text('h3', '正在按新要求查找'), text('p', '结果会在确认后出现在这里。'))
@@ -194,7 +198,7 @@ function render() {
   $('status').className = failed ? 'error' : ''; $('status').parentElement.dataset.state = failed ? 'error' : result ? 'done' : 'running'
   if (snapshot.orchestration?.outcome === 'cancelled') { $('status').textContent = '已停止，结果与轨迹已保留'; $('status').parentElement.dataset.state = 'done' }
   $('counts').textContent = result ? '' : (totals()?.current ?? 0) + ' 条线索'; $('confirmed-count').textContent = String(count)
-  if (snapshot.receipt) $('receipt').textContent = snapshot.commands.at(-1)?.kind === 'query' || result ? '' : '补充已收到'
+  if (snapshot.receipt) $('receipt').textContent = snapshot.commands.at(-1)?.kind === 'query' || result ? '' : snapshot.commands.at(-1)?.kind === 'resume' ? '已恢复检索' : '补充已收到'
   for (const item of document.querySelectorAll('a[aria-current="page"] small')) item.textContent = taskStatus(snapshot)
   $('channels').textContent = (n?.searchProgress?.channels || []).map(c => (c.channel === 'keyword' ? '关键词' : '向量') + '：' + ({ running: '检索中', completed: '已返回', failed: '失败', skipped: '未使用' }[c.status] || c.status) + ' ' + c.count + ' 条').join(' · ')
   $('scope-content').replaceChildren(text('p', snapshot.query), ...(snapshot.commands ?? []).filter(c => ['supplement', 'answer'].includes(c.kind)).map(c => text('p', '补充：' + c.text)))
@@ -445,13 +449,15 @@ $('query-form').onsubmit = async event => {
 $('examples').onclick = event => { const b = event.target.closest('button'); if (b) { $('query').value = b.dataset.query; resizeInput($('query')); $('query').focus() } }
 $('supplement-form').onsubmit = e => { e.preventDefault(); void supplement() }
 function canStop() { return Boolean(snapshot && snapshot.commands.at(-1)?.kind !== 'cancel' && !snapshot.orchestration?.terminal && !snapshot.node?.result) }
+function canResume() { return Boolean(snapshot?.node?.snapshotShortId && snapshot.orchestration?.terminal && ['cancelled', 'partial', 'backend_error', 'budget_exhausted', 'capacity_exceeded'].includes(snapshot.orchestration.outcome)) }
 function updateComposerAction() {
   const stop = canStop() && !$('supplement').value.trim(), button = $('send-supplement')
   button.dataset.mode = stop ? 'stop' : 'send'; button.type = stop ? 'button' : 'submit'
   button.disabled = stopping || sendingInput || (!stop && !$('supplement').value.trim())
   button.setAttribute('aria-label', stopping ? '正在停止' : stop ? '强制停止' : snapshot?.question ? '发送回复' : '发送补充')
   button.title = button.getAttribute('aria-label')
-  $('cancel').disabled = stopping || !canStop()
+  $('cancel').textContent = canResume() ? '恢复检索' : '停止检索'
+  $('cancel').disabled = stopping || sendingInput || !(canStop() || canResume())
 }
 async function forceStop() {
   if (stopping || !canStop()) return
@@ -463,7 +469,15 @@ async function forceStop() {
   catch (e) { if (valid(gen, id)) error(e) }
   finally { stopping = false; updateComposerAction() }
 }
-$('cancel').onclick = forceStop
+async function resumeTask() {
+  if (sendingInput || !canResume()) return
+  const gen = generation, id = taskId
+  sendingInput = true; updateComposerAction()
+  try { const r = await command(endpoint + '/' + id, { kind: 'resume' }); if (valid(gen, id)) { acceptReceipt(r, 'resume'); await refresh() } }
+  catch (e) { if (valid(gen, id)) error(e) }
+  finally { sendingInput = false; updateComposerAction() }
+}
+$('cancel').onclick = () => canResume() ? resumeTask() : forceStop()
 $('send-supplement').onclick = event => { if ($('send-supplement').dataset.mode === 'stop') { event.preventDefault(); void forceStop() } }
 $('feedback-form').onsubmit = async event => {
   event.preventDefault(); if ($('send-feedback').disabled) return; $('send-feedback').disabled = true; const f = feedbackTarget

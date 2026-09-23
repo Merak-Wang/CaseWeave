@@ -6,7 +6,7 @@ import {
 } from '@retrieval-agent/contracts'
 import { normalizeFixtureTicket, type FixtureTicketInput } from './fixture.js'
 import { LocalTicketProvider } from './provider.js'
-import { RankingError, type RetrievalRanker } from '@retrieval-agent/model-service-client/ranking'
+import { RankingError, type RankingResult, type RetrievalRanker } from '@retrieval-agent/model-service-client/ranking'
 import { testHybridRanker } from '../../../tests/support/fake-model-gateway.js'
 
 const BASE_TIME = new Date('2026-08-27T00:00:00.000Z')
@@ -354,5 +354,33 @@ describe('LocalTicketProvider authorization boundary', () => {
     await expect(provider.search(user, snapshot.snapshotId, provider.resolve({ target: 'ranked_cases', query: '登录', requestedCount: 5, countPolicy: 'explicit' }), {
       topK: 5, maxScan: 100, stage: 'baseline',
     })).rejects.toMatchObject({ code: 'TIMEOUT', retryable: true })
+  })
+})
+
+describe('LocalTicketProvider recall-scoped features', () => {
+  it('uses the completed ranking as the feature universe, including an empty universe', async () => {
+    const provider = new LocalTicketProvider(fixtureRecords(), { now: () => BASE_TIME, ranker: testHybridRanker() })
+    const user = principal(), snapshot = await provider.openSnapshot(user)
+    const spec = provider.resolve({ target: 'ranked_cases', query: '登录', mode: 'hybrid' })
+    const ranking: RankingResult = { hits: [{ documentId: 'T-1', rank: 1, score: 1, channels: [] }],
+      execution: { requestedMode: 'hybrid', executedMode: 'hybrid', strategyVersion: 'fixture', channels: [] },
+      scanned: 1, keywordEligible: 0, rankedHits: 1, warnings: [] }
+    const page = provider.projectRanking(user, snapshot.snapshotId, spec,
+      { topK: 1, maxScan: 100, stage: 'initial_hybrid' }, ranking)
+    const legacyRefs = await provider.featureBlock(user, { snapshotId: snapshot.snapshotId, refs: [page.candidates[0]!.ref], limit: 1 })
+    expect(legacyRefs.ids).toEqual([0])
+    const block = await provider.featureBlock(user, { snapshotId: snapshot.snapshotId, recallScope: page.recallScope!, limit: 10 })
+    expect(block.ids).toEqual([0])
+    expect(block.feature_id).not.toBe(snapshot.indexVersion)
+    await expect(provider.featureBlock(user, { snapshotId: snapshot.snapshotId, recallScope: page.recallScope!, ids: [1], limit: 1 }))
+      .rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+
+    const emptySpec = provider.resolve({ target: 'ranked_cases', query: '无命中', mode: 'hybrid' })
+    const emptyPage = provider.projectRanking(user, snapshot.snapshotId, emptySpec,
+      { topK: 1, maxScan: 100, stage: 'initial_hybrid' }, { ...ranking, hits: [], rankedHits: 0 })
+    const empty = await provider.featureBlock(user, { snapshotId: snapshot.snapshotId, recallScope: emptyPage.recallScope!, limit: 10 })
+    expect(empty.ids).toEqual([])
+    await expect(provider.featureBlock(user, { snapshotId: snapshot.snapshotId, recallScope: 'unknown', limit: 10 }))
+      .rejects.toMatchObject({ code: 'INVALID_REQUEST' })
   })
 })

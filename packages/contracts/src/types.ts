@@ -337,6 +337,8 @@ export interface TicketSearchBoundaryObservation {
 export interface TicketSearchPage {
   readonly snapshotId: TicketSnapshotId
   readonly queryFingerprint: string
+  /** 可复用的完整召回集合句柄，供特征学习限定范围。 */
+  readonly recallScope?: string
   readonly candidates: readonly TicketCandidate[]
   readonly completeness: 'exhaustive' | 'bounded' | 'unknown'
   readonly nextCursor?: string

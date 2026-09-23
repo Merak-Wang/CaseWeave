@@ -145,7 +145,7 @@ export function finishReason(state: RetrievalState, action: Extract<RetrievalDec
     && ['checked_predictions', 'all_observed'].includes(currentLearning.stop_reason ?? '')
   const exhausted = learnedScope || (state.lastPage?.boundary.resultPagesExhausted ?? false)
   const blocking = [
-    ...((state.task.countPolicy === 'exhaustive' || currentLearning?.task_semantics === 'full_authorized_scope') && currentLearning && !learnedScope ? ['全库学习未通过集合质量验收，不能把搜索页末或样本判断视为全集完成'] : []),
+    ...((state.task.countPolicy === 'exhaustive' || ['recall_candidate_scope', 'full_authorized_scope'].includes(currentLearning?.task_semantics ?? '')) && currentLearning && !learnedScope ? ['召回并集学习未通过集合质量验收，不能把搜索页末或样本判断视为完整筛选'] : []),
     ...state.query.unresolvedConstraints.map(c => `用户条件待核实：${c}`),
     ...state.gaps.filter(gap => (!['coverage', 'boundary'].includes(gap.kind) || gap.evaluator === 'model') && ['open', 'unknown'].includes(gap.status))
       .map(g => `semantic_gaps 中 ${g.kind}=${g.status}：${(g.description ?? '未说明').slice(0, 150)}`),

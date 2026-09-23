@@ -289,6 +289,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     abortIfNeeded(options)
     const entry = this.#authorizeSnapshot(principal, snapshotId)
     const queryFingerprint = sha256(stableJson(query))
+    entry.rankings.set(queryFingerprint, ranked)
     const offset = this.#decodeCursor(options.cursor, snapshotId, queryFingerprint)
     const terms = query.keywordQuery?.terms ?? []
     const filtered = entry.records.filter(record => query.filters.every(filter => matchesFilter(record, filter)))
@@ -336,6 +337,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     return {
       snapshotId,
       queryFingerprint,
+      recallScope: queryFingerprint,
       candidates,
       completeness: hasNext ? 'bounded' : 'exhaustive',
       ...(hasNext ? { nextCursor: this.#encodeCursor(nextOffset, snapshotId, queryFingerprint) } : {}),
@@ -401,20 +403,46 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
   async featureBlock(principal: TrustedPrincipalContext,
     request: Parameters<NonNullable<TicketRetrievalProvider['featureBlock']>>[1], options?: ProviderCallOptions) {
     const entry = this.#authorizeSnapshot(principal, request.snapshotId)
-    const offset = Number(request.cursor ?? 0)
+    const cohort = request.recallScope === undefined ? undefined : entry.rankings.get(request.recallScope)?.hits
+    if (request.recallScope !== undefined && cohort === undefined) throw new RetrievalError('INVALID_REQUEST', '召回范围不存在或尚未完成。')
+    const cohortIds = cohort === undefined ? undefined : new Set(cohort.map(hit => hit.documentId))
+    const offset = Number(request.cursor ?? (request.recallScope !== undefined || request.refs !== undefined ? -1 : 0))
     const requestedRefs = request.refs && new Set(request.refs)
     const ids = request.ids ? [...request.ids] : []
+    if (request.ids && cohortIds && request.ids.some(id => !cohortIds.has(entry.records[id]?.ticketId ?? '')))
+      throw new RetrievalError('UNAUTHORIZED', '数值 ID 不属于当前召回范围。')
     let next = offset
-    if (!request.ids) for (; next < entry.records.length && ids.length < request.limit; next++) {
-      const r = entry.records[next]!
-      if ((!requestedRefs || requestedRefs.has(TicketCandidateRef(shortOpaque('cand', request.snapshotId, r.ticketId))))
-        && (request.filters ?? []).every(f => matchesFilter(r, f))) ids.push(next)
+    if (!request.ids) {
+      if (cohortIds) {
+        const start = offset < 0 ? 0 : offset + 1
+        for (next = start; next < entry.records.length && ids.length < request.limit; next++) {
+          const r = entry.records[next]!
+          const ref = TicketCandidateRef(shortOpaque('cand', request.snapshotId, r.ticketId))
+          if (cohortIds.has(r.ticketId) && (!requestedRefs || requestedRefs.has(ref))
+            && (request.filters ?? []).every(f => matchesFilter(r, f))) ids.push(next)
+        }
+      } else if (requestedRefs) {
+        next = offset < 0 ? 0 : offset + 1
+        for (; next < entry.records.length && ids.length < request.limit; next++) {
+          const r = entry.records[next]!
+          if (requestedRefs.has(TicketCandidateRef(shortOpaque('cand', request.snapshotId, r.ticketId)))
+            && (request.filters ?? []).every(f => matchesFilter(r, f))) ids.push(next)
+        }
+      } else for (; next < entry.records.length && ids.length < request.limit; next++) {
+        const r = entry.records[next]!
+        if ((request.filters ?? []).every(f => matchesFilter(r, f))) ids.push(next)
+      }
     }
-    const next_cursor = !request.ids && !request.refs && next < entry.records.length ? String(next) : null
+    let next_cursor: string | null = null
+    if (!request.ids && ids.length === request.limit) {
+      if (request.recallScope !== undefined) next_cursor = String(ids.at(-1))
+      else if (!requestedRefs) next_cursor = String(next)
+    }
     if (this.#ranker.readFeatureBlock) {
       const block = await this.#ranker.readFeatureBlock(ids.map(i => ({ id: entry.records[i]!.ticketId, contentHash: entry.records[i]!.contentHash })), options?.signal)
       this.#authorizeSnapshot(principal, request.snapshotId)
-      return { ids, dense: block.dense, dimensions: block.dimensions, available: block.available, feature_id: block.embedding_id, next_cursor }
+      return { ids, dense: block.dense, dimensions: block.dimensions, available: block.available,
+        feature_id: request.recallScope !== undefined ? sha256(stableJson({ index: block.embedding_id, recallScope: request.recallScope })) : block.embedding_id, next_cursor }
     }
     const refs = ids.map(i => {
       const r = entry.records[i]
@@ -431,7 +459,8 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       vector.forEach((v, j) => dense.writeFloatLE(v, (i * dimensions + j) * 4))
     })
     return { ids, dense: dense.toString('base64'), available: available.toString('base64'), dimensions,
-      feature_id: entry.snapshot.indexVersion, next_cursor }
+      feature_id: request.recallScope !== undefined ? sha256(stableJson({ index: entry.snapshot.indexVersion, recallScope: request.recallScope })) : entry.snapshot.indexVersion,
+      next_cursor }
   }
   async resolveFeatureIds(principal: TrustedPrincipalContext,
     request: Parameters<NonNullable<TicketRetrievalProvider['resolveFeatureIds']>>[1], options?: ProviderCallOptions) {

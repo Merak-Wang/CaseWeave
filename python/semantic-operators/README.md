@@ -4,28 +4,33 @@ The production semantic surface is **sem_filter, sem_extract, sem_agg**. Search/
 remain base capabilities. The existing TypeScript/DSH Host owns models, authorization,
 tasks, source reads and publication. Python supplies algorithms, not another Agent.
 
-## Default full-scope filter
+## Default recall-union filter
 
 `invoke_rows("sem_filter", ...)` defaults to `algorithm="auto"` and
-`scope_mode="full"`, using the Host's authorized numeric resource port. `learned`
-is the same implementation; `active` is a thin configuration alias for existing callers.
-Missing numerical resources fail explicitly. They never select all-row LLM fallback.
+`scope_mode="full"`; “full” means the deduplicated union of all keyword-OR hits and
+the configured semantic-recall results, not every ticket in the authorized corpus.
+The keyword branch enumerates all literal hits. `learned` is the same implementation;
+`active` is a thin configuration alias for existing callers. Missing numerical resources
+fail explicitly. They never select all-row LLM fallback.
 Explicit `direct`/candidate scopes serve small references; `baseline/cluster` retain
 the old filter for matched migration comparisons only.
 
 Aligned IDs and float32/optional CSR blocks are separate from text. Index preparation
-aggregates and normalizes document chunks once. A bounded pool ranks records by
-original-query n-gram coverage and vector similarity; only training/selection samples
-read source text. Shared labels fit sklearn LR, LinearSVC, shallow MLP and HGB.
+aggregates and normalizes document chunks once. A bounded pool ranks records inside
+that recall union by original-query n-gram coverage and vector similarity; only
+training/selection samples read source text. Shared labels fit sklearn LR, LinearSVC,
+shallow MLP and HGB.
 Separate selection labels choose the model and threshold. Once both selection P/R
-targets pass, one numerical scan writes full-scope predictions without additional
+targets pass, one numerical scan writes recall-union predictions without additional
 sampling or LLM calls. Linear inference folds the fitted scaler without quantization.
 
 Quality metadata uses `basis=selection`, `precision` and `recall`: these are empirical
 model-selection metrics, not population lower bounds. Existing known labels override
 predictions; unknown labels and missing features remain unresolved. Initial labels and
-positive reviews share a maximum of 128 model requests per query generation, including
-failed attempts. Cache hits do not count; resumes and restarts reuse the same budget.
+positive reviews share a maximum of 128 independent judgment requests per query generation.
+The initial attempt reserves one slot even if it fails; automatic retries and cache hits
+do not consume another slot. Resumes and restarts reuse the same budget. All physical
+attempts, including retries, still count toward usage, failures, QPM, tokens and elapsed time.
 When targets fail, use the best trained model by selection F1 (including earlier fits).
 Selection precision must be at least 0.60: `quality_fallback` identifies this weaker
 acceptance. Lower precision or insufficient selection evidence at the limit returns

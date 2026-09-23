@@ -199,13 +199,18 @@ export class RetrievalAgentService extends Service {
     const entry = this.entry(agent)
     return this.mutate(entry, async state => entry.controller.recordDiscovery(state, generation, spec, progress, complete))
   }
+  async constrainRecallCandidates(agent: Agent, generation: number, allowedRefs: readonly import('@retrieval-agent/contracts').TicketCandidateRef[]): Promise<RetrievalState> {
+    const entry = this.entry(agent)
+    return this.mutate(entry, async state => entry.controller.constrainRecallCandidates(state, generation, allowedRefs))
+  }
   async hydrateResultCandidates(agent: Agent, refs: readonly import('@retrieval-agent/contracts').TicketCandidateRef[], signal?: AbortSignal): Promise<RetrievalState> {
     const state = this.current(agent), result = learnedResult(state), provider = this.ctx.ticketRetrievalProvider
     const missing = refs.filter(ref => !state.candidates.some(c => c.ref === ref))
     if (!result || !missing.length) return state
     if (!provider.featureBlock || !provider.resolveFeatureIds) throw new RetrievalError('PROVIDER_UNAVAILABLE', '数值结果来源映射未接通。')
     const principal = await this.principal(agent, 'detail_read', signal)
-    const block = await provider.featureBlock(principal, { snapshotId: state.snapshot!.snapshotId, refs: missing, limit: missing.length }, signal ? { signal } : {})
+    const block = await provider.featureBlock(principal, { snapshotId: state.snapshot!.snapshotId, refs: missing, limit: missing.length,
+      ...(typeof result.metadata.recall_scope_key === 'string' ? { recallScope: result.metadata.recall_scope_key } : {}) }, signal ? { signal } : {})
     if (block.ids.length !== new Set(missing).size) throw new RetrievalError('CANDIDATE_NOT_FOUND', '结果引用不属于当前来源。')
     for (const id of block.ids) if ((await this.semanticResults.page(state.retrievalId, result.model_id, id-1, 1)).ids[0] !== id) throw new RetrievalError('CANDIDATE_NOT_FOUND', '工单不属于当前确认集合。')
     const rows = await provider.resolveFeatureIds(principal, { snapshotId: state.snapshot!.snapshotId, ids: block.ids }, signal ? { signal } : {})

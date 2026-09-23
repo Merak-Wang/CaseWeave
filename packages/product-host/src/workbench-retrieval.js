@@ -13,7 +13,7 @@ export const collectionBoundary = result => result.resultPagesExhausted ? '当�
 
 const learningStates = {
   resuming_selection: '复用已有模型，继续补充选择样本', resuming_discovery: '复用已有抽样池，继续补充发现',
-  scanning: '正在读取全范围特征', ranked_sampling: '正在按原句相关性排序样本', diversity_sampling: '正在进行 K-means++ 多样性采样', training: '正在训练候选模型',
+  scanning: '正在读取召回并集特征', ranked_sampling: '正在为召回并集排序样本', diversity_sampling: '正在进行 K-means++ 多样性采样', training: '正在训练候选模型',
   selecting: '正在比较模型', predicting: '正在预测', auditing: '正在抽样判断',
   sampling: '正在抽样判断', quality_passed: '模型选择完成', quality_not_met: '语义筛选已结束',
   quality_fallback: '模型选择完成', model_unknown: '无法判断',
@@ -41,7 +41,7 @@ export function learningSteps(learning, failed = false) {
     training: 2, selecting: 3, predicting: 4, auditing: 5 }[status]
   const done = [l.scopeCount > 0, l.sampledCount > 0, l.fitCount > 0, Boolean(l.selectedModel),
     l.predictedCount > 0 && l.predictedCount === l.scopeCount, Boolean(l.quality)]
-  return ['读取特征', '样本排序与判断', '候选模型训练', '模型与阈值选择', '全范围预测', ...(l.auditCount > 0 || status === 'auditing' ? ['历史独立抽验'] : [])]
+  return ['读取召回并集特征', '样本排序与判断', '候选模型训练', '模型与阈值选择', '召回并集预测', ...(l.auditCount > 0 || status === 'auditing' ? ['历史独立抽验'] : [])]
     .map((label, i) => ({ label, state: i === active ? failed ? 'failed' : 'active' : done[i] ? 'done' : 'pending' }))
 }
 
@@ -64,7 +64,7 @@ function renderLearningDetails(learning, failed) {
     }
     table.append(body); nodes.push(table)
   }
-  if (l.samplingRequestLimit) nodes.push(el('p', `抽样请求 ${l.samplingRequests ?? 0} / ${l.samplingRequestLimit}`, 'muted'))
+  if (l.samplingRequestLimit) nodes.push(el('p', `抽样请求 ${l.samplingRequests ?? 0} / ${l.samplingRequestLimit}（不含自动重试）`, 'muted'))
   if (failed) nodes.push(el('p', l.status ? '执行中断' : '筛选算子失败', 'notice'))
   if (l.precisionTarget && l.recallTarget) nodes.push(el('p', `模型选择集目标：查准率 ≥ ${qualityValue(l.precisionTarget)}，召回率 ≥ ${qualityValue(l.recallTarget)}。`, 'muted'))
   if (l.selectedModel) nodes.push(el('p', `入选模型：${l.selectedModel} · 阈值 ${Number(l.threshold).toPrecision(4)}`))
@@ -122,7 +122,7 @@ export function renderRetrieval(snapshot, { openKnowledge, showKnowledge } = {})
     $('learning-status').textContent = summary.status
     $('learning-progress').dataset.state = summary.filterActivity === 'failed' ? 'failed' : learning?.status ?? 'pending'
     $('learning-stages').replaceChildren(...renderLearningDetails(learning, summary.filterActivity === 'failed'))
-    $('learning-metrics').replaceChildren(...[['筛选范围', learning?.scopeCount], ['抽样工单总数', learning?.sampledCount], ['训练有效标签', learning?.trainingCount], ['已预测', learning?.predictedCount], ['选择集总数（含未决）', learning?.selectionCount], ...(learning?.auditCount > 0 ? [['历史抽验', learning.auditCount]] : [])].map(([label, value]) => {
+    $('learning-metrics').replaceChildren(...[['召回并集工单数', learning?.scopeCount], ['抽样工单总数', learning?.sampledCount], ['训练有效标签', learning?.trainingCount], ['已预测', learning?.predictedCount], ['选择集总数（含未决）', learning?.selectionCount], ...(learning?.auditCount > 0 ? [['历史抽验', learning.auditCount]] : [])].map(([label, value]) => {
       const metric = el('div'); metric.append(el('strong', typeof value === 'number' ? value.toLocaleString() : '—'), el('span', label)); return metric
     }))
     $('learning-quality').replaceChildren(...(quality ? [qualityGrid(quality)] : [el('p', '正在评估模型', 'muted')]))

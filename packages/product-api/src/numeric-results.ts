@@ -30,7 +30,8 @@ export async function materializeLearnedRefs(state: RetrievalState, provider: Ti
   principal: TrustedPrincipalContext, store: SemanticResultStore, refs: readonly TicketCandidateRef[]): Promise<RetrievalState> {
   const result = learnedResult(state)
   if (!result || !provider.featureBlock || !provider.resolveFeatureIds) return state
-  const block = await provider.featureBlock(principal, { snapshotId: state.snapshot!.snapshotId, refs, limit: refs.length })
+  const block = await provider.featureBlock(principal, { snapshotId: state.snapshot!.snapshotId, refs, limit: refs.length,
+    ...(typeof result.metadata.recall_scope_key === 'string' ? { recallScope: result.metadata.recall_scope_key } : {}) })
   const ids: number[] = []
   for (const id of block.ids) if ((await store.page(state.retrievalId, result.model_id, id-1, 1)).ids[0] === id) ids.push(id)
   const rows = await provider.resolveFeatureIds(principal, { snapshotId: state.snapshot!.snapshotId, ids })

@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import { RetrievalError } from '@retrieval-agent/contracts'
+import { modelFailure, type ModelFailureCause } from './model-failure.js'
 
 export interface PythonOperatorRun {
   readonly scope: { task_id: string; input_revision: number; snapshot: string; authorization: string }
@@ -19,6 +20,14 @@ interface Pending {
   cleanup(): void
   tail: Promise<void>
   failure?: unknown
+}
+
+function callbackFailure(error: unknown) {
+  const cause = error instanceof RetrievalError ? error.cause as ModelFailureCause | undefined : undefined
+  // Python 负责单次模型请求的重试与计量；其他回调错误保持原来的失败语义。
+  return error instanceof RetrievalError && cause?.modelFailure
+    ? { ...cause.modelFailure, message: error.publicMessage, retryable: error.retryable, ...(cause.usage ? { usage: cause.usage } : {}) }
+    : 'host_callback_rejected'
 }
 
 /** Long-lived UTF-8 NDJSON worker; callbacks are host-owned and never select credentials. */
@@ -81,7 +90,7 @@ export class PythonOperatorBridge {
         if (frame.type === 'request' && frame.method === 'llm.generate') {
           void job.tail.then(async () => {
             try { this.send({ type: 'response', id: frame.id, payload: await job.callback('llm.generate', frame.payload) }) }
-            catch (error) { job.failure = error; this.send({ type: 'response', id: frame.id, error: 'host_callback_rejected' }) }
+            catch (error) { job.failure = error; this.send({ type: 'response', id: frame.id, error: callbackFailure(error) }) }
           }).catch(() => {})
           return
         }
@@ -93,8 +102,15 @@ export class PythonOperatorBridge {
             catch (error) { job.failure = error; this.send({ type: 'response', id: frame.id, error: 'host_callback_rejected' }) }
           } else if (frame.type === 'result') await job.result(frame.value)
           else if (frame.type === 'done') { this.jobs.delete(id); job.cleanup(); job.resolve(frame.metrics as Record<string, unknown>) }
-          else if (frame.type === 'error') throw new RetrievalError(job.failure instanceof RetrievalError ? job.failure.code : 'PROVIDER_UNAVAILABLE',
-            job.failure instanceof RetrievalError ? job.failure.publicMessage : `Python 算子未完成：${String(frame.error).replace(/[^a-zA-Z_]/g, '')}。`, { cause: { operatorUsage: frame.metrics } })
+          else if (frame.type === 'error') {
+            // 模型重试在请求层已经结束；使用该请求的终态错误，不让并发失败相互覆盖。
+            const terminalModel = frame.model_failure as ModelFailureCause['modelFailure'] | undefined
+            const failure = terminalModel ? modelFailure(terminalModel) : job.failure
+            throw new RetrievalError(failure instanceof RetrievalError ? failure.code : 'PROVIDER_UNAVAILABLE',
+              failure instanceof RetrievalError ? failure.publicMessage : `Python 算子未完成：${String(frame.error).replace(/[^a-zA-Z_]/g, '')}。`,
+              { retryable: !terminalModel && failure instanceof RetrievalError && failure.retryable,
+                cause: { operatorUsage: frame.metrics, ...(terminalModel ? { modelFailure: terminalModel } : {}) } })
+          }
           else throw new Error('invalid frame type')
         }).catch(error => { this.jobs.delete(id); job.cleanup(); this.send({ type: 'cancel', job: id }); job.reject(error) })
       } catch { this.fail(); this.child?.kill(); this.socket?.close() }

@@ -154,7 +154,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
       [candidates.map((c, i) => [entry.snapshot.snapshotId, c.ref, selected[i]!.ticket_id, c.contentHash])])
     const complete = run.channels.filter(c => c.status === 'completed'), last = selected.at(-1), hasNext = hits.length > selected.length
     options.signal?.throwIfAborted()
-    return { snapshotId: entry.snapshot.snapshotId, queryFingerprint: sha256(stableJson(spec)), candidates,
+    return { snapshotId: entry.snapshot.snapshotId, queryFingerprint: sha256(stableJson(spec)), recallScope: key, candidates,
       completeness: !run.finished || run.channels.some(c => c.status === 'failed') ? 'unknown' : hasNext ? 'bounded' : 'exhaustive',
       ...(run.finished && hasNext && last ? { nextCursor: Buffer.from(JSON.stringify({ run: key, score: last.fused_score, id: last.ticket_id, offset: offset + selected.length })).toString('base64url') } : {}),
       scanned: run.eligible, returned: candidates.length, elapsedMs: run.timings.elapsedMs ?? 0, appliedFilters: [...spec.filters],
@@ -357,16 +357,24 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     options?.signal?.throwIfAborted()
     const entry = await this.#entry(principal, request.snapshotId), current = await this.db.publication(this.datasetId)
     if (!entry.index) throw new RetrievalError('PROVIDER_UNAVAILABLE', '数值索引未准备；不会全库逐条强判。')
+    if (request.recallScope !== undefined) {
+      const run = (await this.db.rows<{ generation: string; binding_hash: string; status_json: Run }>(
+        'SELECT generation,binding_hash,status_json FROM ra_search_run WHERE id=?', [request.recallScope]))[0]
+      if (!run || run.generation !== entry.source.id || run.binding_hash !== principalBinding(principal) || !run.status_json.finished)
+        throw new RetrievalError('INVALID_REQUEST', '召回范围不存在、未完成或不属于当前访问身份。')
+    }
     const scope = await this.#query.scope(entry.source.id, current.source.id, principal,
       filters({ filters: request.filters ?? [] } as unknown as TicketRetrievalSpec), entry.source.fields_json)
     const refIds = request.refs ? [...(await this.#references(entry, principal, request.refs)).values()] : undefined
     const selector = request.ids ? 'f.ordinal IN (?)' : refIds ? 'f.ticket_id IN (?)' : 'f.ordinal>?'
-    if (request.ids?.length === 0 || refIds?.length === 0) return { ids: [], dense: '', available: '', dimensions: entry.index.identity_json.dimensions, feature_id: entry.index.id, next_cursor: null }
+    const featureId = request.recallScope !== undefined ? sha256(stableJson({ index: entry.index.id, recallScope: request.recallScope })) : entry.index.id
+    if (request.ids?.length === 0 || refIds?.length === 0) return { ids: [], dense: '', available: '', dimensions: entry.index.identity_json.dimensions, feature_id: featureId, next_cursor: null }
     const rows = await this.db.rows<{ ordinal: number; ticket_id: string; vector_blob: Buffer | null }>(
-      `SELECT f.ordinal,f.ticket_id,f.vector_blob FROM ${scope.from} JOIN ra_numeric_feature f ON f.index_id=? AND f.ticket_id=t.ticket_id WHERE ${scope.where} AND ${selector} ORDER BY f.ordinal LIMIT ?`,
+      `SELECT f.ordinal,f.ticket_id,f.vector_blob FROM ${scope.from}${request.recallScope !== undefined ? ' JOIN ra_search_candidate rc ON rc.run_id=? AND rc.ticket_id=t.ticket_id' : ''} JOIN ra_numeric_feature f ON f.index_id=? AND f.ticket_id=t.ticket_id WHERE ${scope.where} AND ${selector} ORDER BY f.ordinal LIMIT ?`,
       // scope 的 FROM 参数在 JOIN 参数之前，WHERE 参数在之后。
-      [...(current.source.id === entry.source.id ? [] : [current.source.id]), entry.index.id,
-        ...scope.params.slice(current.source.id === entry.source.id ? 0 : 1), request.ids ?? refIds ?? Number(request.cursor ?? -1), request.limit])
+      [...(current.source.id === entry.source.id ? [] : [current.source.id]), ...(request.recallScope !== undefined ? [request.recallScope] : []), entry.index.id,
+        ...scope.params.slice(current.source.id === entry.source.id ? 0 : 1),
+        ...(request.ids ? [request.ids] : refIds ? [refIds] : [Number(request.cursor ?? -1)]), request.limit])
     const byId = new Map(rows.map(r => [Number(r.ordinal), r]))
     const ordered = request.ids ? request.ids.map(id => byId.get(id)!) : rows
     if (ordered.some(r => !r)) throw new RetrievalError('UNAUTHORIZED', '数值 ID 不属于授权查询范围。')
@@ -406,7 +414,8 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     }
     return { ids: ordered.map(r => Number(r.ordinal)), dimensions,
       dense: Buffer.concat(ordered.map(r => r.vector_blob ?? Buffer.alloc(dimensions * 4))).toString('base64'),
-      available: Buffer.from(ordered.map(r => r.vector_blob ? 1 : 0)).toString('base64'), feature_id: entry.index.id,
+      available: Buffer.from(ordered.map(r => r.vector_blob ? 1 : 0)).toString('base64'),
+      feature_id: featureId,
       ...(scores ? { scores } : {}),
       next_cursor: !request.ids && !request.refs && rows.length === request.limit ? String(rows.at(-1)!.ordinal) : null }
   }
