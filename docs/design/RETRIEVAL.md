@@ -4,7 +4,7 @@
 
 主要实现入口为 [语义计划契约](../../packages/contracts/src/semantic-operators.ts)、[Python 规划器](../../python/semantic-operators/src/caseweave_ops/search.py) 和 [数据库 Provider](../../packages/provider-database/src/provider.ts)。数据库当前物理表以 [store.ts 的 DDL](../../packages/provider-database/src/store.ts) 为事实源：`ra_generation`/`ra_ticket`/独立字段投影、`ra_index`/job/checkpoint/cache、原子 publication、每路 search_run/search_hit。它们存来源与检索产物；确认、反馈和合法转移仍由 Controller 和权威任务状态维护，不能用 SQL 命中直接替代 Agent 判断。
 
-当前字段映射 `normalized-fields-v2` 遍历完整原始字段值，不沿用旧 searchText 的 256 值上限；NULL 保持未知，生成字段能力显式引用生成策略。NFKC 小写规范化与二进制 LOCATE 实现任意字面子串基线。可选 bigram 倒排只做必要条件，后置精确谓词始终保留；正向必要 gram 中选择最窄的 posting，超过语料 10% 时回退精确扫描，避免宽条件强制 join 的实测退化。OR 只使用全部分支共同需要的 gram，NOT 不提供正向剪枝。扫描及加速均用 keyset 全集枚举；最终排序页宽与向量工单 Top-K 分离。
+当前字段映射 `normalized-fields-v2` 遍历完整原始字段值，不沿用旧 searchText 的 256 值上限；NULL 保持未知，生成字段能力显式引用生成策略。MySQL 导入时将规范化字段拆为唯一 bigram，写入 `ra_gram`。查询以 NFKC 小写文本编译精确二进制 LOCATE；bigram 仅缩小候选，原字面谓词仍负责最终匹配。AND 可使用任一正向必要 gram，OR 仅使用所有分支共同需要的 gram，NOT 不作正向剪枝；选择最窄 posting，覆盖超过语料 10% 时改走精确扫描，避免宽 posting 强制 join。默认规划检索将完整关键词命中集通过 SQL `INSERT … SELECT` 写入候选表，数据集仅存 ID 与命中信息，不把全库正文搬入 Host；候选视窗、排序页宽与向量工单 Top-K 分开。
 
 索引使用 `field-codepoints-v3`：ESFT 摘要与完整 raw_dialogue，360 Unicode 字符分片、保留全部尾部；problem_description 是客户轮次的派生副本，避免重复索引。模型身份包含 revision/维度/归一化/距离、切片版本；每个命中复核 ticket/contentHash/sourceVersion/片段位置及哈希。SQL 生成授权且满足硬条件的工单集合，按 ID 游标分片，每片最多 1,000 个 ID、最多四片并发。Milvus 按工单聚合最佳片段，每页取 100 条，持续读取直到分片穷尽或分数不再大于 0.75；合并后保留全局 Top 15 和全部阈值命中的并集，100 不构成总量上限。分片避免超过 Milvus 的深分页范围，Python 搜索算子继续读取全部 Provider 结果页。本地 JSONL 的精确余弦路径采用同一并集规则。任一批失败不把剩余批次冒充完整向量结果。更新和删除生成新的不可变来源/集合，复用相同内容 embedding；完全就绪后单一发布指针切换，滞后索引不能混入当前 SQL 版本。
 
@@ -54,22 +54,19 @@ Python 负责语义计算，Host 负责身份、来源、当前输入代次、�
 
 定义 `contains(ticket, term)` 为：规范化后的 term 连续出现在该工单任一允许搜索的字段中。不同 term 可以出现在不同字段；一个 term 自身不能由两个字段尾首拼出来。规范化版本化，以 NFKC、明确的大小写策略为初始基线，不默认做同义替换或删改业务标点。
 
-宽召回逻辑为 `OR_k (OR_field literal_contains(field, k))`；显式结构化 Provider 请求仍支持 AND 和嵌套布尔条件。空值字段不匹配；用单独的文本字段投影或字段表表达，避免字符串无分隔拼接造成假命中。SQL 由编译器绑定参数，LIKE 路径需转义 `%`、`_` 和 escape 字符；可先用明确排序规则下的 INSTR/LOCATE 实现正确性对照，实际排序规则和 Unicode 行为需要 MySQL 集成验收。
+宽召回逻辑为 `OR_k (OR_field literal_contains(field, k))`；显式结构化 Provider 请求仍支持 AND 和嵌套布尔条件。空值字段不匹配；用单独的文本字段投影或字段表表达，避免字符串无分隔拼接造成假命中。SQL 标识来自字段目录、查询值通过绑定参数传入；规范化投影与精确 LOCATE 共用 NFKC 小写规则。
 
-MySQL ngram 支持中文，但 token 长度、停用词、短语与空格处理会影响命中，不能直接承诺等价于任意子串包含。[MySQL 8.4 ngram 官方说明](https://dev.mysql.com/doc/refman/8.4/en/fulltext-search-ngram.html)。本项目据此采用：
+项目使用自建 `ra_gram` 倒排，不依赖 MySQL FULLTEXT ngram 的分词结果，因此短语、停用词和空格仍按规范化后的字面子串精确判断。单字和无法安全剪枝的表达走精确谓词；加速候选必须经 LOCATE 复核。结构过滤使用可用普通索引；索引命中集与精确扫描的等价性及延迟仍应按数据规模验收，不能由索引存在本身推断性能收益。
 
-1. 在当前 19,587 条数据建立完整字面匹配基线；此时扫描性能实测，不先声称足够快。
-2. 结构过滤走可用普通索引；正文建立物化规范化投影，避免每次读取和解析 JSONL。
-3. 评估 ngram FULLTEXT 或 MySQL 内的 gram 倒排表作候选加速。只有证明候选是正确集合的超集，才可加精确复核；单字、停用词等不安全表达回退到精确路径。加速先漏掉的数据不能靠后置过滤找回来。
-4. `NOT`、复杂 OR 和窄范围查询分别看执行计划与基线；不把全文自然语言模式当业务布尔解释器。
-
-关键词操作按稳定查询版本枚举全部匹配 ID，可分批写候选关系和输出 L1 视窗。使用稳定 keyset 游标、唯一约束和可恢复进度；Top-K 排序只影响阅读优先级。若容量/故障中断，报告“枚举未完成”及游标，不伪造全集。
+默认 `auto/learned` 全集发现由数据库一次执行关键词集合写入，并与向量召回并行；候选集合留在 SQL，Host 只读取供界面和 Agent 使用的有限窗口。显式结构化查询或需要逐条取候选的路径仍按稳定查询版本、唯一身份和 keyset 游标分页。任一路未完成或失败都保留通道状态，不将部分结果说成全集。
 
 ## 4. Milvus 语义召回与融合
 
 首轮向量输入保持用户原句。查询 embedding 使用与索引一致的模型/revision、向量维度、归一化及距离约定；缓存键包含这些身份。后续可并行发多个经 Agent 解释的搜索表达，避免仅把首句反复执行。
 
-关键词全集以 SQL 批次保存命中，保留逐条身份、通道、字面资格与来源哈希，进度按批推送。Python `sem_search` 逐页消费当前字面游标后再切换检索表达，防止另一向量排名覆盖尚未完成的关键词枚举。
+默认 `auto/learned` 路径由 Host 并行启动数据库关键词集合生成和 Milvus 向量召回。SQL 通过 `INSERT … SELECT` 将全部字面命中写入持久候选集合，Milvus 查询及合并独立推进；首批候选可见后立即启动 Python 全集过滤与学习，后续搜索结果继续汇入同一集合。过滤只读取按相关性排序的有界标注/选择样本原文，训练与选择完成后以数值特征块预测剩余范围，不逐页读取全库正文。
+
+明确数量的示例任务走候选窗口路径：Host 按计划分别提交关键词、原句和语义表达搜索，结果逐步进入候选集合；主 Agent 按需继续搜索、取证和筛选，达到用户要求的数量后停止。它不会启动全集学习路径；示例窗口的页宽也不限制全集检索结果。
 
 用户回答按补充语义处理：举例、引文、用户所在地不自动产生地域硬筛选。新的自然语言计划沿用候选和来源，以输入代次隔离旧判断；执行条件或有价值的搜索方向变化时再检索，不重复原始快查。旧 spaCy HTTP 分析接口仍用于其显式调用者，保留 UTF-16 来源位置和历史协议校验，但不再作为生产自然语言规划的前置步骤。
 

@@ -18,7 +18,7 @@ flowchart TD
   Q --> K[MySQL 关键词 OR 全集枚举]
   Q --> V2[语义改写与 Milvus 召回]
   V2 --> S
-  S --> O[Python filter：最多128次抽样请求，选模预测或返回不知道]
+  S --> O[Python filter：每个查询代次最多128次初判与命中复核请求]
   F[索引期准备的 ID 与连续向量/CSR] --> O
   O -->|DSH 标注样本、块级预测与质量| S
   O --> M[MySQL 批量结果集合]
@@ -58,7 +58,7 @@ flowchart TD
 | Context Planner | 状态、角色任务、模型容量 → 可追溯且有预算的工作视窗 | 确定性配额与排序为基线，压缩策略可实验替换 |
 | Knowledge Service | Wiki 文件与经验增量 → 可路由目录、版本化知识包 | Markdown/结构化文件为内容源，索引可重建，自动校验/发布 |
 | Product API / Workbench | 持久投影与命令 → 恢复、交互、证据侧栏和结果页 | 保留 React/TypeScript/Vite 能力，独立产品布局，不固定于旧 UI slot |
-| Report / Export | 确认集合与已引用证据 → 报告版本和下载工件 | 同一结果快照；后端分页生成，不依赖浏览器已加载候选 |
+| Report / Export | 确认集合与已引用证据 → 报告版本和下载工件 | 同一结果快照；报告使用一次模型调用生成一至两段总结，后端分页生成导出，不依赖浏览器已加载候选 |
 | Evaluation / Observability | 真实入口行为与脱敏轨迹 → 回归、性能及策略比较 | 复用现有 TS/Python 评测；Gold 和评分逻辑不进入生产决策 |
 
 这些是职责，不要求一组件一个包或服务。同一 Python 模型服务的 embedding/rerank 与排名客户端归入 model-service-client，排名通过 /ranking 子入口访问，分别保留响应校验和长任务生命周期；不因协议操作不同再独立发包。沿现有消费者迁移，允许合并无价值的适配层。具体库/服务版本由 manifest、lockfile 和部署配置维护；更换模型需要重新核验协议和索引身份。

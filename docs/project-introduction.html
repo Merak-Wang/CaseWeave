@@ -90,7 +90,7 @@
     .query-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; }
     .demo-query p { font-weight: 550; font-size: 17px; }
     .demo-query .query-hint { margin-left: auto; color: var(--muted); font-size: 10px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 5px; white-space: nowrap; }
-    .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; list-style: none; padding: 0 28px 22px; margin: 0; }
+    .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; list-style: none; padding: 0 28px 22px; margin: 0; }
     .step { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; padding: 11px 8px; border: 0; border-radius: 6px; background: #f5f7f3; color: var(--muted); font-size: 12px; transition: background .2s; }
     .step span { font-family: var(--mono); font-size: 11px; color: #84917d; }
     .step[aria-current="step"] { background: var(--green-deep); color: white; }
@@ -495,7 +495,7 @@
                 <circle cx="99" cy="56" r="13" fill="#edf3e6"/>
                 <path d="m96 60 7-8m-6 0h6v6" fill="none" stroke="#246747" stroke-width="1.5"/>
                 <text x="122" y="49" font-size="9" fill="#75856c" font-family="Consolas, monospace">YOUR QUESTION</text>
-                <text x="122" y="69" font-size="15" fill="#23372b" font-family="Microsoft YaHei, sans-serif">帮我找副卡和跨域有关工单</text>
+                <text x="122" y="69" font-size="15" fill="#23372b" font-family="Microsoft YaHei, sans-serif">找主副卡有关工单</text>
               </g>
               <g>
                 <rect x="23" y="138" width="166" height="63" rx="10" fill="#fcfdf9" stroke="#cedcc4"/>
@@ -557,39 +557,37 @@
     <section class="section wrap" id="workflow" aria-labelledby="workflow-title">
       <div class="section-head">
         <div><p class="section-index">02 / FROM QUERY TO EVIDENCE</p><h2 id="workflow-title">先快速找到，再认真确认。</h2></div>
-        <p class="section-desc">点击步骤，看看一句“副卡和跨域”如何进入检索循环。首轮保留原意，后续由 Agent 结合证据调整策略。</p>
+        <p class="section-desc">点击步骤，查看从快速找线索、按证据筛选到生成简短总结的过程。</p>
       </div>
       <div class="demo">
         <div class="demo-top"><span class="window-label"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>检索工作台 · 概念演示</span><span class="demo-label">虚构样例 / 不连接真实检索</span></div>
-        <div class="demo-query"><span class="query-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg></span><p>帮我找副卡和跨域有关工单</p><span class="query-hint">自然语言输入</span></div>
+        <div class="demo-query"><span class="query-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg></span><p>找主副卡有关工单</p><span class="query-hint">自然语言输入</span></div>
         <ol class="steps" aria-label="切换检索流程步骤">
-          <li><button class="step" type="button" data-step="0" aria-current="step" aria-controls="demo-scene"><span>01</span>并行快查</button></li>
-          <li><button class="step" type="button" data-step="1" aria-controls="demo-scene"><span>02</span>专家路由</button></li>
-          <li><button class="step" type="button" data-step="2" aria-controls="demo-scene"><span>03</span>取证复核</button></li>
-          <li><button class="step" type="button" data-step="3" aria-controls="demo-scene"><span>04</span>综合判断</button></li>
-          <li><button class="step" type="button" data-step="4" aria-controls="demo-scene"><span>05</span>确认交付</button></li>
+          <li><button class="step" type="button" data-step="0" aria-current="step" aria-controls="demo-scene"><span>01</span>线索召回</button></li>
+          <li><button class="step" type="button" data-step="1" aria-controls="demo-scene"><span>02</span>语义筛选</button></li>
+          <li><button class="step" type="button" data-step="2" aria-controls="demo-scene"><span>03</span>检索报告</button></li>
         </ol>
         <div class="demo-body" id="demo-scene">
           <div class="demo-main">
-            <div class="agent-heading"><span class="agent-dot" aria-hidden="true"></span><span id="demo-role">QUERY UNDERSTANDING → RETRIEVAL</span></div>
-            <h3 id="demo-title" aria-live="polite" aria-atomic="true">让两条检索路径同时出发。</h3>
-            <p class="demo-explanation" id="demo-explanation">将普通主题“副卡和跨域”解析为“副卡 OR 跨域”，跨字段枚举任一主题的字面命中，同时对原始问题做向量召回。明确要求“两者同时出现”时才使用 AND；候选由 Agent 再按完整请求复核。</p>
+            <div class="agent-heading"><span class="agent-dot" aria-hidden="true"></span><span id="demo-role">线索召回</span></div>
+            <h3 id="demo-title" aria-live="polite" aria-atomic="true">先从关键词和语义结果中找线索。</h3>
+            <p class="demo-explanation" id="demo-explanation">系统按原问题召回可能相关的工单，合并关键词和向量结果，作为下一步筛选范围。</p>
             <div class="demo-modules" id="demo-modules">
-              <div class="demo-module"><span class="module-top">路径 A / 关键词</span><strong>副卡 OR 跨域</strong><p>枚举全部字面命中，分页呈现。</p></div>
-              <div class="demo-module"><span class="module-top">路径 B / 向量</span><strong>原始 query → Top 15 ∪ 阈值命中</strong><p>相似度 &gt; 0.75 全部召回，每批 100 条，不足时补足 Top 15。</p></div>
+              <div class="demo-module"><span class="module-top">关键词</span><strong>主卡 OR 副卡</strong><p>在工单字段中查找主题词。</p></div>
+              <div class="demo-module"><span class="module-top">语义召回</span><strong>原问题 → 相关工单</strong><p>补充表达不同但意思接近的线索。</p></div>
             </div>
-            <p class="demo-principle" id="demo-principle">原句向量与查询规划并行，关键词宽召回与语义改写补充候选；完整业务条件决定确认结果。</p>
+            <p class="demo-principle" id="demo-principle">召回结果是待筛选线索，不直接作为最终答案。</p>
           </div>
           <aside class="evidence" aria-label="虚构样例的证据侧栏">
             <div class="evidence-head"><strong id="evidence-heading">候选工单</strong><span id="evidence-caption">三条虚构样例</span></div>
             <div class="evidence-list" id="evidence-list">
-              <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-01</span><span class="ticket-status">检索线索</span></div><h4>副卡业务办理失败</h4><p>标题出现“副卡”，处理记录出现“跨域”。</p></article>
-              <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-02</span><span class="ticket-status">检索线索</span></div><h4>异地副卡办理受阻</h4><p>向量路径召回；需要进一步核对业务含义。</p></article>
-              <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-03</span><span class="ticket-status">检索线索</span></div><h4>主卡本地套餐变更</h4><p>语义近邻候选；相似度不等于符合要求。</p></article>
+              <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-01</span><span class="ticket-status">检索线索</span></div><h4>副卡业务办理失败</h4><p>标题和处理记录提到主副卡业务。</p></article>
+              <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-02</span><span class="ticket-status">检索线索</span></div><h4>异地副卡办理受阻</h4><p>处理内容涉及副卡办理。</p></article>
+              <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-03</span><span class="ticket-status">检索线索</span></div><h4>主卡本地套餐变更</h4><p>提及主卡套餐，但未出现副卡业务。</p></article>
             </div>
           </aside>
         </div>
-        <div class="demo-footer"><p id="demo-footer-note">进展先可见，候选与确认结果始终分开。</p><div class="demo-controls"><button type="button" class="reset" id="reset-demo">重置演示</button><button type="button" class="button primary next" id="next-step">看下一步 <span aria-hidden="true">→</span></button></div></div>
+        <div class="demo-footer"><p id="demo-footer-note">线索会继续按用户问题筛选。</p><div class="demo-controls"><button type="button" class="reset" id="reset-demo">重置演示</button><button type="button" class="button primary next" id="next-step">看下一步 <span aria-hidden="true">→</span></button></div></div>
       </div>
       <p class="flow-note"><strong>何时结束？</strong><span>由 Agent 评估覆盖、分歧与继续搜索的价值。复杂任务期望在约 1–3 分钟内持续给出有效进展；时间和资源耗尽不能被解释为“已经找全”。</span></p>
       <noscript><p class="noscript">当前浏览器未启用 JavaScript，显示第一步静态示意；其余内容可正常阅读。</p></noscript>
@@ -663,17 +661,16 @@
         <div class="report-stage">
           <div class="report">
             <div class="report-masthead"><span class="mono">RETRIEVAL BRIEF</span><span>报告样式示意 · 虚构内容</span></div>
-            <h3>副卡与跨域问题检索</h3><p class="report-subtitle">查询范围、确认工单与证据说明</p>
-            <div class="report-line"><strong>01 / 确认工单</strong><div class="report-ticket"><span>DEMO-01</span>副卡业务办理失败</div><div class="report-ticket"><span>DEMO-02</span>异地副卡办理受阻</div></div>
-            <div class="report-line"><strong>02 / 代表性证据</strong><p>DEMO-01 的标题定位副卡业务，处理记录明确提及跨域环节。引用保留工单、字段与来源版本。</p></div>
-            <div class="report-line"><strong>03 / 范围与限制</strong><p>说明检索方向、确认依据与停止原因。“相关工单已确认”不代表根因已独立证实。</p></div>
+            <h3>主副卡业务检索</h3><p class="report-subtitle">确认 2 条 · 简短总结</p>
+            <div class="report-line"><strong>检索总结</strong><p>找到两条副卡办理受阻的工单，分别涉及业务办理失败和异地办理受阻。</p></div>
+            <div class="report-line"><strong>引用</strong><p>工单 01 · 副卡业务办理失败　工单 02 · 异地副卡办理受阻</p></div>
             <div class="report-footer"><span>同一结果版本 · 同一证据来源</span><span class="mono">01 / 01</span></div>
           </div>
         </div>
         <div class="delivery-copy"><p class="section-index">06 / READY FOR THE NEXT STEP</p><h2 id="delivery-title">交给下游的，<br>是有边界的结果。</h2><p>一份能解释“为什么这些工单符合要求”的检索报告，加上一份可继续处理的确认工单集合。工作人员可以核对，领导可以阅读，下游可以接着分析。</p>
           <ul class="delivery-list">
             <li><span class="check" aria-hidden="true">✓</span><div><strong>只交付确认结果</strong><p>未判定与排除工单留在过程状态，报告和下载使用同一确认集合。</p></div></li>
-            <li><span class="check" aria-hidden="true">✓</span><div><strong>结论连接原始证据</strong><p>保留查询范围、依据与覆盖限制，不用相似度或专家票数包装置信度。</p></div></li>
+            <li><span class="check" aria-hidden="true">✓</span><div><strong>结论连接原始证据</strong><p>总结关联对应工单，点击报告中的引用即可查看原文。</p></div></li>
             <li><span class="check" aria-hidden="true">✓</span><div><strong>完整集合可下载</strong><p>CSV 便于查看，JSONL 保留结构，Markdown 用于报告；完整集合不受页面条数限制。</p></div></li>
           </ul>
           <p class="downstream">后续交接 → 聚类分析 / 业务打标 / 产品排查与改进<br>聚类、业务打标及统计分析由下游系统完成。</p>
@@ -702,49 +699,31 @@
     const ticketTitles = ['副卡业务办理失败', '异地副卡办理受阻', '主卡本地套餐变更'];
     const stages = [
       {
-        role: 'QUERY UNDERSTANDING → RETRIEVAL', title: '让两条检索路径同时出发。',
-        explanation: '将普通主题“副卡和跨域”解析为“副卡 OR 跨域”，跨字段枚举任一主题的字面命中，同时对原始问题做向量召回。明确要求“两者同时出现”时才使用 AND；候选由 Agent 再按完整请求复核。',
-        modules: [['路径 A / 关键词', '副卡 OR 跨域', '枚举全部字面命中，分页呈现。'], ['路径 B / 向量', '原始 query → Top 15 ∪ 阈值命中', '相似度 > 0.75 全部召回，每批 100 条，不足时补足 Top 15。']],
-        principle: '原句向量与查询规划并行，关键词宽召回与语义改写补充候选；完整业务条件决定确认结果。',
+        role: '线索召回', title: '先从关键词和语义结果中找线索。',
+        explanation: '系统按原问题召回可能相关的工单，合并关键词和向量结果，作为下一步筛选范围。',
+        modules: [['关键词', '主卡 OR 副卡', '在工单字段中查找主题词。'], ['语义召回', '原问题 → 相关工单', '补充表达不同但意思接近的线索。']],
+        principle: '召回结果是待筛选线索，不直接作为最终答案。',
         evidenceTitle: '候选工单', evidenceCaption: '三条虚构样例',
-        tickets: [{i: 0, status: '检索线索', text: '标题出现“副卡”，处理记录出现“跨域”。'}, {i: 1, status: '检索线索', text: '向量路径召回；需要进一步核对业务含义。'}, {i: 2, status: '检索线索', text: '语义近邻候选；相似度不等于符合要求。'}],
-        footer: '进展先可见，候选与确认结果始终分开。'
+        tickets: [{i: 0, status: '检索线索', text: '标题和处理记录提到主副卡业务。'}, {i: 1, status: '检索线索', text: '处理内容涉及副卡办理。'}, {i: 2, status: '检索线索', text: '提及主卡套餐，但未出现副卡业务。'}],
+        footer: '线索会继续按用户问题筛选。'
       },
       {
-        role: 'DSH MAIN AGENT → DOMAIN EXPERTS', title: '按问题路由，带着知识检查。',
-        explanation: '主 Agent 结合问题与首批候选，选择副卡业务和跨域流程两个视角。专家引用适用 Wiki，分别检查业务范围、关键环节与可能遗漏的表达。',
-        modules: [['领域视角 A', '副卡业务', '核对主副卡关系与具体办理对象。'], ['领域视角 B', '跨域流程', '核对业务边界、环节和不同表达。']],
-        principle: '专家是带有领域知识的 Agent。没有 Wiki 或匹配专家时，通用 Agent 继续执行。',
-        evidenceTitle: '候选与关注点', evidenceCaption: '策略也需要证据验证',
-        tickets: [{i: 0, status: '检索线索', text: '关注点：失败是否发生在副卡的跨域业务环节？'}, {i: 1, status: '检索线索', text: '关注点：“异地”在这张工单里是否对应跨域业务？'}, {i: 2, status: '检索线索', text: '关注点：问题对象是否实际上仅为主卡？'}],
-        footer: '各专家独立规划、并行取证，产物进入同一任务状态。'
+        role: '语义筛选', title: '结合业务知识和工单依据判断。',
+        explanation: '领域知识帮助理解主卡与副卡业务用语，工单内容提供判断依据。工作台展示实际用于抽样判断的知识条目，并关联相应工单。',
+        modules: [['领域知识', '主副卡业务说明', '辅助理解业务对象和常见表达。'], ['工单证据', '工单原文与处理记录', '知识条目关联到本次抽样判断。']],
+        principle: '知识帮助理解，工单证据支撑判断；只有实际运行的专家任务才作为专家显示。',
+        evidenceTitle: '筛选结果与依据', evidenceCaption: '虚构工单与知识引用',
+        tickets: [{i: 0, status: '已确认', kind: 'confirmed', text: '原文提到主卡和副卡业务；引用了“主副卡业务说明”。'}, {i: 1, status: '已确认', kind: 'confirmed', text: '处理记录提到副卡办理；引用了“主副卡业务说明”。'}, {i: 2, status: '已排除', kind: 'excluded', text: '内容只涉及主卡套餐变更。'}],
+        footer: '阶段完成后可回看判断过程、工单证据和知识引用。'
       },
       {
-        role: 'EVIDENCE READING → TARGETED SEARCH', title: '有疑问，就展开原文。',
-        explanation: '摘要不足时读取处理记录等来源片段，必要时提出检索改写并继续搜索。专家意见不同，先明确争议点，再用针对性证据解决；用户也可随时补充。',
-        modules: [['按需深读', '从 L1 升级到 L2 / L3', '保留工单、字段、位置与来源版本。'], ['搜索补缺', '策略改写与追加召回', '扩展检索假设，保留用户的约束。']],
-        principle: '“异地”等词如何理解要结合业务定义与当前证据，不能凭词形直接等同。',
-        evidenceTitle: '原文证据示意', evidenceCaption: '下列片段均为虚构',
-        tickets: [{i: 0, status: '已取证', text: '处理记录：“副卡在跨域环节校验失败。”'}, {i: 1, status: '已取证', text: '受理记录：“本次副卡办理进入跨域业务环节后返回错误。”'}, {i: 2, status: '已取证', text: '业务记录：“仅办理主卡本地套餐变更，未涉及副卡或跨域。”'}],
-        footer: '用户反馈先回执再复核，独立检索不必被等待中的问题阻塞。'
-      },
-      {
-        role: 'SYNTHESIS → EVIDENCE-BASED DECISION', title: '判断跟着证据走。',
-        explanation: '主 Agent 综合逐条证据与专家发现。前两张工单的原文支持副卡与跨域业务关联；第三张仅涉及主卡本地套餐，不符合本次要求，予以排除。',
-        modules: [['确认依据', '符合范围 + 可追溯原文', '保留每条工单的判断理由与引用。'], ['停止依据', '覆盖、分歧与下一步价值', '检查未决问题，不按固定轮数宣布完成。']],
-        principle: '确认依据不是相似度、专家多数票或模型自报概率；语义停止与资源中止分别表达。',
-        evidenceTitle: '复核状态', evidenceCaption: '过程集合示意',
-        tickets: [{i: 0, status: '已确认', kind: 'confirmed', text: '标题与处理记录共同支持本次问题关联。'}, {i: 1, status: '已确认', kind: 'confirmed', text: '原文明确副卡办理与跨域业务环节相关。'}, {i: 2, status: '已排除', kind: 'excluded', text: '原文限定为主卡本地套餐，无目标问题依据。'}],
-        footer: '真实任务仍需核验覆盖与未决问题；示例判断不代表全库已找全。'
-      },
-      {
-        role: 'CONFIRMED SNAPSHOT → REPORT & EXPORT', title: '交付结果，也交付选择依据。',
-        explanation: '把本次确认的工单、判断和来源引用形成同一结果版本。报告说明查询范围、代表性依据与覆盖限制，下载接口交付完整确认集合，供下游继续处理。',
-        modules: [['检索报告', '结论与原始证据相连', '引用来自对应版本的确认结果。'], ['下载接口', '按结果版本交接', '完整集合不受前端展示窗口限制。']],
-        principle: '只交付确认工单。无确认结果时如实说明，不把候选集合当作最终答案。',
+        role: '检索报告', title: '把确认结果总结出来。',
+        explanation: '报告依据已确认工单生成一至两段总结，并附可打开的引用。已完成任务再次打开时，报告和前两步过程仍可查看。',
+        modules: [['确认结果', '2 条工单', '只包含语义筛选确认的工单。'], ['引用', '工单 01 · 工单 02', '报告引用关联对应工单。']],
+        principle: '报告直接总结检索结果，不增加单独的复杂核查流程。',
         evidenceTitle: '本次确认结果', evidenceCaption: '仅展示可交付项',
-        tickets: [{i: 0, status: '已确认', kind: 'confirmed', text: '来源：标题 + 处理记录 / 示例版本 V1。'}, {i: 1, status: '已确认', kind: 'confirmed', text: '来源：受理记录 / 示例版本 V1。'}],
-        footer: '演示结束 · 以上为虚构工单；安装后可在工作台提交自己的查询。'
+        tickets: [{i: 0, status: '已确认', kind: 'confirmed', text: '标题与处理记录说明主副卡业务。'}, {i: 1, status: '已确认', kind: 'confirmed', text: '处理记录提及副卡办理。'}],
+        footer: '以上为虚构工单；实际报告引用对应任务中的确认结果。'
       }
     ];
     let currentStep = 0;
@@ -784,9 +763,9 @@
         return card;
       }));
       const next = byId('next-step');
-      const arrow = element('span', '', currentStep === 4 ? '↺' : '→');
+      const arrow = element('span', '', currentStep === stages.length - 1 ? '↺' : '→');
       arrow.setAttribute('aria-hidden', 'true');
-      next.replaceChildren(document.createTextNode(currentStep === 4 ? '再看一遍 ' : '看下一步 '), arrow);
+      next.replaceChildren(document.createTextNode(currentStep === stages.length - 1 ? '再看一遍 ' : '看下一步 '), arrow);
     }
     document.querySelectorAll('[data-step]').forEach(button => button.addEventListener('click', () => renderStep(Number(button.dataset.step))));
     byId('next-step').addEventListener('click', () => renderStep((currentStep + 1) % stages.length));

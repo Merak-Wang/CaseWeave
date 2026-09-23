@@ -18,7 +18,7 @@
 
 默认数据库工作台位于 `/retrieval`。MySQL 保存任务、命令、事件与结果版本，DSH 执行主 Agent 和领域专家。关闭浏览器不取消后台任务；再次连接时重新校验访问资格。
 
-终态显示确认数量、检索说明、逐项确认理由和下载。未判定工单保留在检索过程中。普通终态补充在同任务内发起复核；新查询可使用“新任务：……”明确新建。CSV 只交付确认集合。
+工作台按“线索召回 → 语义筛选 → 检索报告”展示，任务结束后仍可回看各阶段。报告由一次模型调用生成一至两段总结与引用；确认工单支持 CSV/JSONL 下载。DSH 的 token、生成速度、首 token 延迟和上下文压缩在任务中显示。普通终态补充在同任务内发起复核；新查询可使用“新任务：……”明确新建。CSV 只交付确认集合。
 
 兼容同步入口 `POST /api/retrieval-agent/export` 接收 `{ sessionId, retrievalId, resultRevision, candidateRefs? }`。resultRevision 来自已重新授权的 presentation.result；省略 candidateRefs 下载全部确认工单，显式传入只允许确认子集。旧版本请求返回 409，未确认引用返回 400，来源失效/撤权会终止下载。当前每页读 100 条，CSV 响应默认最大 50 MB；持久 CSV/JSONL/Markdown 工件走下方“工作台、报告与持久下载验收”中的任务接口。
 

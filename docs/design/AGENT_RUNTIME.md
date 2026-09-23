@@ -125,7 +125,7 @@ SQL outbox 推送完成不等于 DSH Session 已写盘。每次冷恢复都按 e
 
 知识目录加载后（含空库）的 `finish.coverage` 明确 checked、remaining、nextAction、nextActionValue。存在影响答案的剩余要求或有价值下一动作时不能 satisfied/no_result；未完成则明确 partial。失败专家/带问题或未决 gap 的 Finding 需要主 Agent 在 expertReviews 中逐分支引用自己实际收到的证据并解释接手结果；不能略去失败分支，也不能用范围复核绕过在途专家或未解决逐条分歧。旧无目录事件保留原 finish 契约用于回放，新的公共 profile 使用扩展契约。
 
-专家每轮从自己的持久 `ExpertTask.context` 重建工作窗，使用 ticket_expert 专用导航；工具错误后仍交付合法字段、候选与证据别名、续读位置和剩余额度。12 次动作包含最后一次 report；用完 11 次取证后只允许报告已有依据、未决项和下一动作，不强行改成确定结论。主 Agent 结束校验失败时列明未处理的 gap 与缺少 expertReviews 的 taskId，帮助模型修复具体问题。
+专家每轮从自己的持久 `ExpertTask.context` 重建工作窗，使用 ticket_expert 专用导航；工具错误后仍交付合法字段、候选与证据别名及续读位置。主 Agent 与专家不按固定动作次数截止；重复的无效工具循环由相同工具、参数和错误的重复检测处理。主 Agent 结束校验失败时列明未处理的 gap 与缺少 expertReviews 的 taskId，帮助模型修复具体问题。
 
 冻结结果前在短事务中核对最新语义版本和已接受的命令：影响结果的反馈、条件修订或待答问题尚未处理时，不能用旧模型输出宣布满足。先完成有关复核，或如实停止为未完成；已经回执的用户输入不会因 finish 竞态丢失。纯索引维护/学习作业不阻塞本次结果交付。
 
