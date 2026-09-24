@@ -90,7 +90,7 @@
     .query-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; }
     .demo-query p { font-weight: 550; font-size: 17px; }
     .demo-query .query-hint { margin-left: auto; color: var(--muted); font-size: 10px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 5px; white-space: nowrap; }
-    .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; list-style: none; padding: 0 28px 22px; margin: 0; }
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; list-style: none; padding: 0 28px 22px; margin: 0; }
     .step { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; padding: 11px 8px; border: 0; border-radius: 6px; background: #f5f7f3; color: var(--muted); font-size: 12px; transition: background .2s; }
     .step span { font-family: var(--mono); font-size: 11px; color: #84917d; }
     .step[aria-current="step"] { background: var(--green-deep); color: white; }
@@ -503,7 +503,7 @@
                 <text x="106" y="183" font-size="10" fill="#73816b" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">字面全匹配 · 跨字段</text>
                 <rect x="291" y="138" width="166" height="63" rx="10" fill="#fcfdf9" stroke="#cedcc4"/>
                 <text x="374" y="161" font-size="12" fill="#2c5736" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">向量检索</text>
-                <text x="374" y="183" font-size="10" fill="#73816b" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">原始问题 · Top 15 ∪ 阈值命中</text>
+                <text x="374" y="183" font-size="10" fill="#73816b" text-anchor="middle" font-family="Microsoft YaHei, sans-serif">关键词 OR 全命中 + 语义召回</text>
                 <text x="240" y="174" font-size="9" fill="#6e8460" text-anchor="middle" font-family="Consolas, monospace">PARALLEL</text>
               </g>
               <g filter="url(#card-shadow)">
@@ -557,29 +557,31 @@
     <section class="section wrap" id="workflow" aria-labelledby="workflow-title">
       <div class="section-head">
         <div><p class="section-index">02 / FROM QUERY TO EVIDENCE</p><h2 id="workflow-title">先快速找到，再认真确认。</h2></div>
-        <p class="section-desc">点击步骤，查看从快速找线索、按证据筛选到生成简短总结的过程。</p>
+        <p class="section-desc">点击步骤，查看如何确定筛选范围、按证据判断，以及遇到模型失败时如何恢复。</p>
       </div>
       <div class="demo">
         <div class="demo-top"><span class="window-label"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>检索工作台 · 概念演示</span><span class="demo-label">虚构样例 / 不连接真实检索</span></div>
         <div class="demo-query"><span class="query-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg></span><p>找主副卡有关工单</p><span class="query-hint">自然语言输入</span></div>
         <ol class="steps" aria-label="切换检索流程步骤">
-          <li><button class="step" type="button" data-step="0" aria-current="step" aria-controls="demo-scene"><span>01</span>线索召回</button></li>
+          <li><button class="step" type="button" data-step="0" aria-current="step" aria-controls="demo-scene"><span>01</span>召回范围</button></li>
           <li><button class="step" type="button" data-step="1" aria-controls="demo-scene"><span>02</span>语义筛选</button></li>
-          <li><button class="step" type="button" data-step="2" aria-controls="demo-scene"><span>03</span>检索报告</button></li>
+          <li><button class="step" type="button" data-step="2" aria-controls="demo-scene"><span>03</span>可选恢复示意</button></li>
+          <li><button class="step" type="button" data-step="3" aria-controls="demo-scene"><span>04</span>检索报告</button></li>
         </ol>
         <div class="demo-body" id="demo-scene">
           <div class="demo-main">
-            <div class="agent-heading"><span class="agent-dot" aria-hidden="true"></span><span id="demo-role">线索召回</span></div>
-            <h3 id="demo-title" aria-live="polite" aria-atomic="true">先从关键词和语义结果中找线索。</h3>
-            <p class="demo-explanation" id="demo-explanation">系统按原问题召回可能相关的工单，合并关键词和向量结果，作为下一步筛选范围。</p>
+            <div class="agent-heading"><span class="agent-dot" aria-hidden="true"></span><span id="demo-role">召回范围</span></div>
+            <h3 id="demo-title" aria-live="polite" aria-atomic="true">关键词宽召回与语义召回合并成筛选范围。</h3>
+            <p class="demo-explanation" id="demo-explanation">先完整完成两路召回，再按工单身份去重。后续抽样、训练和预测都限定在这个并集内。</p>
             <div class="demo-modules" id="demo-modules">
-              <div class="demo-module"><span class="module-top">关键词</span><strong>主卡 OR 副卡</strong><p>在工单字段中查找主题词。</p></div>
-              <div class="demo-module"><span class="module-top">语义召回</span><strong>原问题 → 相关工单</strong><p>补充表达不同但意思接近的线索。</p></div>
+              <div class="demo-module"><span class="module-top">关键词宽召回</span><strong>主卡 OR 副卡 · 全部命中</strong><p>枚举各字段满足任一主题词的工单，不只取前几条。</p></div>
+              <div class="demo-module"><span class="module-top">语义召回</span><strong>原问题 → 相近表达</strong><p>补充关键词写法不同、语义相关的工单。</p></div>
+              <div class="demo-module"><span class="module-top">唯一筛选范围</span><strong>关键词与语义结果去重并集</strong><p>重复命中的工单只保留一次；范围外工单不参与模型筛选。</p></div>
             </div>
-            <p class="demo-principle" id="demo-principle">召回结果是待筛选线索，不直接作为最终答案。</p>
+            <p class="demo-principle" id="demo-principle">完整召回结束后才开始学习；召回线索不是最终确认结果。</p>
           </div>
           <aside class="evidence" aria-label="虚构样例的证据侧栏">
-            <div class="evidence-head"><strong id="evidence-heading">候选工单</strong><span id="evidence-caption">三条虚构样例</span></div>
+            <div class="evidence-head"><strong id="evidence-heading">候选工单</strong><span id="evidence-caption">三条虚构样例 · 计数仅作示意</span></div>
             <div class="evidence-list" id="evidence-list">
               <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-01</span><span class="ticket-status">检索线索</span></div><h4>副卡业务办理失败</h4><p>标题和处理记录提到主副卡业务。</p></article>
               <article class="ticket"><div class="ticket-top"><span class="ticket-id">DEMO-02</span><span class="ticket-status">检索线索</span></div><h4>异地副卡办理受阻</h4><p>处理内容涉及副卡办理。</p></article>
@@ -587,7 +589,7 @@
             </div>
           </aside>
         </div>
-        <div class="demo-footer"><p id="demo-footer-note">线索会继续按用户问题筛选。</p><div class="demo-controls"><button type="button" class="reset" id="reset-demo">重置演示</button><button type="button" class="button primary next" id="next-step">看下一步 <span aria-hidden="true">→</span></button></div></div>
+        <div class="demo-footer"><p id="demo-footer-note">所有关键词命中与语义召回结果合并后，才进入学习筛选。</p><div class="demo-controls"><button type="button" class="reset" id="reset-demo">重置演示</button><button type="button" class="button primary next" id="next-step">看下一步 <span aria-hidden="true">→</span></button></div></div>
       </div>
       <p class="flow-note"><strong>何时结束？</strong><span>由 Agent 评估覆盖、分歧与继续搜索的价值。复杂任务期望在约 1–3 分钟内持续给出有效进展；时间和资源耗尽不能被解释为“已经找全”。</span></p>
       <noscript><p class="noscript">当前浏览器未启用 JavaScript，显示第一步静态示意；其余内容可正常阅读。</p></noscript>
@@ -699,26 +701,42 @@
     const ticketTitles = ['副卡业务办理失败', '异地副卡办理受阻', '主卡本地套餐变更'];
     const stages = [
       {
-        role: '线索召回', title: '先从关键词和语义结果中找线索。',
-        explanation: '系统按原问题召回可能相关的工单，合并关键词和向量结果，作为下一步筛选范围。',
-        modules: [['关键词', '主卡 OR 副卡', '在工单字段中查找主题词。'], ['语义召回', '原问题 → 相关工单', '补充表达不同但意思接近的线索。']],
-        principle: '召回结果是待筛选线索，不直接作为最终答案。',
-        evidenceTitle: '候选工单', evidenceCaption: '三条虚构样例',
+        role: '召回范围', title: '关键词宽召回与语义召回合并成筛选范围。',
+        explanation: '先完整完成两路召回，再按工单身份去重。后续抽样、训练和预测都限定在这个并集内。',
+        modules: [['关键词宽召回', '主卡 OR 副卡 · 全部命中', '枚举各字段满足任一主题词的工单，不只取前几条。'],
+          ['语义召回', '原问题 → 相近表达', '补充关键词写法不同、语义相关的工单。'],
+          ['唯一筛选范围', '两路结果去重并集', '重复命中的工单只保留一次；范围外工单不参与模型筛选。']],
+        principle: '完整召回结束后才开始学习；召回线索不是最终确认结果。',
+        evidenceTitle: '召回并集中的示例', evidenceCaption: '三条虚构工单 · 计数仅作示意',
         tickets: [{i: 0, status: '检索线索', text: '标题和处理记录提到主副卡业务。'}, {i: 1, status: '检索线索', text: '处理内容涉及副卡办理。'}, {i: 2, status: '检索线索', text: '提及主卡套餐，但未出现副卡业务。'}],
-        footer: '线索会继续按用户问题筛选。'
+        footer: '所有关键词命中与语义召回结果合并后，才进入学习筛选。'
       },
       {
         role: '语义筛选', title: '结合业务知识和工单依据判断。',
-        explanation: '领域知识帮助理解主卡与副卡业务用语，工单内容提供判断依据。工作台展示实际用于抽样判断的知识条目，并关联相应工单。',
-        modules: [['领域知识', '主副卡业务说明', '辅助理解业务对象和常见表达。'], ['工单证据', '工单原文与处理记录', '知识条目关联到本次抽样判断。']],
-        principle: '知识帮助理解，工单证据支撑判断；只有实际运行的专家任务才作为专家显示。',
+        explanation: '模型只在召回并集内抽样训练和选择；达到质量要求后，对同一并集做预测。选择集查准率达到 60% 才可交付预测结果，低于 60% 或依据不足时报告“不知道”；预测结果会注明其来自模型。',
+        modules: [['学习范围', '只用召回并集', '关键词 OR 全部命中与语义召回的去重结果。'],
+          ['独立判断额度', '每代次最多 128 次', '初判与命中复核合计计数。'],
+          ['自动重试', '不重复占判断额度', '重试调用与 token 用量仍如实记录。']],
+        principle: '未达到原目标时可用最佳已训练模型；选择集查准率低于 60% 或额度内依据不足时报告“不知道”。',
         evidenceTitle: '筛选结果与依据', evidenceCaption: '虚构工单与知识引用',
         tickets: [{i: 0, status: '已确认', kind: 'confirmed', text: '原文提到主卡和副卡业务；引用了“主副卡业务说明”。'}, {i: 1, status: '已确认', kind: 'confirmed', text: '处理记录提到副卡办理；引用了“主副卡业务说明”。'}, {i: 2, status: '已排除', kind: 'excluded', text: '内容只涉及主卡套餐变更。'}],
-        footer: '阶段完成后可回看判断过程、工单证据和知识引用。'
+        footer: '示例中的排除只影响召回范围内的工单；未判定项仍保持未确认。'
+      },
+      {
+        role: '可选恢复示意', title: '若遇模型故障，任务保留为未完成。',
+        explanation: '这是可选的故障场景，并非每次检索都会经过。可恢复的模型失败会自动重试；若仍失败，已确认工单和查询条件会保留，用户可以恢复检索继续处理。',
+        modules: [['任务状态', '尚未完成', '服务故障不等于找全，也不把待判定工单交付。'],
+          ['恢复检索', '继续当前查询', '沿用已确认结果和剩余独立判断额度。'],
+          ['用量记录', '重试仍计实际调用', '自动重试不重复扣 128 次独立判断额度。']],
+        principle: '失败时只交付已确认工单；恢复后在原查询范围内继续。',
+        evidenceTitle: '恢复时保留的结果', evidenceCaption: '只展示已确认的虚构工单',
+        tickets: [{i: 0, status: '已确认并保留', kind: 'confirmed', text: '已有来源证据的判断在恢复后仍可追溯。'},
+          {i: 1, status: '已确认并保留', kind: 'confirmed', text: '恢复时继续保留此前已确认的检索结果。'}],
+        footer: '模型请求失败会说明原因；恢复检索可从当前查询继续。'
       },
       {
         role: '检索报告', title: '把确认结果总结出来。',
-        explanation: '报告依据已确认工单生成一至两段总结，并附可打开的引用。已完成任务再次打开时，报告和前两步过程仍可查看。',
+        explanation: '报告依据已确认工单生成一至两段总结，并附可打开的引用。已完成任务再次打开时，报告和检索过程仍可查看。',
         modules: [['确认结果', '2 条工单', '只包含语义筛选确认的工单。'], ['引用', '工单 01 · 工单 02', '报告引用关联对应工单。']],
         principle: '报告直接总结检索结果，不增加单独的复杂核查流程。',
         evidenceTitle: '本次确认结果', evidenceCaption: '仅展示可交付项',

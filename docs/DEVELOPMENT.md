@@ -10,6 +10,8 @@
 
 从旧版算法升级 Docker 部署时，运行 `start.cmd` 或 `bash setup.sh start`，自动构建并更新应用、算子和排名服务。旧算子镜像不认识新筛选参数时可能返回 `ProtocolError`。若旧数据库尚无数值特征，另执行 `docker compose exec app node scripts/database.mjs index --dataset=esft-development`，复用已有向量和索引检查点补齐；自定义数据集替换名称。已有安装的日常启动不自动重新导入数据或重建索引。
 
+学习启动前必须完成两路召回并取得 `recallScope`。召回中的进度可以先显示，正文分页游标不决定学习范围，也不需要逐页读完正文才训练；数值特征读取直接限定在 Provider 保存的完整并集。任一通道失败时保持未完成，不用部分召回或全库数据继续训练。空并集也不会回退到全部授权工单。
+
 语言模型标注的并发与每次样本数由 `RETRIEVAL_AGENT_FILTER_CONFIG` 配置。例如在 `.env` 设置 `RETRIEVAL_AGENT_FILTER_CONFIG={"batchSize":4,"options":{"concurrency":32,"precision_target":0.9,"recall_target":0.9}}`，表示最多同时执行 32 个样本判断请求，每个请求包含至多 4 条工单，并要求模型选择集的查准率/召回率均不低于 0.90；这是选择集经验指标，不是全库质量下界；尾批及命中复核可能少于 4 条。抽样初判和命中复核累计最多 128 次独立判断请求，自动重试不重复占用额度，续跑共用额度；此配置不能提高累计上限，也不改变 Agent 证据窗口或分类器训练并行度。修改后执行 `docker compose up -d --no-deps --wait app`，未取消的后台任务在原任务内恢复。
 
 选择样本覆盖不足时，后续筛选复用同一查询、来源及配置下召回并集中的有界排序 ID 池、已判断标签和已训练模型，只补充独立选择样本；训练标签更正后重新拟合。原文及证据要求未变化的未决样本沿用原结论，不重复请求模型。工作台显示复用与续补进度。批量判断可减少请求和重复提示开销，实际费用仍取决于训练/选择样本正文及命中复核数量；预测范围仍是当前召回并集。
@@ -126,10 +128,6 @@ pnpm start:database --no-open --port 3082
 
 打开 `http://127.0.0.1:3082/retrieval` 使用持久任务工作台，DSH 原设置界面在同一 Host 的根路径。启动自动创建缺失的任务表和快照表，不自动导入业务数据、旧 Session 或重新构建向量。已有已发布数据时跳过 `db:prepare`/`grams`，只启动数据库、模型和 Host 即可。
 
-工作台收到查询/补充后显示已保存回执；关闭或刷新页面只移除事件订阅，worker 继续执行。重启同一数据库/profile 后自动恢复未完成租约；通过任务 URL 或本浏览器的历史链接返回。取消停止后续工作，保存的输入仍保留。问题回复绑定 questionId，失效问题拒绝错答；相关性标记只作为 Agent 待复核反馈。来源/权限已变化则拒绝旧候选、报告和下载，保留已保存输入。CSV 下载按 SQL 当前 resultRevision 逐页重新核验。
-
-取消或故障暂停后，点击“恢复检索”沿用原查询条件、确认结果和筛选进度。对应接口为 `POST /api/retrieval-agent/tasks/:id`，请求体 `{ "operationId": "唯一幂等键", "kind": "resume" }`。恢复不增加查询条件代次，不重置该代次的 128 次独立判断额度；重复提交同一幂等键只返回原回执。需要改变业务条件时再提交补充。
-
 `db:prepare` 读取现有 `data/tickets/esft/summary-train.jsonl`，版本化导入 MySQL，使用真实 Qwen3-Embedding-0.6B 创建 Milvus 索引，全部片段确认后发布。摘要及完整原始对话按 360 Unicode 字符切片，实际模型再次检查 token 上限，拒绝静默截断。作业每批 checkpoint；中断后重跑同一命令复用已确认片段和带模型身份的 embedding 缓存。构建未完成不会发布部分向量索引。首批构建明显长于查询，不计入已就绪查询延迟。
 
 `grams` 创建可选的 bigram 候选表，完成前查询继续使用精确扫描；启用后仍用 LOCATE 精确复核。`db:verify` 在完整当前语料上逐组比较文件解释器、SQL 扫描和已就绪 gram 路径的 ID 集合，结果写入 `output/phase1/database-verify.json`。这验证字面语义，不是业务相关性 Recall。
@@ -155,6 +153,22 @@ pnpm exec vitest run packages/agent-plugin/src/durable-service.spec.ts tests/dat
 ```
 
 持久任务测试连接真实 MySQL，每个用例创建独立 `ra_phase2_test_*` 数据库，并在结束后校验名称、删除本例数据库；Host 替换仍在同一用例内共享该数据库。使用安装版 DSH loop、可控 Provider 和脚本模型验证租约、迟到结果、澄清/反馈、冷恢复与确认 CSV；不是主模型质量评测。database-vertical 另外调用真实 Milvus/Qwen 并验证新 Provider 实例恢复原快照。未设置环境变量时两类实库测试跳过。浏览器故障验收夹具 `tests/fixtures/phase2-delay-proxy.mjs` 只延迟转发真实 embedding 响应，供关闭/强制重启测试；日常模型地址保持 8012，不使用该延迟代理。
+
+### 任务失败与恢复
+
+工作台收到查询/补充后显示已保存回执；关闭或刷新页面只移除事件订阅，worker 继续执行。重启同一数据库/profile 后自动恢复未完成租约；通过任务 URL 或本浏览器的历史链接返回。取消停止后续工作，保存的输入仍保留。问题回复绑定 `questionId`，失效问题拒绝错答；相关性标记只作为 Agent 待复核反馈。来源/权限已变化则拒绝旧候选、报告和下载，保留已保存输入。CSV 下载按 SQL 当前 `resultRevision` 逐页重新核验。
+
+| 页面或请求错误 | 处理方式 |
+| --- | --- |
+| 连接中断、超时、临时限流、服务端错误 | 查询规划和 Python 语义算子自动重试失败的模型请求；最多三次实际尝试，耗尽后显示未完成 |
+| `OUTPUT_SCHEMA` | 严格拒绝缺必填字段或格式错误的输出，并重试同一次判断；不会把无效响应转成确认结果 |
+| 凭据无效、模型或地址不可用、供应商额度不足 | 在“模型与供应商”修复相应设置或服务问题后，返回原任务恢复 |
+| 某一路召回失败 | 先恢复对应数据或检索服务；完整召回未就绪时不会开始并集学习 |
+| 报告生成失败 | 保留确认集合，显式重试报告生成；不重新开始筛选 |
+
+取消或故障暂停后，点击“恢复检索”沿用原查询条件、确认结果和筛选进度。对应接口为 `POST /api/retrieval-agent/tasks/:id`，请求体 `{ "operationId": "唯一幂等键", "kind": "resume" }`。恢复不增加查询条件代次，不重置该代次的 128 次独立判断额度；重复提交同一幂等键只返回原回执。需要改变业务条件时再提交补充。已经用完判断额度时，恢复也不能增加额度或保证得到更多结果。
+
+恢复仍重新核对当前访问资格，已完成或正在执行的任务不接受此恢复命令。后台只重排未完成执行，成功判断与有效缓存继续复用。自动重试、恢复检索和修改查询条件是不同操作，恢复请求无需再把“继续检索”作为查询条件补充。
 
 ## 查询分析 HTTP 验收
 
@@ -257,7 +271,7 @@ node scripts/migrate-dsh-sessions.mjs --home=.cache/retrieval-agent-local/dsh-ho
 
 ## Python 模型服务容器部署
 
-容器路径使用宿主 Node.js/pnpm/DSH，以及 Docker Desktop 的 WSL 2 Linux x86_64 引擎；模型服务的 Python、uv、spaCy、PyTorch 和 CUDA 用户态库均在镜像中。Linux 主机需要 Docker Engine/Compose，GPU 还需要兼容的 NVIDIA 驱动及容器 GPU 配置。CPU 配置没有 GPU reservation，不要求 NVIDIA 设备。当前两条路径共用锁定的 cu128 wheel 镜像，CPU 也会携带 CUDA 库；这是保持同一依赖基线的体积取舍。
+本节是源码开发的混合部署入口：Node.js/pnpm/DSH 在宿主运行，Python 模型服务在容器运行。完整容器部署使用前面的[一键容器部署](#一键容器部署)，不需要宿主 Node.js/pnpm/DSH。Windows 使用 Docker Desktop 的 WSL 2 Linux x86_64 引擎；模型服务的 Python、uv、spaCy、PyTorch 和 CUDA 用户态库均在镜像中。Linux 主机需要 Docker Engine/Compose，GPU 还需要兼容的 NVIDIA 驱动及容器 GPU 配置。CPU 配置没有 GPU reservation，不要求 NVIDIA 设备。CPU/GPU 共用锁定的 cu128 wheel 镜像，CPU 也会携带 CUDA 库；这是保持同一依赖基线的体积取舍。
 
 首次从源码准备（所有命令在仓库根执行）：
 
@@ -373,7 +387,7 @@ pnpm retrieval-agent web --no-open --port 3081
 | `pnpm exec vitest run packages/agent-plugin/src/service.spec.ts` | 运行指定相邻测试；路径可换成受影响的现有 spec |
 | `pnpm test` | 运行默认行为/边界回归；不加载全量语料做假排名，实库专项需显式启用 |
 | `pnpm model:test` | 通过 uv 运行 Python model-service 测试；环境未就绪时可能同步依赖 |
-| `pnpm operators:test` | 三个核心算子、默认四模型/召回并集预测、128 次抽样额度与 60% 查准率门槛、未知/缺特征、数值等价和旧 filter baseline；CI 使用同一入口 |
+| `pnpm operators:test` | 三个核心算子、默认四模型/召回并集预测、128 次独立判断额度与重试计量、60% 查准率门槛、未知/缺特征、数值等价和旧 filter baseline；CI 使用同一入口 |
 | `pnpm eval:self-test` | Python 评测数据与 scorer 自检，不执行真实 Agent 任务 |
 
 跨包导入可能通过 package exports 读取 `lib/`。跨包源码变更后先显式 `pnpm build` 一次，再运行 `pnpm typecheck:code` 和所选行为检查；也可直接用 `pnpm typecheck` 完成构建与类型检查。单独 `--noEmit` 不能证明已有构建产物与源码一致。依赖开发语料的测试和运行入口要求事先显式准备数据，纯代码检查无需此步骤。

@@ -6,10 +6,10 @@
 | --- | --- |
 | 产品概览与交互式流程示意 | [HTML 产品介绍](project-introduction.html)（下载后用浏览器打开） |
 | 安装、启动、模型设置、备份与排障 | [开发与运行](DEVELOPMENT.md) |
-| 查询范围、证据、反馈和交付规则 | [产品规格](PRODUCT_REQUIREMENTS.md) |
+| 查询范围、召回并集、证据、反馈和交付规则 | [产品规格](PRODUCT_REQUIREMENTS.md) |
 | 系统组件、状态存储与数据流 | [架构说明](ARCHITECTURE.md) |
 | 关键词、向量召回和索引一致性 | [检索设计](design/RETRIEVAL.md) |
-| Python 语义算子、DSH 桥接、FastAPI 与计量 | [算子设计](design/OPERATORS.md) |
+| Python 语义算子、抽样预测、自动重试与额度计量 | [算子设计](design/OPERATORS.md) |
 | Agent 调度、领域专家、取消与恢复 | [Agent 运行](design/AGENT_RUNTIME.md) |
 | 工单分层、上下文容量和引用身份 | [上下文设计](design/CONTEXT.md) |
 | 页面交互、报告和完整结果下载 | [工作台与交付](design/WORKBENCH.md) |
@@ -20,3 +20,9 @@
 | Workspace 包与依赖关系 | [生成依赖图](WORKSPACE_GRAPH.md) |
 
 产品规格描述行为要求，设计文档解释实现与约束。检索质量和性能需要结合实际数据、模型、部署配置及对应评测结果判断。
+
+常见问题可直接从以下入口阅读：
+
+- **哪些工单参与筛选？** [召回与筛选范围](../README.md#召回与筛选范围)说明关键词与语义召回如何去重，以及抽样、训练和预测的范围。
+- **请求失败后如何继续？** [自动重试与任务恢复](../README.md#自动重试与任务恢复)说明重试额度，[运行文档](DEVELOPMENT.md#任务失败与恢复)提供排障与恢复接口。
+- **如何验证这些行为？** [评测与验收](EVALUATION_STRATEGY.md#2-行为矩阵)区分召回完整性、筛选范围、请求重试、恢复和真实业务质量。
