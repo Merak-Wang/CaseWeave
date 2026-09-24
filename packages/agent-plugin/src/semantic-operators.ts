@@ -111,6 +111,7 @@ export class SemanticOperators {
     if (!system || input.messages.some(m => !['system', 'user'].includes(m.role))) throw new RetrievalError('PROTOCOL_MISMATCH', '不支持的算子模型消息。')
     const request: GenerateOptions = { provider: config.provider, model: config.model, sessionId: SessionId(`operator-${input.manifest_id}`),
       ...(signal ? { signal } : {}), system,
+      ...(input.operation === 'query_plan' ? { maxTokens: 4096 } : {}),
       tools: [{ name: 'submit_result', description: 'Submit the operator result with source citations.', parameters: input.schema }],
       messages: input.messages.filter(m => m.role === 'user').map(m => createUserMessage({ content: [{ type: 'text', text: m.content }],
         source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot', sections: [{ name: input.operation, text: m.content }] } })) }
@@ -157,7 +158,10 @@ export class SemanticOperators {
           }
         }
       })
-      if (!finished || payload === undefined || !scope.manifests.some(m => m.operator?.pythonManifestId === input.manifest_id)) throw new RetrievalError('PROTOCOL_MISMATCH', '算子模型未完成实际结构化提交。')
+      if (payload === undefined) throw modelFailure({ code: 'OUTPUT_SCHEMA' }, true, usage ? {
+        prompt_tokens: inputContextTokens(usage), completion_tokens: usage.outputTokens, cached_prompt_tokens: usage.cacheReadTokens ?? null,
+      } : undefined)
+      if (!finished || !scope.manifests.some(m => m.operator?.pythonManifestId === input.manifest_id)) throw new RetrievalError('PROTOCOL_MISMATCH', '算子模型未完成实际结构化提交。')
       if (input.operation === 'sem_agg') {
         const data = object(JSON.parse(input.messages.find(m => m.role === 'user')!.content)), result = object(payload)
         const sources = data.sources as { id: string; records?: OperatorRecord[]; source_manifest_id?: string }[], ids = result.source_ids

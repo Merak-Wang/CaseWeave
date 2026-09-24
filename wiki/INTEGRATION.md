@@ -1,6 +1,6 @@
 # 文件 Wiki 调用契约
 
-命令端口：[scripts/wiki-store.mjs](../scripts/wiki-store.mjs)，专家共用 [只读实现](../packages/agent-plugin/src/wiki-store.js)，文件修改与后台学习共用 [发布实现](../packages/agent-plugin/src/wiki-publisher.js)。阅读器使用 Node.js 内置库，无数据库、网络、模型调用或原库权限。DSH 主 Agent 在快查后获得领域目录；专家按分派接收固定 release 下至多 3 条知识，具体正文与引用进入角色 ContextManifest。自动学习机制见 [知识设计](../docs/design/KNOWLEDGE.md)，对照方法见 [评测策略](../docs/EVALUATION_STRATEGY.md)。
+命令端口：[scripts/wiki-store.mjs](../scripts/wiki-store.mjs)，专家共用 [只读实现](../packages/agent-plugin/src/wiki-store.js)，文件修改与后台学习共用 [发布实现](../packages/agent-plugin/src/wiki-publisher.js)。阅读器使用 Node.js 内置库，无数据库、网络、模型调用或原库权限。DSH 检索 Agent 在查询规划时获得领域目录；专家按分派接收固定 release 下至多 3 条知识，具体正文与引用进入角色 ContextManifest。自动学习机制见 [知识设计](../docs/design/KNOWLEDGE.md)，对照方法见 [评测策略](../docs/EVALUATION_STRATEGY.md)。
 
 ## 公共命令
 
@@ -18,7 +18,7 @@ python scripts/wiki-build.spec.py
 python scripts/verify-wiki-artifacts.py
 ```
 
-`first-pass` 是旧结构化快查调用者的兼容模式，返回空数组。Python 规划器接收固定版本目录摘要，由检索 Agent 明确返回 `knowledge_routes`（条目 ID 和业务选择理由）；不通过 `search` 自动取前三条注入。过滤算子只读取选中正文作为可被证据否定的先验，实际条目进入 ContextManifest；空路由执行零样本判断。规划与原句向量仍并行启动。
+`first-pass` 是旧结构化快查调用者的兼容模式，返回空数组。Python 规划器接收固定版本目录摘要，由检索 Agent 明确返回 `knowledge_routes`（条目 ID 和业务选择理由）；不通过 `search` 自动取前三条注入。过滤算子只读取选中正文作为可被证据否定的先验，实际条目进入 ContextManifest；空路由执行零样本判断。规划完成后才启动关键词与向量召回。
 
 `verify-wiki-artifacts.py` 将可读 Markdown 与 `curation.json` 指定的离线发布版本比对，并通过运行时读取器独立验证当前发布。文件增量与自动学习条目不需要生成离线 Markdown 副本。报告分别列出离线 `releaseId` 和当前 `runtimeReleaseId`；当前发布损坏或只能回退时检查失败。`--private` 额外核对离线来源绑定，私有路径不写入输出。
 

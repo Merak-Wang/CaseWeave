@@ -209,14 +209,9 @@ export class RetrievalController {
       }
       if (queryContract.schemaVersion !== 10) return await this.#executeSearch(principal, state, 'initial_hybrid', {}, signal)
       if (!this.#initialPlanner) throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Python 查询规划器尚未装配。')
-      // Both start against the already persisted snapshot. Provider progress remains visible while the plan runs.
-      const [searched, planned] = await Promise.allSettled([
-        this.#executeSearch(principal, state, 'initial_hybrid', {}, signal), this.#initialPlanner(state, signal),
-      ])
-      if (searched.status === 'rejected') throw searched.reason
-      state = searched.value
-      if (planned.status === 'rejected') throw planned.reason
-      state = this.acceptSemanticPlan(state, planned.value.plan, planned.value.manifests)
+      // 先固定业务判据和召回表达式；后续算子再按计划并行执行关键词与向量通道。
+      const planned = await this.#initialPlanner(state, signal)
+      state = this.acceptSemanticPlan(state, planned.plan, planned.manifests)
       state = await this.#onState?.(state) ?? state
       return state
     } catch (error) {
@@ -442,7 +437,9 @@ export class RetrievalController {
     if (!current.contextManifests?.some(m => m.operator?.operation === 'query_plan' && m.operator.pythonManifestId === plan.manifest_id
       && m.inputGeneration === plan.inputGeneration && m.measurement === 'dsh_request')) throw new RetrievalError('INVALID_REQUEST', '查询计划没有实际 DSH 请求依据。')
     const metrics = manifests.findLast(m => m.operator?.metrics)?.operator?.metrics
-    return this.#record(current, { ...semanticPlanPatch(current, plan), ...(metrics ? { budget: { ...current.budget, operatorUsage: metrics } } : {}) })
+    return this.#record(current, { ...semanticPlanPatch(current, plan),
+      ...(current.phase === 'snapshot_opened' ? { allowedActions: [action('repair_search'), action('read_state')] } : {}),
+      ...(metrics ? { budget: { ...current.budget, operatorUsage: metrics } } : {}) })
   }
 
   acceptOperatorResults(state: RetrievalState, generation: number, decisions: readonly OperatorDecision[]): RetrievalState {
@@ -568,6 +565,8 @@ export class RetrievalController {
         allowedActions: [action('repair_search'), action('read_state')] })
     }
     if (current.phase === 'stopped') return current
+    // 自然语言任务恢复后仍由算子补齐规划并执行计划召回，不重走原句快查。
+    if (current.query.contract?.schemaVersion === 10) return current
     return this.#executeSearch(principal, current,
       current.phase === 'snapshot_opened' ? 'initial_hybrid' : 'repair_search',
       current.phase === 'snapshot_opened' ? {} : { mode: 'hybrid', delta: { kind: 'semantic_hint', text: current.query.original } }, signal)

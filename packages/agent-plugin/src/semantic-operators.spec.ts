@@ -61,7 +61,7 @@ it('retains failed callback metering and the original error instead of treating 
 
 it.each([true, false])('routes knowledge in planning (selected=%s), then judges one review window with only selected bodies', async (selectKnowledge) => {
   const ctx = new Context(), judged: string[][] = [], unresolvedIssues: (string | undefined)[][] = []
-  let selectedId = '', selectedBody = ''
+  let selectedId = '', selectedBody = '', rankCalls = 0, planCalls = 0
   let dispose: (() => Promise<void>) | undefined
   try {
     await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime); await ctx.plugin(ToolRuntime)
@@ -70,9 +70,9 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
       tenantId: 'operators', allowedSubjectIds: [], requiredAttributes: {}, sourceVersion: 'v1', title: '副卡问题', summary: '缺少解绑状态',
       problemDescription: '尚待核实解绑状态', resolutionSteps: [], conversationOrUpdates: [], errorCodes: [], piiRedactionStatus: 'not_applicable' }))
     const ranker: RetrievalRanker = { profileVersion: 'example-window', capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
-      rank: async (documents, query) => ({ hits: documents.map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1, channels: [{ channel: 'vector' as const, rank: i + 1, score: 1 }] })),
+      rank: async (documents, query) => { rankCalls++; return { hits: documents.map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1, channels: [{ channel: 'vector' as const, rank: i + 1, score: 1 }] })),
         execution: { requestedMode: query.mode, executedMode: query.mode, strategyVersion: 'fixture', channels: [] },
-        scanned: documents.length, keywordEligible: documents.length, rankedHits: documents.length, warnings: [] }) }
+        scanned: documents.length, keywordEligible: documents.length, rankedHits: documents.length, warnings: [] } } }
     new Principal(ctx); new Provider(ctx, new LocalTicketProvider(records, { ranker }))
     const app = new RetrievalAgentService(ctx, { searchTopK: 40, reviewBatchSize: 8 })
     const operators = new SemanticOperators(ctx, app, resolve('wiki'), process.cwd(),
@@ -83,6 +83,8 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
         const planning = options.system?.includes('当前操作：query_plan')
         const knowledge = JSON.parse(options.system!.split('\n相关Wiki：')[1]!)
         if (planning) {
+          planCalls++
+          expect(options.maxTokens).toBe(4096)
           const evidenceFields = JSON.parse(data.confirmed_context).evidence_fields
           expect(evidenceFields.some((field: any) => field.key === 'summary')).toBe(false)
           expect(evidenceFields.every((field: any) => ['L2', 'L3'].includes(field.accessLevel)
@@ -93,6 +95,10 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
           const entry = catalog.flatMap((d: any) => d.entries).at(-1)
           expect(entry.bodyMarkdown).toBeUndefined()
           selectedId = entry.id
+          if (selectKnowledge && planCalls === 1) {
+            yield { type: 'finish', reason: { kind: 'stop' } }
+            return
+          }
         } else {
           expect(knowledge.entries.map((e: any) => e.id)).toEqual(selectKnowledge ? [selectedId] : [])
           if (selectKnowledge) {
@@ -118,7 +124,13 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
     dispose = handle.dispose
     const agent = handle.agent
     await app.start(agent, buildSemanticTicketRequest('找3条解绑已完成的副卡工单'))
-    await operators.filter(agent)
+    expect(rankCalls).toBe(0)
+    expect(app.current(agent).candidates).toHaveLength(0)
+    expect(app.current(agent).query.contract?.semanticPlan?.keywords,
+      JSON.stringify({ phase: app.current(agent).phase, stop: app.current(agent).stopExplanation, planCalls })).toEqual(['副卡'])
+    await operators.searchAndFilter(agent)
+    expect(rankCalls).toBeGreaterThan(0)
+    expect(planCalls).toBe(selectKnowledge ? 2 : 1)
     expect(app.current(agent).query.contract?.semanticPlan?.knowledge_routes).toEqual(selectKnowledge
       ? [{ entry_id: selectedId, reason: '测试 Agent 选择这条业务知识', title: expect.any(String) }] : [])
     if (selectKnowledge) expect(selectedBody).not.toBe('')
@@ -230,7 +242,7 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
         let name = 'submit_result', payload: unknown
         if (options.sessionId?.startsWith('operator-')) {
           if (options.system?.includes('当前操作：query_plan')) {
-            expect(searches.length).toBeGreaterThan(0)
+            if (!revised) expect(searches).toHaveLength(0)
             payload = { keywords: active ? [] : ['副卡', '解绑'], instruction: revised ? '只纳入已经完成解绑，排除尚未完成。' : '查找仍受阻的副卡解绑，排除已完成解绑。', retrieval_expressions: [], goal: { mode: active ? 'all' : 'adaptive', count: null },
               steps: [{ id: 'review', op: 'sem_filter', inputs: ['$source'], instruction: '核对完成状态', params: active ? { required_fields: ['conversationOrUpdates'] } : {} }] }
           } else if (options.system?.includes('当前操作：sem_agg')) {
@@ -273,7 +285,7 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
     expect(errors).toEqual([])
     const state = app.current(agent)
     expect(state.query.original).toBe(query)
-    expect(searches).toContain(query)
+    expect(searches.some(text => text.includes('副卡解绑仍受阻'))).toBe(true)
     expect(state.phase, JSON.stringify({ candidates: state.candidates.length, judgments: state.judgments?.length,
       selected: state.selectedCandidateRefs.length, activity: state.operatorActivity, stop: state.stopExplanation,
       filterRequests: requests.filter(r => r.system?.includes('当前操作：sem_filter')).length })).toBe('stopped')

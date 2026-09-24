@@ -624,6 +624,20 @@ describe('RetrievalController', () => {
     expect(foldRetrievalEvents(journal.read(state.retrievalId), state.retrievalId)).toEqual(state)
   })
 
+  it('does not replay raw search while resuming a natural-language plan', async () => {
+    const source = provider(), search = source.search.bind(source)
+    let calls = 0
+    source.search = async (...args) => { calls++; return search(...args) }
+    const { controller } = setup(source)
+    const started = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '副卡' })
+    expect(calls).toBe(1)
+    const planning = { ...started, phase: 'snapshot_opened' as const,
+      query: { ...started.query, contract: { ...started.query.contract!, schemaVersion: 10 as const } } }
+    const resumed = await controller.refreshSearch(PRINCIPAL, planning)
+    expect(calls).toBe(1)
+    expect(resumed.phase).toBe('snapshot_opened')
+  })
+
   it('requires one typed delta or cursor and applies one atomic batch through the actual Provider', async () => {
     const observed: unknown[] = []; const base = provider()
     const { controller } = setup({ ...base, async search(principal, snapshotId, query, options) {

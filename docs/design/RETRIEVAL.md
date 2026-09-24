@@ -18,7 +18,7 @@
 
 ## 1. 查询规划与语义判据
 
-新任务使用 schemaVersion 10 的自然语言契约，入口为 `buildSemanticTicketRequest`。Host 立即启动原句向量召回，并通过 DSH 调用 Python `query_plan`；后者接收原句、用户补充、字段目录、任务时刻与固定版本 Wiki，输出 `keywords`、`instruction`、`retrieval_expressions`、`goal` 和步骤。
+新任务使用 schemaVersion 10 的自然语言契约，入口为 `buildSemanticTicketRequest`。Host 先通过 DSH 调用 Python `query_plan`；后者接收原句、用户补充、字段目录、任务时刻与固定版本 Wiki，输出 `keywords`、`instruction`、`retrieval_expressions`、`goal` 和步骤，输出上限为 4096 tokens。规划完成后，Host 并行启动关键词 OR 宽召回与原句向量召回，并按计划执行有用的语义改写搜索。
 
 原句中的换行和空格保留在规划及向量输入中；仅内部比较视图做 NFKC 和空白规范化。新请求接受 v8–v10 查询契约，旧版本只通过 Session 重放迁移读取。spaCy 响应在 HTTP 客户端校验，内部请求不重复检查已解析的词性、依存关系等诊断字段。
 
@@ -58,7 +58,7 @@ Python 负责语义计算，Host 负责身份、来源、当前输入代次、�
 
 项目使用自建 `ra_gram` 倒排，不依赖 MySQL FULLTEXT ngram 的分词结果，因此短语、停用词和空格仍按规范化后的字面子串精确判断。单字和无法安全剪枝的表达走精确谓词；加速候选必须经 LOCATE 复核。结构过滤使用可用普通索引；索引命中集与精确扫描的等价性及延迟仍应按数据规模验收，不能由索引存在本身推断性能收益。
 
-默认 `auto/learned` 全集发现由数据库一次执行关键词集合写入，并与向量召回并行；候选集合留在 SQL，Host 只读取供界面和 Agent 使用的有限窗口。显式结构化查询或需要逐条取候选的路径仍按稳定查询版本、唯一身份和 keyset 游标分页。任一路未完成或失败都保留通道状态，不将部分结果说成全集。
+查询计划完成后，默认 `auto/learned` 全集发现由数据库一次执行关键词集合写入，并与向量召回并行；候选集合留在 SQL，Host 只读取供界面和 Agent 使用的有限窗口。显式结构化查询或需要逐条取候选的路径仍按稳定查询版本、唯一身份和 keyset 游标分页。任一路未完成或失败都保留通道状态，不将部分结果说成全集。
 
 ## 4. Milvus 语义召回与融合
 
