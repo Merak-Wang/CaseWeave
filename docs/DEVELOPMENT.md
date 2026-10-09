@@ -10,6 +10,14 @@
 
 标题摘要试用的 JSONL 应保留工单身份、title、summary 和真实来源元数据，正文及对话为空，不用摘要伪造正文。另保存的完整原文文件可供后续按身份读取，但不会被本试用自动加载；切回完整数据前需要相应 Provider 和运行验收。工作台提交原始业务问题后，可比较在线学习与无反馈选项；相似度阈值是 cosine >= 0.75，不设 Top-K 保底，关键词 OR 命中仍全部枚举。模型自报置信度不是校准准确率；结果直接交付所选方法判定为是的工单及 XLSX，无需人工确认。运行失败如实显示未完成，已计算结果与完整交付分别呈现。
 
+## 私有模型网关
+
+普通 OpenAI-compatible 模型通过工作台“模型与供应商”配置并选择，意图规划与 S2 样本判断共用当前选择；embedding 服务独立配置，不随教师模型切换。自定义模型未声明推理档位时按供应商默认参数运行，不能把未发送思考参数解释成已关闭思考。
+
+需要签名或特殊封套的内部网关可设置 `RETRIEVAL_AGENT_MODEL_TRANSPORT_MODULE` 为可信本地模块的绝对路径。模块默认导出 `{ provider, createFetch(baseURL, options), labelProbabilities? }`：仅为指定供应商返回自定义 Fetch，复用 DSH 的模型目录、凭据、工具解析和用量处理。`options.apiKey` 来自现有服务端凭据存储；私有驱动负责按网关协议读取凭据、封装请求及返回 OpenAI-compatible 响应流。非流式网关可桥接响应，须保留实际响应 model 和 usage，不能把桥接当成上游原生 SSE。试用容器可将驱动放在持久化 `/app/.cache` 中；驱动、内网地址、凭据和网关协议材料不进入源码提交。
+
+只有返回真实标签 token 概率的供应商才能支持概率判别；驱动可声明 `labelProbabilities: false`，工作台会提示采用简洁是／否判断。模型自报 confidence 与真实 token 概率是不同的输出。
+
 ## Python 算子服务
 
 完整 Compose 部署包含内部 `semantic-operators` FastAPI 服务。源码开发可直接使用默认常驻 stdio worker，也可先运行 `pnpm operators:serve --port 8013`，再向 Node 进程设置 `CASEWEAVE_OPERATORS_URL=http://127.0.0.1:8013`。健康检查为 `/health`，内部 WebSocket 为 `/v1/operators`；浏览器不直接调用算子。已有安装好的 Python 可通过 `CASEWEAVE_PYTHON` 指定，需安装 `python/semantic-operators` 的锁定依赖。

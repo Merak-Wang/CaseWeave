@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { RetrievalError } from '@retrieval-agent/contracts'
+import { localProviderTransport } from '@retrieval-agent/dsh-compat/opencode-pi-ai'
 
 type Profile = { baseURL?: string; api?: string; apiKeyEnv?: string; headers?: Record<string, string> }
 type Settings = { describe(): { ns: string; value: unknown }[] }
@@ -12,6 +13,8 @@ export async function readLabelLogprobs(ctx: Context, provider: string, model: s
   const configured = settings?.describe().find(d => d.ns === 'retrieval-llm-pi-ai')?.value as { providers?: Record<string, Profile> } | undefined
   const profile = configured?.providers?.[provider]
   const unavailable = (reason: string) => ({ payload: { available: false, p_first: null, unavailable_reason: reason }, usage: {} })
+  const transport = await localProviderTransport()
+  if (transport?.provider === provider && transport.labelProbabilities === false) return unavailable('provider_label_probabilities_not_supported')
   if (!profile?.baseURL || !['openai-completions', 'openai-chat-completions'].includes(profile.api ?? 'openai-completions')) return unavailable('provider_logprobs_route_unavailable')
   const credentials = ctx.get('credentials') as Credentials | undefined
   const key = profile.apiKeyEnv ? (await credentials?.resolve(profile.apiKeyEnv))?.value : undefined

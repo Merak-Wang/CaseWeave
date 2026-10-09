@@ -116,7 +116,8 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
                 raise ProtocolError("Online feature scan IDs must be distinct")
             seen.update(ids)
             block.available &= np.isfinite(block.dense).all(axis=1)
-            yield block
+            if ids:
+                yield block
             cursor = page.get("next_cursor")
             if cursor is None:
                 break

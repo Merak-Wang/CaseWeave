@@ -1,4 +1,5 @@
 import type {} from '@retrieval-agent/dsh-compat'
+import { localProviderTransport } from '@retrieval-agent/dsh-compat/opencode-pi-ai'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -75,8 +76,11 @@ export class WorkbenchModels {
     })))
     const selected = agent ? (await this.bind(agent)).current : this.ctx.agentDefaultModel.currentSelection()
     const available = await this.available(selected)
+    const transport = await localProviderTransport()
+    const probabilityNotice = transport && transport.provider === selected?.provider && transport.labelProbabilities === false
+      ? '此供应商未提供标签 token 概率，请使用简洁是／否判断。' : undefined
     return { revision: descriptor.revision, selected: available ? selected : undefined,
-      notice: agent ? this.notices.get(agent) : available ? undefined : '默认模型已不在当前配置中，请选择可用模型后再检索。', configured,
+      notice: (agent ? this.notices.get(agent) : available ? undefined : '默认模型已不在当前配置中，请选择可用模型后再检索。') ?? probabilityNotice, configured,
       providers: this.ctx.llm.listConfigurableProviders().map(p => ({ id: p.provider, name: p.displayName })),
       protocols: supportedProtocols() }
   }

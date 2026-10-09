@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, ReasoningEffortId, type GenerateOptions, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type GenerateOptions, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { RetrievalError, type ContextManifest, type OperatorDecision, type OperatorRecord,
   type RetrievalState, type SemanticQueryPlan, type TicketCandidateRef, type TicketRetrievalSpec, type TicketSearchProgress } from '@retrieval-agent/contracts'
@@ -79,7 +79,9 @@ export class SemanticOperators {
     }
     const data = object(JSON.parse(user.at(-1)!))
     const collect = (v: unknown): OperatorRecord[] => Array.isArray(v) ? v.flatMap(collect) : v && typeof v === 'object'
-      ? 'ref' in v && 'version' in v && 'content_hash' in v && 'passages' in v ? [v as OperatorRecord] : Object.values(v).flatMap(collect) : []
+      ? 'ref' in v && 'version' in v && 'content_hash' in v && 'passages' in v
+        ? [{ ...v, ref: 'record_ref' in v ? v.record_ref : v.ref } as OperatorRecord]
+        : Object.values(v).flatMap(collect) : []
     const rows = mergeOperatorRecords(collect(data))
     const passageIds = new Set(rows.flatMap(r => r.passages.map(p => p.id)))
     const evidence = scope.state.promotedEvidence.filter(e => passageIds.has(e.evidenceId))
@@ -97,7 +99,7 @@ export class SemanticOperators {
   private config(agent: Agent) {
     const config = this.application.modelSelection ? this.application.modelSelection(agent) : agent.session.requestContext() ?? agent.options
     if (!config?.provider || !config.model) throw new RetrievalError('PROVIDER_UNAVAILABLE', '当前 DSH 模型未配置或已失效，请在模型设置中选择可用模型后继续。')
-    return { provider: config.provider, model: config.model, reasoningEffort: ('reasoningEffort' in config ? config.reasoningEffort : undefined) ?? ReasoningEffortId('off'), contextWindow: agent.session.requestContext()?.contextWindow ?? 32000 }
+    return { provider: config.provider, model: config.model, reasoningEffort: ('reasoningEffort' in config ? config.reasoningEffort : undefined), contextWindow: agent.session.requestContext()?.contextWindow ?? 32000 }
   }
   private async knowledge(state: RetrievalState): Promise<PythonOperatorRun['knowledge']> {
     if (!this.wikiRoot || !state.knowledgeCatalog?.releaseId) return { release: 'none', entries: [] }
@@ -115,7 +117,7 @@ export class SemanticOperators {
     const compactDecision = input.operation === 'sem_filter' && object(JSON.parse(input.messages.find(m => m.role === 'user')!.content)).decision_format === 'compact_binary'
     const nextTokenDecision = input.operation === 'sem_filter' && object(JSON.parse(input.messages.find(m => m.role === 'user')!.content)).decision_format === 'next_token_binary'
     if (!system || input.messages.some(m => !['system', 'user'].includes(m.role))) throw new RetrievalError('PROTOCOL_MISMATCH', '不支持的算子模型消息。')
-    const request: GenerateOptions = { provider: config.provider, model: config.model, reasoningEffort: config.reasoningEffort, sessionId: SessionId(`operator-${input.manifest_id}`),
+    const request: GenerateOptions = { provider: config.provider, model: config.model, ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}), sessionId: SessionId(`operator-${input.manifest_id}`),
       ...(signal ? { signal } : {}), system,
       ...(input.operation === 'query_plan' ? { maxTokens: 2048, temperature: 0 } : nextTokenDecision ? { maxTokens: 1, temperature: 1 } : compactDecision ? { maxTokens: 1024 } : {}),
       tools: nextTokenDecision ? [] : [{ name: 'submit_result', description: compactDecision ? 'Submit yes/no and confidence for every supplied ticket.' : 'Submit the operator result with source citations.', parameters: input.schema }],

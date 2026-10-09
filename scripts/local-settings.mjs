@@ -42,7 +42,9 @@ export async function seedModelSettings(paths, environment) {
     }
   }
   const existingAdapter = record(existing['retrieval-llm-pi-ai'] ?? existing['llm-pi-ai'])
-  if (existsSync(seedPath) && (await readFile(seedPath, 'utf8')).trim() === seed && existing['agent-default-model']) return false
+  // DSH 导入后移动种子文件；同一环境再次启动保留数据库里的用户模型选择。
+  if (existsSync(seedPath) && (await readFile(seedPath, 'utf8')).trim() === seed
+    && (existing['agent-default-model'] || existsSync(settingsPath + '.imported'))) return false
   const existingProviders = record(existingAdapter.providers)
   const existingProvider = record(existingProviders[provider])
   const models = Array.isArray(existingProvider.models) ? existingProvider.models : []

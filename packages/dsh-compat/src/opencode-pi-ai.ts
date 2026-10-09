@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { LlmError, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { apply as applyPiAi, PiAiAdapter, type Config as PiAiConfig, type ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
@@ -38,12 +39,31 @@ const prototype = PiAiAdapter.prototype as unknown as { streamWithSnapshot: Stre
 let owners = 0
 let restore: (() => void) | undefined
 
-function install(): () => void {
+export interface LocalProviderTransport {
+  provider: string
+  labelProbabilities?: boolean
+  createFetch(baseURL: string, options: Record<string, unknown>): typeof fetch
+}
+
+export async function localProviderTransport(): Promise<LocalProviderTransport | undefined> {
+  const path = process.env.RETRIEVAL_AGENT_MODEL_TRANSPORT_MODULE
+  return path ? (await import(pathToFileURL(path).href)).default : undefined
+}
+
+function install(transport?: LocalProviderTransport): () => void {
   if (owners === 0) {
     const original = prototype.streamWithSnapshot
     if (typeof original !== 'function' || original.length !== 2) throw new Error('Pinned DSH pi-ai stream seam changed; review OpenCode compatibility before starting.')
     const wrapped: Stream = function (options, snapshot) {
       const model = snapshot.models.getModel(options.provider, options.model)
+      if (transport && options.provider === transport.provider && model?.baseUrl) {
+        // 私有驱动仅替换这一供应商的HTTP封装，模型选择、工具解析与计量仍由DSH处理。
+        const models = Object.assign(Object.create(snapshot.models), {
+          streamSimple: (value: unknown, context: unknown, request: Record<string, unknown>) => snapshot.models.streamSimple(value, context,
+            { ...request, fetch: transport.createFetch(model.baseUrl!, request) }),
+        }) as Snapshot['models']
+        return original.call(this, options, { ...snapshot, models })
+      }
       if (!isOpenCodeRoute(options.provider, model?.baseUrl)) return original.call(this, options, snapshot)
       if (!options.sessionId || !String(options.sessionId).trim()) {
         throw new LlmError('OpenCode inference requires a conversation sessionId.', 'INVALID_REQUEST')
@@ -71,7 +91,8 @@ function install(): () => void {
 }
 
 /** Same upstream config, credentials, catalog and request implementation; only adds per-call routing identity. */
-export function apply(ctx: Context, config: PiAiConfig): void {
-  ctx.effect(install)
+export async function apply(ctx: Context, config: PiAiConfig): Promise<void> {
+  const transport = await localProviderTransport()
+  ctx.effect(() => install(transport))
   applyPiAi(ctx, config)
 }

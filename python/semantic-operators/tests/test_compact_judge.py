@@ -6,6 +6,23 @@ from caseweave_ops.types import Passage
 from conftest import record, decisions
 
 
+def test_compact_short_refs_restore_identity_and_do_not_guess_unknown_ref(make_runtime):
+    rows = [replace(record('cand_' + 'a' * 32), passages=(Passage('s', 'summary', '账号权限异常'),)),
+            replace(record('cand_' + 'b' * 32), passages=(Passage('s', 'summary', '账号权限正常'),))]
+    def handler(payload, request):
+        assert [r['ref'] for r in payload['records']] == ['@r1', '@r2']
+        return {'rows': [{'ref': '@r2', 'label': 'no', 'confidence': .9},
+                         {'ref': '@r1', 'label': 'yes', 'confidence': .8}]}
+    rt = make_runtime(handler)
+    rt.judge_mode = 'compact_binary'
+    output = asyncio.run(judge_batch(rt, rows, '账号权限异常', require_source=False))
+    assert [(d.ref, d.label) for d in output] == [(rows[0].ref, 'accept'), (rows[1].ref, 'exclude')]
+    rt = make_runtime(lambda p, r: {'rows': [{'ref': '@r9', 'label': 'yes', 'confidence': .8}]})
+    rt.judge_mode = 'compact_binary'
+    output = asyncio.run(judge_batch(rt, rows[:1], '账号权限异常', require_source=False))
+    assert output[0].label == 'undetermined' and output[0].reason == 'missing_or_duplicate_output'
+
+
 def test_compact_binary_keeps_actual_evidence_without_second_review(make_runtime):
     requests = []
     def handler(payload, request):

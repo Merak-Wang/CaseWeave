@@ -38,7 +38,7 @@ function complementaryVectors(count: number) {
     return row.map(v => v / norm)
   })
 }
-type Row = { ref: string; alias: string; attributes: Record<string, unknown>; passages: { alias: string; field: string; origin: string; text: string }[] }
+type Row = { ref: string; record_ref?: string; alias: string; attributes: Record<string, unknown>; passages: { alias: string; field: string; origin: string; text: string }[] }
 class Principal extends TicketPrincipalProviderService {
   async resolve() { return { tenantId: 'online-synthetic', subjectId: 'reader', entitlementVersion: 'v1',
     purpose: 'ticket_retrieval' as const, attributes: {}, issuedAt: new Date().toISOString() } }
@@ -180,7 +180,8 @@ async function fixture(execution: SemanticExecutionOptions, flipFinalTeacher = f
           expect(input.records.length).toBeGreaterThan(0)
           payload = { rows: input.records.map(row => {
             expect(row.attributes).not.toHaveProperty('group_hashes'); expect(row.attributes).not.toHaveProperty('group_projection')
-            const id = bridge.refs.get(row.ref)!
+            expect(row.ref).toMatch(/^@r\d+$/)
+            const id = bridge.refs.get(row.record_ref ?? row.ref)!
             expect(id).toBeDefined(); expect(id).toBeLessThan(poolCount)
             const label = id % 2 ^ Number(flipFinalTeacher && bridge.finalRole(id))
             teacherLabels.set(id, label)
@@ -188,7 +189,7 @@ async function fixture(execution: SemanticExecutionOptions, flipFinalTeacher = f
             const passage = row.passages.find(p => p.field === 'summary')!
             expect(passage).toBeDefined()
             return { ref: row.alias, label: label ? 'yes' : 'no', confidence: .99 }
-          }) }
+          }).reverse() }
         } else { calls.main++; throw new Error('No main or real LLM generation is allowed by this synthetic test') }
         yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(randomUUID()), name: 'submit_result', arguments: JSON.stringify(payload) } }
         yield { type: 'finish', reason: { kind: 'tool-calls' } }

@@ -646,6 +646,9 @@ async def _judge_ready(runtime: Runtime, records: list[Record], instruction: str
 
 async def _call_judge(runtime, records, instruction, model_rows, compact, review,
         require_source, required_fields, cacheable, resolved_rows, use_cache, sampling, key):
+    # 紧凑判断只复制批内短引用；收到后由既有映射还原工单身份，不按返回位置猜测。
+    if compact:
+        model_rows = [{**row, 'record_ref': row['ref'], 'ref': row['alias']} for row in model_rows]
     result = await runtime.call("sem_filter", instruction,
         {"records": model_rows,
          **({"decision_format": "compact_binary"} if compact else {}),
