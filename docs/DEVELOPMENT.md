@@ -358,7 +358,6 @@ Remove-Item Env:RETRIEVAL_AGENT_REPLAY_SCALE
 | `pnpm model:serve` / `pnpm model:serve:rerank` | 启动默认或启用重排的 Python 服务；启动前同步相应依赖 |
 | `pnpm index:prepare` | 复用已构建的代码与已准备的开发数据，通过已有模型服务准备/复用向量索引；不隐式构建或下载 |
 | `pnpm model:smoke` / `pnpm model:probe` | 已有真实模型服务的检索与协议诊断 |
-| `pnpm model:eval` | 旧合成 Bronze 的 Provider-only 对照；不证明自然语言 Agent 任务质量 |
 | `pnpm graph:workspace` / `pnpm verify:workspace` | 从实际 package.json 生成依赖图，检查未声明导入和 DSH 装配限制；不规定测试文件对应关系或依赖许可表 |
 | `pnpm verify:release` | 复用已构建产物，打包并检查发布闭包、依赖及生产/评测隔离 |
 | `pnpm verify:install` | 复用已构建产物和开发语料，在临时目录验证安装、组合、启动与卸载；可能安装锁定的 DSH/npm 依赖，不下载语料或模型 |

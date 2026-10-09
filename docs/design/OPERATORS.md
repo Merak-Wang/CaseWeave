@@ -14,7 +14,7 @@
 
 `工作台任务 → task-worker/pre-step/sem_filter 工具 → SemanticOperators.filter → PythonOperatorBridge → server.Bridge.execute → invoke_rows → filter.sem_filter → online_group_filter`。
 
-`auto` 和 `learned` 进入同一固定128学习主干，`active` 是配置薄别名。学习范围为关键词OR与语义召回去重并集；缺少数值Provider报技术失败，不回退逐条强判。公开方法包括在线 `auto` 与无反馈 `dual_description_margin`、`name_gmm`、`kmeans`，判断模式为 `compact_binary` 或 `anyjev_l0`；不提供旧direct/baseline/cluster/frozen_teacher路径。
+`auto` 和 `learned` 进入同一固定128学习主干。学习范围为关键词OR与语义召回去重并集；缺少数值Provider报技术失败，不回退逐条强判。公开方法包括在线 `auto` 与无反馈 `dual_description_margin`、`name_gmm`、`kmeans`，判断模式为 `compact_binary` 或 `anyjev_l0`；旧active/direct/baseline/cluster/frozen_teacher入口已退出。
 
 Python 包的模块按职责收敛：三个算子各一文件，模型与数值块各一文件；`search.py` 保留现有一次规划与检索回调，`runtime.py` 统一模型回调、缓存和计量，`server.py` 仅提供常驻stdio服务。抽样归入 `features.py`，证据选择归入 `aggregate.py`，分发直接位于包入口。没有独立 JSONL、embedding 或 HTTP 模型适配，也没有第二套 Python 启动编排。
 
