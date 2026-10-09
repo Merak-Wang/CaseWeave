@@ -2,21 +2,21 @@
 
 本文说明系统的数据流、组件职责与状态边界。产品行为以 [产品规格](PRODUCT_REQUIREMENTS.md) 为准，实际包结构见 [生成依赖图](WORKSPACE_GRAPH.md)。
 
-查询理解先生成查询计划，再由 MySQL 与 Milvus 并行执行关键词和向量召回；自定义检索对排序前128条由S2生成伪标签，训练择优投票预测其余，最终是集合进入MySQL任务状态并交付。浏览器工作台订阅持久事件，报告与下载绑定同一确认结果版本。Wiki 使用固定版本读取和异步学习发布；检索质量及知识收益需在指定数据与模型下评测。
+查询理解先生成查询计划，再由当前 Provider 并行执行关键词和向量召回；自定义检索对排序前128条由S2生成伪标签，训练择优投票预测其余，最终是集合进入MySQL任务状态并交付。当前三服务试用读取只读JSONL，关键词与向量索引由模型服务提供；完整数据库模式配置MySQL/Milvus Provider。浏览器工作台订阅持久事件，报告与下载绑定同一结果版本。Wiki 使用固定版本读取和异步学习发布；检索质量及知识收益需在指定数据与模型下评测。
 
 ## 1. 主链与部署形态
 
-采用“持久任务协调器 + DSH 主 Agent/领域专家 + 检索数据面 + 浏览器工作台”。协调器管理可恢复任务和确定性边界，DSH 管模型运行与专家上下文，MySQL/Milvus 承载实际查询。默认采用单机部署，持久任务队列由 MySQL 管理。
+采用“持久任务协调器 + DSH 主 Agent/领域专家 + 检索数据面 + 浏览器工作台”。协调器管理可恢复任务和确定性边界，DSH 管模型运行与专家上下文，当前 Provider 承载实际查询。默认采用单机部署，持久任务队列由 MySQL 管理；工单JSONL与MySQL/Milvus两种数据面按配置选用。
 
-完整容器部署包含 Node.js/DSH 应用、MySQL、Milvus、Python/FastAPI 算子服务和模型服务。源码开发也支持宿主 Node.js 连接容器或宿主模型服务。模型权重只读加载，缓存单独持久化；退出宿主 Node.js 不停止 Docker 服务。部署规则见 [查询设计](design/RETRIEVAL.md#模型服务部署边界)，命令见 [开发与运行](DEVELOPMENT.md)。
+完整数据库配置包含 Node.js/DSH 应用、MySQL、Milvus和模型服务；Python算子在应用内以常驻stdio执行，不再单独启动算子容器。已验三服务试用使用只读JSONL，省去Milvus。源码开发也支持宿主 Node.js 连接容器或宿主模型服务。模型权重只读加载，缓存单独持久化；退出宿主 Node.js 不停止 Docker 服务。部署规则见 [查询设计](design/RETRIEVAL.md#模型服务部署边界)，命令见 [开发与运行](DEVELOPMENT.md)。
 
 ```mermaid
 flowchart TD
   U[浏览器工作台] -->|查询、补充、反馈| API[产品 API 与任务协调器]
   API --> Q[Python 查询规划，经 DSH 调用模型]
-  API --> V[原始Query向量与Milvus cosine>=0.75]
-  Q --> K[MySQL 关键词 OR 全部命中]
-  Q --> V2[语义改写与 Milvus 召回]
+  API --> V[原始Query向量 cosine>=0.75]
+  Q --> K[当前 Provider 关键词 OR 全部命中]
+  Q --> V2[语义改写向量召回]
   V2 --> C[关键词命中与语义召回按工单身份去重并集]
   K --> C
   C --> O[Python filter：候选并集排序前128标注、择优投票预测其余]
@@ -50,7 +50,7 @@ flowchart TD
 | 组件 | 责任与输入/输出 | 技术起点与可替换边界 |
 | --- | --- | --- |
 | Query Understanding | 原句、补充、字段目录、Wiki → 自然语言判据、宽召回表达、算子计划 | Python 一次结构化规划，TypeScript 保留契约和准入 |
-| Python 算子服务 | 授权记录 → 三态判断、排序或有来源的派生产物 | 常驻 FastAPI/WebSocket 或本地 stdio；模型经 DSH，数据库经 Host 回调 |
+| Python 算子服务 | 授权记录 → 是/否判断、排序或有来源的派生产物 | 常驻 FastAPI/WebSocket 或本地 stdio；模型经 DSH，数据库经 Host 回调 |
 | Retrieval Provider | 可信主体、查询计划 → 可验证来源的分页候选、片段、执行边界 | MySQL 编译/读取与 Milvus 适配；JSONL 是导入源及对照 Provider |
 | Python 模型服务 | 批量 embedding、可选 rerank、分析计算 → 带模型身份的产物 | 复用 FastAPI/PyTorch 常驻服务；不再每次传整库并重做排名 |
 | Task Coordinator / Controller | 命令、模型决策、工具结果 → 合法且持久的任务变化 | Node/TypeScript；并行 I/O、按任务短事务提交 |

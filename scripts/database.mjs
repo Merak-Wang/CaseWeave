@@ -4,6 +4,7 @@ import { TicketDatabase, MilvusClient, buildIndex, queryDocument, fieldCapabilit
 import { parseTicketDatasetJsonl } from '../packages/provider-local/lib/index.js'
 import { ModelServiceClient } from '../packages/model-service-client/lib/index.js'
 import { compileQueryPlan } from '../packages/query-understanding/lib/index.js'
+import { EMBEDDING_INSTRUCTION } from '../packages/model-service-client/lib/ranking/index.js'
 import { evaluateQuery } from '../packages/contracts/lib/index.js'
 
 const command = process.argv[2]
@@ -11,15 +12,20 @@ const options = Object.fromEntries(process.argv.slice(3).map(value => { const at
 const db = new TicketDatabase(process.env.RETRIEVAL_AGENT_MYSQL_URL)
 const milvus = new MilvusClient(process.env.RETRIEVAL_AGENT_MILVUS_URL, process.env.RETRIEVAL_AGENT_MILVUS_TOKEN)
 const identity = { model: 'Qwen/Qwen3-Embedding-0.6B', revision: '97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3', dimensions: 1024, normalization: 'l2', metric: 'COSINE', chunkChars: 360, chunkVersion: 'field-codepoints-v3' }
+// 新建标题摘要索引与 Provider 使用同一投影；既有完整字段索引保留原身份。
+if (process.env.RETRIEVAL_AGENT_DOCUMENT_PROJECTION === 'canonical-title-abstract-v1') Object.assign(identity, {
+  documentProjection: 'canonical-title-abstract-v1', chunkVersion: 'canonical-title-abstract-codepoints-v1',
+  pooling: 'last_token', queryInstruction: EMBEDDING_INSTRUCTION,
+})
 const model = new ModelServiceClient({ baseUrl: process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012', embeddingModel: identity.model, embeddingRevision: identity.revision, embeddingDimensions: identity.dimensions, defaultDeadlineMs: 120_000 })
-const dataset = options.dataset ?? 'esft-development'
+const dataset = options.dataset ?? process.env.RETRIEVAL_AGENT_DATASET_ID ?? 'esft-development'
 const report = { command, dataset, startedAt: new Date().toISOString() }
 let lastProgress = 0
 const progress = (completed, total) => { if (Date.now() - lastProgress > 10_000 || completed === total) { console.log(JSON.stringify({ completed, total, at: new Date().toISOString() })); lastProgress = Date.now() } }
 try {
   await db.migrate()
   if (command === 'import' || command === 'prepare') {
-    const path = resolve(options.path ?? 'data/tickets/esft/summary-train.jsonl')
+    const path = resolve(options.path ?? (process.env.RETRIEVAL_AGENT_DATA_PATH?.trim() || 'data/tickets/esft/summary-train.jsonl'))
     const records = parseTicketDatasetJsonl(await readFile(path, 'utf8'))
     const started = performance.now()
     report.generation = await db.importRecords(dataset, records, options.watermark ?? records[0].sourceVersion, n => progress(n, records.length))

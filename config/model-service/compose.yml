@@ -5,6 +5,8 @@ x-model-image: &model-image
   build:
     context: ../..
     dockerfile: config/model-service/Dockerfile
+    args:
+      UV_IMAGE: ${CASEWEAVE_BUILD_UV_IMAGE:-ghcr.io/astral-sh/uv:0.12.10@sha256:2bb3ebca0a796a155094a27773d290c4b074572e6107f171d88d086682fd2500}
   environment: &model-environment
     RETRIEVAL_AGENT_RERANKER_ENABLED: ${RETRIEVAL_AGENT_RERANKER_ENABLED:-false}
     OMP_NUM_THREADS: ${RETRIEVAL_AGENT_MODEL_THREADS:-4}

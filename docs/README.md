@@ -9,7 +9,7 @@
 | 查询范围、召回并集、证据、反馈和交付规则 | [产品规格](PRODUCT_REQUIREMENTS.md) |
 | 系统组件、状态存储与数据流 | [架构说明](ARCHITECTURE.md) |
 | 关键词、向量召回和索引一致性 | [检索设计](design/RETRIEVAL.md) |
-| Python 语义算子、抽样预测、自动重试与额度计量 | [算子设计](design/OPERATORS.md) |
+| Python 语义算子、固定前128标注与投票、自动重试及计量 | [算子设计](design/OPERATORS.md) |
 | Agent 调度、领域专家、取消与恢复 | [Agent 运行](design/AGENT_RUNTIME.md) |
 | 工单分层、上下文容量和引用身份 | [上下文设计](design/CONTEXT.md) |
 | 页面交互、报告和完整结果下载 | [工作台与交付](design/WORKBENCH.md) |
@@ -20,6 +20,8 @@
 | Workspace 包与依赖关系 | [生成依赖图](WORKSPACE_GRAPH.md) |
 
 产品规格描述行为要求，设计文档解释实现与约束。检索质量和性能需要结合实际数据、模型、部署配置及对应评测结果判断。
+
+已有授权JSONL工单和权重时，从 [三服务GPU试用](DEVELOPMENT.md#三服务-gpu-试用) 启动；MySQL/Milvus完整数据配置另见开发说明。三服务入口的真实数据试用不等于生产数据库迁移或远端上线验收。
 
 常见问题可直接从以下入口阅读：
 

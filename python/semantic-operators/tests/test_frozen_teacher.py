@@ -11,7 +11,7 @@ from test_learning_sets import numeric_port
 
 def forbid_fitting(monkeypatch):
     def fail(*args, **kwargs): raise AssertionError('Frozen teacher must not fit, vote or cluster')
-    for target in ('caseweave_ops.filter.fit_models', 'caseweave_ops.baseline.partition',
+    for target in ('caseweave_ops.models._fit', 'caseweave_ops.baseline.partition',
                    'caseweave_ops.baseline.vote', 'caseweave_ops.baseline.cluster_filter'):
         monkeypatch.setattr(target, fail)
 
@@ -27,19 +27,20 @@ def test_frozen_teacher_uses_whole_scope_including_missing_features_and_unknown(
         'batch_size': 2, 'recall_scope_key': 'synthetic-full-union',
         'options': {'block_size': 32, 'proposal': 'linear', 'accept_error': .99}})))
     values = [event['value'] for event in events]
-    assert reads == list(range(len(reads))) and len(values) < 257 and not predictions
+    assert reads == list(range(len(reads))) and len(values) == 257 and not predictions
     assert {value['ref'] for value in values} == {str(i) for i in range(len(values))}
     unknown = next(value for value in values if value['ref'] == '5')
     assert unknown['label'] == 'undetermined' and unknown['confidence'] is None
-    assert rt.model.calls == 128
+    assert rt.model.calls == 129
     last = updates[-1]
-    assert last['stop_reason'] == 'model_unknown' and last['completion_basis'] == 'input_enumeration'
+    assert last['stop_reason'] == 'error' and last['completion_basis'] == 'input_enumeration'
+    assert last['undetermined_records'] == 1  # 遍历完成仍保留真实技术缺项，不补为no。
     assert last['scope_records'] == last['teacher_unique_records'] == len(values)
     # 此替身没有population_count；未枚举尾部不能宣称已知全集数量。
     assert last['corpus_records'] == len(reads)
     assert last['fit_count'] == 0 and last['online_feedback_training'] is False
     assert last['regime'] == 'frozen_teacher' and last['unresolved'] >= 1
-    assert last['complete_scope_coverage'] is False
+    assert last['complete_scope_coverage'] is True
     assert last['positive_records'] + last['negative_records'] + last['undetermined_records'] == len(values)
     assert 'quality' not in last and 'selected_model' not in last
 

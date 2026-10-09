@@ -4,10 +4,17 @@ x-app: &app
   build:
     context: ../..
     dockerfile: config/app/Dockerfile
+    args:
+      UV_IMAGE: ${CASEWEAVE_BUILD_UV_IMAGE:-ghcr.io/astral-sh/uv:0.12.10@sha256:2bb3ebca0a796a155094a27773d290c4b074572e6107f171d88d086682fd2500}
   init: true
   environment:
-    CASEWEAVE_OPERATORS_URL: http://semantic-operators:8013
-    CASEWEAVE_OPERATORS_TOKEN: ${CASEWEAVE_OPERATORS_TOKEN:-}
+    RETRIEVAL_AGENT_STORAGE: mysql_milvus
+    RETRIEVAL_AGENT_DATASET_ID: ${RETRIEVAL_AGENT_DATASET_ID:-esft-development}
+    RETRIEVAL_AGENT_DATA_PATH: ${RETRIEVAL_AGENT_DATA_PATH:-}
+    RETRIEVAL_AGENT_DOCUMENT_PROJECTION: ${RETRIEVAL_AGENT_DOCUMENT_PROJECTION:-ticket-search-projection-v1}
+    RETRIEVAL_AGENT_MYSQL_URL: ${RETRIEVAL_AGENT_MYSQL_URL:-mysql://root@mysql:3306/retrieval_agent}
+    RETRIEVAL_AGENT_MILVUS_URL: ${RETRIEVAL_AGENT_MILVUS_URL:-http://milvus:19530}
+    RETRIEVAL_AGENT_MODEL_SERVICE_URL: ${RETRIEVAL_AGENT_MODEL_SERVICE_URL:-http://model-service:8012}
     RETRIEVAL_AGENT_BROWSER_LLM_PROVIDER: ${RETRIEVAL_AGENT_BROWSER_LLM_PROVIDER:-}
     RETRIEVAL_AGENT_BROWSER_LLM_MODEL: ${RETRIEVAL_AGENT_BROWSER_LLM_MODEL:-}
     RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL: ${RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL:-}
@@ -16,6 +23,7 @@ x-app: &app
     RETRIEVAL_AGENT_BROWSER_LLM_CONTEXT_WINDOW: ${RETRIEVAL_AGENT_BROWSER_LLM_CONTEXT_WINDOW:-}
     RETRIEVAL_AGENT_BROWSER_LLM_MAX_TOKENS: ${RETRIEVAL_AGENT_BROWSER_LLM_MAX_TOKENS:-}
     RETRIEVAL_AGENT_BROWSER_LLM_REASONING: ${RETRIEVAL_AGENT_BROWSER_LLM_REASONING:-off}
+    RETRIEVAL_AGENT_MODEL_TRANSPORT_MODULE: ${RETRIEVAL_AGENT_MODEL_TRANSPORT_MODULE:-}
     RETRIEVAL_AGENT_MAIN_MODEL_API_KEY: ${RETRIEVAL_AGENT_MAIN_MODEL_API_KEY:-}
     RETRIEVAL_AGENT_WIKI_LEARNING: ${RETRIEVAL_AGENT_WIKI_LEARNING:-1}
     RETRIEVAL_AGENT_REVIEW_BATCH_SIZE: ${RETRIEVAL_AGENT_REVIEW_BATCH_SIZE:-8}
@@ -27,22 +35,6 @@ x-app: &app
     - app-wiki:/app/wiki
     - app-output:/app/output
 services:
-  semantic-operators:
-    image: ${CASEWEAVE_OPERATORS_IMAGE:-caseweave-semantic-operators:0.3.0}
-    build:
-      context: ../..
-      dockerfile: config/semantic-operators/Dockerfile
-    init: true
-    environment:
-      CASEWEAVE_OPERATORS_TOKEN: ${CASEWEAVE_OPERATORS_TOKEN:-}
-    volumes:
-      - app-state:/app/.cache
-    restart: on-failure:3
-    healthcheck:
-      test: [CMD, python, '-c', "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8013/health')"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
   app:
     <<: *app
     ports: ['127.0.0.1:${RETRIEVAL_AGENT_WEB_PORT:-3080}:3080']
@@ -50,7 +42,6 @@ services:
       mysql: {condition: service_healthy}
       milvus: {condition: service_healthy}
       model-service: {condition: service_healthy}
-      semantic-operators: {condition: service_healthy}
     restart: on-failure:3
     stop_grace_period: 30s
     healthcheck:

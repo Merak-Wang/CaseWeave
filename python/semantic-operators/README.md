@@ -76,6 +76,7 @@ Unknown measurements remain null. Full learning runs through the existing Host's
 numerical Provider.
 
 `CASEWEAVE_OPERATORS_URL=http://127.0.0.1:8013` selects the private FastAPI WebSocket.
+This external transport remains an explicit integration option; normal app/compose startup uses the app's persistent stdio worker and does not create a separate operators container.
 An optional `CASEWEAVE_OPERATORS_TOKEN` must match both endpoints. Without a service URL,
 the Host runs `python -m caseweave_ops.server --stdio --state <path>` as its persistent
 NDJSON worker. See the [operator design](../../docs/design/OPERATORS.md)

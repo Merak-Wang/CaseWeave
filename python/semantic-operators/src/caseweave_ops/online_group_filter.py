@@ -34,8 +34,7 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
         supplied.pop(obsolete, None)
     if set(supplied) - set(cfg):
         raise ValueError("Unknown online learning option")
-    # Explicit fusion but absent methods keeps a six-method default; historical
-    # missing-both options never reach this path.
+    # 默认与显式入口使用同一六模型库；仅投票配置决定是否融合。
     cfg.update(supplied)
     cfg.update(sample_size=128, exploration_fraction=0.)
     cfg["pool_size"] = max(128, cfg["pool_size"])

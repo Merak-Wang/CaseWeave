@@ -18,7 +18,7 @@ const quote = value => '"' + value.replaceAll('\\', '\\\\').replaceAll('"', '\\"
 
 function fixture({ configured = true, mode = '' } = {}) {
   const dir = mkdtempSync(join(parent, 'path with spaces-'))
-  for (const path of ['start.cmd', 'setup.sh', 'setup.ps1', 'setup.cmd', 'scripts/docker-windows.ps1', '.env.example', 'config/database', 'config/model-service', 'config/semantic-operators', 'config/app']) {
+  for (const path of ['start.cmd', 'setup.sh', 'setup.ps1', 'setup.cmd', 'scripts/docker-windows.ps1', 'scripts/model-image-cache.ps1', '.env.example', 'config/database', 'config/model-service', 'config/app', 'pyproject.toml', 'uv.lock', 'python/evals/pyproject.toml', 'python/model-service', 'python/semantic-operators/pyproject.toml', 'architecture/model-manifest.json', 'config/query-domain-lexicon.json']) {
     cpSync(join(root, path), join(dir, path), { recursive: true, filter: source => !source.split(/[\\/]/u).includes('node_modules') })
   }
   const env = { ...process.env }
@@ -79,8 +79,8 @@ test('first-run public wizard preserves special characters and configures all de
   assert.match(result.stdout, /部署完成：http:\/\/127.0.0.1:3080\/retrieval/u)
   const actual = f.config().split(/\r?\n/).find(line => line.startsWith('RETRIEVAL_AGENT_MAIN_MODEL_API_KEY='))?.split('=').slice(1).join('=')
   assert.equal(actual, sampleKey)
-  assert.equal(f.calls().length, 8)
-  assert.ok(f.calls().some(call => call.includes('build') && call.includes('semantic-operators')))
+  assert.ok(f.calls().some(call => call.includes('build') && call.includes('app')))
+  assert.ok(f.calls().every(call => !call.includes('semantic-operators')))
 })
 
 test('index failure stops before app startup; rerun preserves configuration and never deletes volumes', () => {
@@ -149,9 +149,9 @@ for (const args of [['start'], []]) test(`daily start ${JSON.stringify(args)} bu
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /工作台已启动/u)
   const calls = f.calls()
-  assert.equal(calls.length, 2)
-  assert.ok(calls[0].includes('build') && calls[0].includes('semantic-operators') && calls[0].includes('model-service'))
-  assert.ok(calls[1].includes('up') && calls[1].includes('--no-build') && calls[1].includes('never'))
+  assert.ok(calls.some(call => call.includes('build') && call.includes('app')))
+  assert.ok(calls.every(call => !call.includes('semantic-operators')))
+  assert.ok(calls.at(-1).includes('up') && calls.at(-1).includes('--no-build') && calls.at(-1).includes('never'))
   assert.ok(calls.every(call => !call.includes('run')))
   assert.equal(readFileSync(join(f.dir, '.env'), 'utf8'), before)
 })
@@ -175,14 +175,23 @@ test('start initializes a fresh checkout without redirecting the user to another
   const result = f.run(['start'], ['cpu', 'deepseek', 'setup-demo', 'https://example.invalid/v1', sampleKey, ''].join('\n'))
   assert.equal(result.status, 0, result.stderr)
   assert.ok(existsSync(join(f.dir, '.env')))
-  assert.equal(f.calls().length, 8)
+  assert.ok(f.calls().at(-1).includes('app') && f.calls().at(-1).includes('up'))
 })
 
 test('start initializes an existing configuration when the application has never been created', () => {
   const f = fixture({ mode: 'uninitialized' })
   const result = f.run(['start', '--non-interactive'])
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(f.calls().length, 8)
+  assert.ok(f.calls().at(-1).includes('app') && f.calls().at(-1).includes('up'))
+})
+
+test('configured production ticket file skips example download but still imports and indexes', () => {
+  const f = fixture({ mode: 'uninitialized' })
+  writeFileSync(join(f.dir, '.env'), readFileSync(join(f.dir, '.env'), 'utf8') + '\nRETRIEVAL_AGENT_DATA_PATH=/app/data/company.jsonl\n')
+  const result = f.run(['start', '--non-interactive'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(!f.calls().some(call => call.at(-1) === 'app-prepare'))
+  assert.ok(f.calls().some(call => call.includes('scripts/database.mjs') && call.at(-1) === 'prepare'))
 })
 
 test('build failure leaves running containers alone and never announces startup success', () => {
@@ -190,7 +199,8 @@ test('build failure leaves running containers alone and never announces startup 
   const result = f.run(['start'])
   assert.equal(result.status, 41, result.stderr)
   assert.ok(!result.stdout.includes('工作台已启动'))
-  assert.equal(f.calls().length, 1)
+  assert.equal(f.calls().filter(call => call.includes('build')).length, 1)
+  assert.ok(f.calls().every(call => !call.includes('up') && !call.includes('stop')))
 })
 
 test('explicit start --no-build reuses existing images without preparing data', () => {
@@ -206,5 +216,5 @@ test('daily startup failure returns the Docker exit code without claiming succes
   const result = f.run(['start'])
   assert.equal(result.status, 43, result.stderr)
   assert.ok(!result.stdout.includes('工作台已启动'))
-  assert.equal(f.calls().length, 2)
+  assert.ok(f.calls().at(-1).includes('up'))
 })

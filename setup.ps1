@@ -77,6 +77,18 @@ function Step([string]$label, [string[]]$command) {
     Write-Host "`n$label"
     Invoke-Compose @command
 }
+function Build-Application {
+    if (-not $build) { return }
+    $modelImage = if ($trial) { $script:config.CASEWEAVE_TRIAL_MODEL_IMAGE } else { $script:config.RETRIEVAL_AGENT_MODEL_IMAGE }
+    if (-not $modelImage) { $modelImage = if ($trial) { 'retrieval-agent-model-service:trial' } else { 'retrieval-agent-model-service:0.1.0-cu128' } }
+    $modelInputs = Get-ModelBuildFingerprint $PSScriptRoot $script:config.CASEWEAVE_BUILD_UV_IMAGE
+    if (Test-ModelImageCurrent $modelImage $modelInputs) {
+        Write-Host '模型构建输入未变化，复用已有模型镜像。'
+    } else {
+        Step '模型输入变化或镜像缺失，构建模型服务' @('build', '--build-arg', "CASEWEAVE_MODEL_INPUT_HASH=$modelInputs", 'model-service')
+    }
+    Step '构建应用更新（算子随应用部署）' @('build', 'app')
+}
 
 Push-Location $PSScriptRoot
 try {
@@ -132,17 +144,7 @@ try {
         if ($checkOnly) { Write-Host '三容器试用配置检查通过；未修改、构建或启动。'; exit 0 }
         switch ($action) {
             { $_ -in 'install', 'start' } {
-                if ($build) {
-                    $modelImage = $script:config.CASEWEAVE_TRIAL_MODEL_IMAGE
-                    if (-not $modelImage) { $modelImage = 'retrieval-agent-model-service:trial' }
-                    $modelInputs = Get-ModelBuildFingerprint $PSScriptRoot $script:config.CASEWEAVE_BUILD_UV_IMAGE
-                    if (Test-ModelImageCurrent $modelImage $modelInputs) {
-                        Write-Host '模型构建输入未变化，复用已有模型镜像。'
-                    } else {
-                        Step '模型输入变化或镜像缺失，构建模型服务' @('build', '--build-arg', "CASEWEAVE_MODEL_INPUT_HASH=$modelInputs", 'model-service')
-                    }
-                    Step '构建试用应用更新（复用缓存）' @('build', 'app')
-                }
+                Build-Application
                 Step '启动三容器试用并等待健康' @('up', '-d', '--wait', '--no-build', '--pull', 'never', 'mysql', 'model-service', 'app')
                 Write-Host "`n试用工作台已启动：http://127.0.0.1:$port/retrieval"
             }
@@ -156,13 +158,13 @@ try {
         Test-ComposeConfig
         switch ($action) {
             'start' {
-                if ($build) { Step '构建应用、算子和模型服务更新（复用 Docker 缓存）' @('build', 'app', 'semantic-operators', 'model-service') }
+                Build-Application
                 Step '启动更新后的服务，等待健康检查' @('up', '-d', '--wait', '--no-build', '--pull', 'never', 'app')
                 Write-Host "`n工作台已启动：http://127.0.0.1:$port/retrieval"
             }
             'stop' { Step '停止当前项目服务' @('stop', '--timeout', '60'); Write-Host '服务已停止，容器和数据卷保留。下次运行 start.cmd。' }
             'status' { Invoke-Compose ps --all }
-            'logs' { Invoke-Compose logs --tail 100 app model-service semantic-operators }
+            'logs' { Invoke-Compose logs --tail 100 app model-service }
         }
         exit 0
     }
@@ -191,11 +193,15 @@ try {
     if ($script:config.RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL -notmatch '^https?://\S+$') { throw '模型 API 地址必须是完整的 http:// 或 https:// 地址。' }
     Test-ComposeConfig
     if ($checkOnly) { Write-Host '仅完成 Docker/配置检查；未下载、构建、启动或验证主模型 API。'; exit 0 }
-    if ($build) { Step '[1/8] 构建应用、算子和模型服务镜像' @('build', 'app', 'semantic-operators', 'model-service') }
+    if ($build) { Build-Application }
     else { Write-Host '[1/8] 使用已有镜像' }
     Step '[2/8] 下载并校验模型（首次下载可能较慢）' @('run', '--rm', '--no-deps', 'model-prepare', 'prepare', '--download')
-    Step '[3/8] 启动数据库、算子与模型服务，等待健康检查' @('up', '-d', '--wait', '--no-build', 'mysql', 'milvus', 'model-service', 'semantic-operators')
-    Step '[4/8] 下载数据、清洗脱敏并校验' @('run', '--rm', '--no-deps', 'app-prepare')
+    Step '[3/8] 启动数据库与模型服务，等待健康检查' @('up', '-d', '--wait', '--no-build', 'mysql', 'milvus', 'model-service')
+    if ($script:config.RETRIEVAL_AGENT_DATA_PATH) {
+        Write-Host '[4/8] 使用已配置的只读工单文件，跳过示例数据下载。'
+    } else {
+        Step '[4/8] 下载数据、清洗脱敏并校验' @('run', '--rm', '--no-deps', 'app-prepare')
+    }
     Step '[5/8] 导入工单并建立向量索引（支持续跑）' @('run', '--rm', '--no-deps', 'app-prepare', 'node', 'scripts/database.mjs', 'prepare')
     Step '[6/8] 准备关键词索引' @('run', '--rm', '--no-deps', 'app-prepare', 'node', 'scripts/database.mjs', 'grams')
     Step '[7/8] 验证数据与检索索引' @('run', '--rm', '--no-deps', 'app-prepare', 'node', 'scripts/database.mjs', 'verify')

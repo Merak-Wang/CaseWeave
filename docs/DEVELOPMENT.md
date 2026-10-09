@@ -38,7 +38,7 @@
 
 默认数据库工作台位于 `/retrieval`。MySQL 保存任务、命令、事件与结果版本，DSH 执行主 Agent 和领域专家。关闭浏览器不取消后台任务；再次连接时重新校验访问资格。
 
-工作台按“线索召回 → 语义筛选 → 检索报告”展示，任务结束后仍可回看各阶段。报告由一次模型调用生成一至两段总结与引用；确认工单支持 CSV/JSONL 下载。DSH 的 token、生成速度、首 token 延迟和上下文压缩在任务中显示。普通终态补充在同任务内发起复核；新查询可使用“新任务：……”明确新建。CSV 只交付确认集合。
+工作台按“线索召回 → 语义筛选 → 检索报告”展示，任务结束后仍可回看各阶段。最终判断为是的工单支持 XLSX/CSV/JSONL 下载，报告与下载绑定同一结果版本。DSH 的 token、生成速度、首 token 延迟和上下文压缩在任务中显示。修改业务条件会影响后续判断；新问题可另建任务。下载不要求人工逐条确认。
 
 兼容同步入口 `POST /api/retrieval-agent/export` 接收 `{ sessionId, retrievalId, resultRevision, candidateRefs? }`。resultRevision 来自已重新授权的 presentation.result；省略 candidateRefs 下载全部确认工单，显式传入只允许确认子集。旧版本请求返回 409，未确认引用返回 400，来源失效/撤权会终止下载。当前每页读 100 条，CSV 响应默认最大 50 MB；持久 CSV/JSONL/Markdown 工件走下方“工作台、报告与持久下载验收”中的任务接口。
 
@@ -68,7 +68,7 @@ bash setup.sh --no-build                      # 复用现有应用/模型镜像
 bash setup.sh --env-file .env.local --check    # 检查另一份配置
 ```
 
-`start` 在缺少 `.env` 或 Compose 项目尚无 app 容器（包括停止的容器）时自动执行首次准备，因此复制好 `.env` 的新安装和准备中断也可继续使用同一入口。已有安装先执行 `docker compose build app semantic-operators model-service`，成功后再执行 `docker compose up -d --wait --no-build --pull never app`；构建失败不替换现有容器。Docker 复用未变化的构建层，Compose 更新变化的服务并启动依赖；不重复运行 model-prepare、app-prepare 或索引脚本。`start --no-build` 是显式跳过构建的入口。`install` 和 CPU/GPU 选项执行完整准备，`--check` 只检查配置。
+`start` 在缺少 `.env` 或 Compose 项目尚无 app 容器（包括停止的容器）时自动执行首次准备，因此复制好 `.env` 的新安装和准备中断也可继续使用同一入口。已有安装先执行 `docker compose build app model-service`，成功后再执行 `docker compose up -d --wait --no-build --pull never app`；构建失败不替换现有容器。Docker 复用未变化的构建层，Compose 更新变化的服务并启动依赖；不重复运行 model-prepare、app-prepare 或索引脚本。`start --no-build` 是显式跳过构建的入口。`install` 和 CPU/GPU 选项执行完整准备，`--check` 只检查配置。
 
 `stop` 使用 `compose stop --timeout 60`，给服务 60 秒退出时间；`status` 使用 `compose ps --all`，`logs` 读取有限日志。这三种管理操作要求已有 `.env`，不修改配置，也不运行主模型配置向导；即使模型凭据待修复，仍可停止或查看服务。应用容器存在但模型或数据卷损坏时，可显式运行 `setup.cmd install` 重新检查完整准备流程。
 
@@ -79,9 +79,9 @@ bash setup.sh --env-file .env.local --check    # 检查另一份配置
 向导按顺序执行以下入口；需要逐步排障时，在已填写 `.env` 的仓库根目录执行：
 
 ```sh
-docker compose build app semantic-operators model-service
+docker compose build app model-service
 docker compose run --rm --no-deps model-prepare prepare --download
-docker compose up -d --wait mysql milvus model-service semantic-operators
+docker compose up -d --wait mysql milvus model-service
 docker compose run --rm --no-deps app-prepare
 docker compose run --rm --no-deps app-prepare node scripts/database.mjs prepare
 docker compose run --rm --no-deps app-prepare node scripts/database.mjs grams
@@ -108,6 +108,14 @@ MySQL 数据文件位于 mysql-data 卷，Milvus/etcd 位于 milvus-data 卷。�
 应用镜像将固定 DSH runtime、依赖 fetch 与源码 build 分层。日常 start 执行缓存构建，源码未变化的层直接复用；源码变化后生成新镜像并应用到容器。构建耗时与资源占用取决于硬件和缓存状态。
 
 ## MySQL / Milvus 与持久任务入口
+
+### 导入自有工单文件
+
+完整数据库模式可读取已授权的JSONL，不必下载示例数据。在本地 `.env` 设置 `RETRIEVAL_AGENT_DATASET_ID`、容器内 `RETRIEVAL_AGENT_DATA_PATH` 与 `RETRIEVAL_AGENT_DOCUMENT_PROJECTION`；通过本地Compose override将宿主文件只读挂载到该容器路径，`app` 与 `app-prepare` 都需使用相同挂载。把override追加到 `COMPOSE_FILE` 后运行正常 `start.cmd`，首次初始化跳过示例下载，仍执行导入、索引及一致性检查。仅设置环境路径不会自动挂载宿主文件。
+
+标题摘要数据使用 `canonical-title-abstract-v1`；完整字段数据使用对应完整投影。导入、建索引与运行Provider必须采用相同数据集和投影，避免沿用不同文本输入的向量索引。工单文件保留真实身份、标题、摘要及来源元数据；标题摘要数据不伪造原文。数据库CLI默认读取这组环境配置，显式 `--dataset` / `--path` 可以覆盖单次命令。
+
+这个入口将文件导入MySQL并向Milvus发布索引，不是实时连接生产Mongo。运行前需自行提供合规数据与模型配置；完整部署常驻app、model-service、MySQL、Milvus及etcd五个服务，Python算子在app内常驻stdio运行。业务准确率、负载和远端生产发布需在目标环境分别验收。
 
 首次使用推荐根 [README 的完整容器步骤](../README.md#快速开始)。[应用 Dockerfile](../config/app/Dockerfile) 安装 Node 24.13.0、pnpm 10.28.2、workspace 锁文件与独立 [DSH runtime 锁文件](../config/app/runtime/pnpm-lock.yaml)，并以非 root 用户运行。下面的宿主命令用于源码开发；不要求完整容器路径的使用者安装宿主 Node/Python。
 
@@ -242,21 +250,7 @@ pnpm exec vitest run packages/agent-plugin/src/durable-service.spec.ts -t 'phase
 
 浏览器人工操作夹具设置 `RETRIEVAL_AGENT_PHASE5_BROWSER=1`，运行 `-t 'A14 phase5 browser fixture'` 后读取 `output/phase5/browser-fixture.json` 的地址；完成后向其中 `completionFile` 指定的本次文件写入无换行的 `done`。夹具使用真实 MySQL/DSH 和受控业务资料；结束信号只终止本次夹具，不取消用户真实任务。规模专项可同时设置该变量保留临时工作台供查看，完成后向 `output/phase5/scale-browser-finished` 写入无换行 `done`；再次运行前移除这个由自己生成的结束信号。必须检查终态与下载，不能手填确认结果。
 
-工作台浏览器回归使用正式 HTML、构建后的脚本、公共任务接口与实际文件保存。启动上述新鲜浏览器夹具后，在另一终端执行（将 `夹具URL` 替换为输出地址）：
-
-```powershell
-npx --yes --package @playwright/cli playwright-cli -s=workbench open '夹具URL' --browser chrome
-node scripts/verify-workbench-browser.mjs --session=workbench --scenario=inputs --out=output/phase8/final-browser
-node scripts/verify-workbench-browser.mjs --session=workbench --scenario=delivery --out=output/phase8/final-browser
-node scripts/verify-workbench-browser.mjs --session=workbench --scenario=boundaries --out=output/phase8/final-browser
-node scripts/verify-workbench-browser.mjs --session=workbench --scenario=files --out=output/phase8/final-browser
-```
-
-顺序分别为：丢回执重试、问题恢复/回复与可选反馈；报告引用、Markdown/CSV/完整 JSONL 保存、四种宽度与键盘；跨标签页条件修订及迟到报告/详情；损坏文件拒绝保存及工件状态。脚本中错误/加载等视图使用明确标注的响应故障注入，不能替代后台同场景验收。runner 将 CLI 的结构化结果保存为 JSON/log，任何断言失败、异常或缺少结果都返回非零退出码；不能只看 Playwright CLI 的退出码。
-
-规模夹具完成后，在其 `scale-browser.json` 地址打开工作台，再用 `--scenario=scale` 检查 30 条 DOM、第二页滚动、迟到详情与全部 1,234 条下载。报告/文件输出固定在 `output/phase8`，截图在 `output/playwright`；`--out` 指定的是结构化检查记录目录。这些浏览器脚本消费受控夹具；真实 DeepSeek/ESFT 任务仍需在 `/retrieval` 操作并用 `accept:task --expect=独立期望` 单独验收。
-
-已有可交付报告的任意真实任务可以使用 `--scenario=report-layout`，检查四种宽度的长哈希换行，以及引用展开后返回相同阅读位置和焦点。它不提交新输入，也不调用报告扩写模型。
+真实工作台验收使用当前任务的查询回执、阶段状态、分页与刷新、完整是集合及实际下载文件；用独立身份与结果版本核对XLSX，不能沿用旧phase8脚本的独立复核或人工反馈预期。受控夹具测试与真实模型任务分别记录。
 
 ## OpenCode Go 会话路由
 

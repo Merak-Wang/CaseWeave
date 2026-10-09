@@ -72,6 +72,6 @@ test('only an existing image with the matching input label skips model build', a
   assert.equal(run(root, mock, { CASEWEAVE_TEST_DOCKER_EXIT: '0', CASEWEAVE_TEST_LABEL: '{"org.caseweave.model-inputs":"stale-hash"}' }), 'False')
   assert.equal(run(root, mock, { CASEWEAVE_TEST_DOCKER_EXIT: '1', CASEWEAVE_TEST_LABEL: '' }), 'False')
   const setup = await readFile(resolve('setup.ps1'), 'utf8')
-  assert.ok(setup.includes("Step '构建试用应用更新（复用缓存）' @('build', 'app')"))
+  assert.ok(setup.includes("Step '构建应用更新（算子随应用部署）' @('build', 'app')"))
   assert.ok(setup.includes('CASEWEAVE_MODEL_INPUT_HASH=$modelInputs'))
 })

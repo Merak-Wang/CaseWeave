@@ -15,9 +15,13 @@
 - **领域知识辅助**：主 Agent 按需调用领域专家与版本化 Wiki；经校验的检索经验可用于后续任务。
 - **运行计量**：工作台显示任务累计 token、生成速度、首 token 延迟和上下文压缩次数；供应商没有返回的数据会标为待计量。
 
-项目支持单机部署和浏览器使用；确认工单可导出为 CSV、JSONL，检索报告可下载为 Markdown。
+项目支持单机部署和浏览器使用；最终判断为是的工单集合可导出为 XLSX、CSV、JSONL，检索报告可下载为 Markdown。
 
 ## 快速开始
+
+已有授权工单数据和模型权重时，使用已验证的三服务入口 `start.cmd --trial`，打开 `http://127.0.0.1:3080/retrieval`。此模式从 `local.env.trial` 读取 JSONL 路径及模型配置，业务数据只读，MySQL 保存任务和结果，embedding 服务负责索引和数值特征；不用启动 Milvus。配置步骤见 [三服务 GPU 试用](docs/DEVELOPMENT.md#三服务-gpu-试用)。
+
+该入口可对真实生产数据的授权副本进行本机试用，不会自动连接生产 Mongo，也不代表已完成远端生产上线。下面不带 `--trial` 的入口准备示例数据及完整 MySQL/Milvus 部署；生产数据库数据映射、导入及负载需另行验证。
 
 获取源码可用 Git 或下载源码包。Windows 直接运行 `start.cmd`：自动准备 WSL 2，缺少 Docker 时从官方下载并安装 Docker Desktop（含 Compose），未运行时自动启动；无需 Git Bash。Linux 需先安装 Docker 和 Compose v2.20 或以上版本。GPU 模式需要 NVIDIA GPU 及可用的容器 GPU 支持。
 
@@ -104,7 +108,7 @@ bash setup.sh
 
 ## 技术与文档
 
-应用使用 TypeScript / Node.js 和 DSH 运行 Agent，以 MySQL 保存工单与任务状态、Milvus 承载向量检索，Python 模型服务提供查询分析与 embedding，浏览器工作台提供交互入口。
+应用使用 TypeScript / Node.js 和 DSH 运行 Agent。当前三服务试用使用只读 JSONL 工单、MySQL 持久任务与结果、Python 模型服务的向量索引和 embedding；完整数据库配置提供 MySQL 工单与 Milvus 向量 Provider。两种数据模式的生产质量和性能须分别验证，浏览器工作台共用同一入口。
 
 - [交互式产品介绍](docs/project-introduction.html)：下载后用浏览器打开，体验检索流程与证据分层示意。
 - [文档目录](docs/README.md)：按使用、部署和技术主题查阅。
