@@ -19,7 +19,7 @@ export function compactRetrievalSurface(agent: Agent, options: { freshTurn?: boo
   }
   const old = nodes.slice(0, keepFrom)
   if (!old.length || (old.length < 2 && !options.freshTurn)) return
-  const note = createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
+  const note = createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot',
     sections: [{ name: options.freshTurn ? 'retrieval-agent:history' : 'retrieval-agent:compaction', text: '历史已外置；当前任务要求、覆盖、判断导航和可引用证据以随后最新工作视窗为准。可用 ticket_read 取回旧候选与来源片段。' },
       ...(!options.freshTurn ? [{ name: 'retrieval-agent:compaction-details', text: JSON.stringify({ reason: 'working_set', beforeTokens: tokens, thresholdTokens: threshold, limit: window, at: new Date().toISOString() }) }] : [])] },
     content: [{ type: 'text', text: '历史工具载荷已外置并保留原始日志；当前用户要求与证据见最新工作视窗，旧事实可按稳定引用重读。' }] })

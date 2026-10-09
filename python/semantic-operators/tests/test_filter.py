@@ -20,11 +20,11 @@ def test_acceptance_requires_independent_missing_criterion_review(make_runtime):
         if p['review_stage'] == 'criterion_gaps':
             assert len(p['records']) == 1
             assert 'label' not in p['records'][0] and 'reason' not in p['records'][0]
-            return decisions(p, r, 'undetermined')
+            return decisions(p, r, 'exclude')
         return decisions(p, r)
     rt = make_runtime(handler)
     out = asyncio.run(judge_batch(rt, [record()], '同时满足对象、原状态和变化'))
-    assert out[0].label == 'undetermined' and rt.model.calls == 2
+    assert out[0].label == 'exclude' and out[0].confidence == 1.0 and rt.model.calls == 2
 
 
 def test_judgment_prompt_contains_only_query_records_knowledge_and_output(make_runtime):
@@ -41,12 +41,17 @@ def test_judgment_prompt_contains_only_query_records_knowledge_and_output(make_r
     for request in seen:
         system, user = request['messages']
         assert '查询解绑受阻工单' in system['content']
+        assert 'accept（相关）或exclude（不相关）' in system['content']
+        assert 'undetermined' not in system['content']
         knowledge = json.loads(system['content'].split('\n相关Wiki：')[1])
         assert knowledge == {'entries': [{'id': 'status', 'title': '解绑状态', 'bodyMarkdown': '未完成不能当作已完成。'}]}
         payload = json.loads(user['content'])
         assert set(payload) == {'records', 'review_stage', 'output_instructions', 'require_source', 'required_fields'}
-        assert len(payload['output_instructions']) < 250
-        assert set(('accept', 'exclude', 'undetermined')) <= set(request['schema']['properties']['rows']['items']['properties']['label']['enum'])
+        assert 'confidence' in payload['output_instructions'] and '选择最贴近查询的一项' in payload['output_instructions']
+        assert request['schema']['properties']['rows']['items']['properties']['label']['enum'] == ['accept', 'exclude']
+        assert request['schema']['properties']['rows']['items']['properties']['confidence'] == {
+            'type': 'number', 'minimum': 0, 'maximum': 1}
+        assert 'undetermined' not in payload['output_instructions']
 
 
 def test_missing_and_duplicate_remain_unknown(make_runtime):
@@ -70,7 +75,7 @@ def test_wrong_record_citation_rejected(make_runtime):
 
 def test_short_aliases_restore_exact_evidence_and_cache(make_runtime):
     def handler(p, r):
-        return {"rows": [{"ref": row["alias"], "label": "accept", "knowledge_ids": [], "reason": "原文匹配",
+        return {"rows": [{"ref": row["alias"], "label": "accept", "confidence": .83, "knowledge_ids": [], "reason": "原文匹配",
             "citations": [{"ref": row["alias"], "passage_id": row["passages"][0]["alias"],
                 "quote": row["passages"][0]["text"]}]} for row in p["records"]]}
     rt = make_runtime(handler)
@@ -79,16 +84,18 @@ def test_short_aliases_restore_exact_evidence_and_cache(make_runtime):
     second = asyncio.run(judge_batch(rt, rows, "x"))
     assert [d.ref for d in first] == [r.ref for r in rows]
     assert all(d.label == "accept" and d.citations[0].passage_id == r.passages[0].id for d, r in zip(first, rows))
+    assert all(d.confidence == .83 for d in first + second)
     assert rt.model.calls == 2 and all(d.basis == "reused_model" for d in second)
 
 
 def test_short_alias_does_not_repair_wrong_passage(make_runtime):
     row = replace(record("opaque"), passages=(Passage("first", "source.raw_dialogue", "已经恢复"),
         Passage("second", "source.raw_dialogue", "仍然不能使用")))
-    rt = make_runtime(lambda p, r: {"rows": [{"ref": "@r1", "label": "accept", "knowledge_ids": [], "reason": "不能使用",
+    rt = make_runtime(lambda p, r: {"rows": [{"ref": "@r1", "label": "accept", "confidence": .7, "knowledge_ids": [], "reason": "不能使用",
         "citations": [{"ref": "@r1", "passage_id": "@p1", "quote": "仍然不能使用"}]}]})
     result = asyncio.run(judge_batch(rt, [row], "x"))
-    assert result[0].label == "undetermined" and result[0].error == "invalid_evidence_reference"
+    assert result[0].label == "undetermined" and result[0].reason == "invalid_evidence_reference"
+    assert result[0].error == "Quote not present in the actual supplied passage"
 
 
 def test_source_judgment_omits_generated_summary(make_runtime):
@@ -102,9 +109,9 @@ def test_source_judgment_omits_generated_summary(make_runtime):
 
 
 def test_unknown_never_coerced_to_boolean(make_runtime):
-    rt = make_runtime(lambda p,r: decisions(p,r,"undetermined"))
+    rt = make_runtime(lambda p,r: decisions(p,r,"exclude"))
     out = asyncio.run(judge_batch(rt, [record()], "x"))
-    assert out[0].label == "undetermined"
+    assert out[0].label == "exclude" and out[0].confidence == 1.0
 
 
 def test_bad_label_raises_structured_failure(make_runtime):
@@ -113,6 +120,16 @@ def test_bad_label_raises_structured_failure(make_runtime):
     assert failure.value.code == "OUTPUT_SCHEMA"
     assert rt.model.calls == 3
     assert rt.store.metrics("task")["failed_attempts"] == 3
+
+
+def test_confidence_outside_range_is_a_structured_failure(make_runtime):
+    def handler(p, r):
+        out = decisions(p, r)
+        out['rows'][0]['confidence'] = 1.01
+        return out
+    rt = make_runtime(handler)
+    with pytest.raises(ModelRequestError) as failure: asyncio.run(judge_batch(rt, [record()], 'x'))
+    assert failure.value.code == 'OUTPUT_SCHEMA' and rt.model.calls == 3
 
 
 def test_harmless_judgment_note_does_not_fail_a_valid_evidence_decision(make_runtime):
@@ -140,7 +157,7 @@ def test_display_id_requirement_does_not_hide_available_identity(make_runtime):
     row = replace(record('ticket'), passages=(Passage('id', 'displayId', 'T-1'),
         Passage('body', 'source.raw_dialogue', '已经完成办理')))
     def handler(p, r):
-        return {'rows': [{'ref': 'ticket', 'label': 'accept', 'knowledge_ids': [], 'reason': '编号及业务事实均有据',
+        return {'rows': [{'ref': 'ticket', 'label': 'accept', 'confidence': .8, 'knowledge_ids': [], 'reason': '编号及业务事实均有据',
             'citations': [{'ref': 'ticket', 'passage_id': q['id'], 'quote': q['text']} for q in p['records'][0]['passages']]}]}
     rt = make_runtime(handler)
     result = asyncio.run(judge_batch(rt, [row], '核实T-1的办理事实', required_fields=('displayId', 'source.raw_dialogue')))
@@ -194,13 +211,13 @@ def test_cancel_prevents_call_and_stale_result(make_runtime):
     asyncio.run(test_inflight())
 
 
-def test_no_task_call_quota(make_runtime):
+def test_independent_judgment_limit_preserves_only_reviewed_confirmations(make_runtime):
     rt=make_runtime(use_cache=False)
     async def run():
         for i in range(137): await judge_batch(rt,[record(str(i))],"x")
     asyncio.run(run())
-    assert rt.model.calls==274
-    assert rt.store.metrics("task")["observed_qpm_60s"]==274
+    assert rt.model.calls==128
+    assert rt.store.metrics("task")["observed_qpm_60s"]==128
 
 
 def test_token_measurement_does_not_stop_execution(make_runtime):

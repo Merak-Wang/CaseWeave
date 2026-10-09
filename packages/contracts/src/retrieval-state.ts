@@ -61,6 +61,7 @@ export interface RetrievalCandidateJudgment {
   readonly basis?: 'model' | 'reused_model' | 'proxy' | 'unresolved'
   readonly operatorInference?: import('./semantic-operators.js').OperatorDecision['inference']
   readonly operatorManifestId?: string
+  readonly confidence?: number
   readonly exclusionChecks?: readonly {
     readonly requirementId: string
     readonly sourceText: string
@@ -352,6 +353,14 @@ export interface EvidenceContextSelection {
   readonly rendered: string
 }
 
+/** Host-owned durable task binding. Semantic generation is independent of task input revision. */
+export interface CandidateExportBinding {
+  readonly taskId: string
+  readonly inputRevision: number
+  readonly semanticGeneration: number
+  readonly resultRevision: string
+}
+
 /** Public export metadata. CSV bytes remain a Host response, not a Session fact. */
 export interface CandidateExportReceipt {
   readonly exportId: string
@@ -364,6 +373,8 @@ export interface CandidateExportReceipt {
   readonly auditId: string
   /** Absent only on receipts created before versioned confirmation downloads. */
   readonly resultRevision?: string
+  /** Required for newly generated durable prediction exports; absent on historical receipts. */
+  readonly exportBinding?: CandidateExportBinding
 }
 
 /** Durable metadata for an authorized on-demand detail read; ticket content is not persisted here. */
@@ -380,7 +391,7 @@ export interface CandidateDetailReadReceipt {
 /** Candidate node is a deterministic UI projection, never model-authored Markdown. */
 export interface TicketCandidateNode {
   /** Bounded task snapshots carry authoritative totals; terminal arrays are fetched via dedicated APIs. */
-  readonly collectionWindow?: { readonly current: number; readonly history: number; readonly confirmed: number; readonly version: string; readonly limit: number }
+  readonly collectionWindow?: { readonly current: number; readonly history: number; readonly confirmed: number; readonly predictions?: number; readonly predictionTotal?: number; readonly version: string; readonly limit: number }
   readonly expertProgress?: readonly { readonly id: string; readonly domainId: string; readonly goal: string; readonly status: import('./agent-context.js').ExpertTask['status']; readonly findingCount: number; readonly failure?: string }[]
   readonly openExpertConflicts?: number
   readonly searchProgress?: import('./provider.js').TicketSearchProgress
@@ -409,6 +420,7 @@ export interface TicketCandidateNode {
   readonly detailFields: readonly { readonly key: TicketEvidenceField; readonly label: string }[]
   readonly message?: string
   readonly exportEnabled: boolean
+  readonly predictionExportEnabled?: boolean
   /** Present only after the retrieval has reached a terminal product value. */
   readonly result?: TicketResultCollection
 }

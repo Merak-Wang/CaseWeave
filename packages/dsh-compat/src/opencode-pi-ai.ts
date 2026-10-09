@@ -30,7 +30,8 @@ export function isOpenCodeRoute(provider: string, baseUrl?: string): boolean {
 // Keep this dependency here; remove the facade when the upstream adapter passes the same wire tests.
 interface Snapshot {
   profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>
-  models: { getModel(provider: string, model: string): { baseUrl?: string } | undefined }
+  models: { getModel(provider: string, model: string): { baseUrl?: string } | undefined
+    streamSimple(model: unknown, context: unknown, options: Record<string, unknown>): unknown }
 }
 type Stream = (this: PiAiAdapter, options: GenerateOptions, snapshot: Snapshot) => AsyncIterable<StreamChunk>
 const prototype = PiAiAdapter.prototype as unknown as { streamWithSnapshot: Stream }
@@ -54,7 +55,13 @@ function install(): () => void {
       // Never mutate shared settings/profile snapshots: simultaneous conversations must not exchange IDs.
       const profiles = new Map(snapshot.profiles)
       profiles.set(options.provider, { ...profile, headers })
-      return original.call(this, options, { ...snapshot, profiles })
+      // DSH把off解释为不传reasoning；该网关默认思考，需要在实际请求正文明确关闭。
+      const disableThinking = options.reasoningEffort === 'off' && options.model.startsWith('deepseek-')
+      const models = disableThinking ? Object.assign(Object.create(snapshot.models), {
+        streamSimple: (model: unknown, context: unknown, request: Record<string, unknown>) => snapshot.models.streamSimple(model, context,
+          { ...request, onPayload: (payload: unknown) => ({ ...(payload as Record<string, unknown>), thinking: { type: 'disabled' } }) }),
+      }) as Snapshot['models'] : snapshot.models
+      return original.call(this, options, { ...snapshot, profiles, models })
     }
     prototype.streamWithSnapshot = wrapped
     restore = () => { if (prototype.streamWithSnapshot === wrapped) prototype.streamWithSnapshot = original }

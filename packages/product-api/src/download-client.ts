@@ -17,8 +17,8 @@ export interface ExportCandidatesFailure {
 function isExportResponse(value: unknown): value is ExportCandidatesResponse {
   return isRecord(value)
     && typeof value.fileName === 'string'
-    && value.mediaType === 'text/csv; charset=utf-8'
-    && typeof value.contentUtf8 === 'string'
+    && (value.mediaType === 'text/csv; charset=utf-8' && typeof value.contentUtf8 === 'string'
+      || value.mediaType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' && typeof value.contentBase64 === 'string')
     && isRecord(value.receipt)
 }
 
@@ -62,9 +62,11 @@ export async function exportCandidates(
   sessionId: string,
   retrievalId: string,
   resultRevision: string,
+  format: 'csv' | 'xlsx' = 'csv',
+  collectionOptions: { collection?: 'confirmed' | 'predictions'; predictionSelection?: 'accept' | 'all' } = {},
 ): Promise<CandidateExportReceipt> {
   const { payload, status } = await postProductApi<ExportCandidatesResponse>(
-    EXPORT_CANDIDATES_ENDPOINT, { sessionId, retrievalId, resultRevision }, '导出', ExportCandidatesClientError,
+    EXPORT_CANDIDATES_ENDPOINT, { sessionId, retrievalId, resultRevision, ...(format === 'csv' ? {} : { format }), ...collectionOptions }, '导出', ExportCandidatesClientError,
   )
   if (!isExportResponse(payload) || payload.receipt.retrievalId !== retrievalId
     || payload.receipt.resultRevision !== resultRevision || !Number.isSafeInteger(payload.receipt.rowCount)
@@ -76,7 +78,14 @@ export async function exportCandidates(
       status,
     )
   }
-  const bytes = new TextEncoder().encode(payload.contentUtf8)
+  if ((format === 'csv') !== (payload.mediaType === 'text/csv; charset=utf-8')) throw new ExportCandidatesClientError('INVALID_RESPONSE', '下载格式与请求不一致。', false, status)
+  let bytes: Uint8Array<ArrayBuffer>
+  if (payload.mediaType === 'text/csv; charset=utf-8') bytes = new TextEncoder().encode(payload.contentUtf8)
+  else {
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(payload.contentBase64)) throw new ExportCandidatesClientError('INVALID_RESPONSE', 'XLSX 编码无效。', false, status)
+    bytes = Uint8Array.from(atob(payload.contentBase64), character => character.charCodeAt(0))
+    if (bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 3 || bytes[3] !== 4) throw new ExportCandidatesClientError('INVALID_RESPONSE', 'XLSX 文件格式无效。', false, status)
+  }
   const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
     .map(byte => byte.toString(16).padStart(2, '0')).join('')
   if (hash !== payload.receipt.contentSha256) {

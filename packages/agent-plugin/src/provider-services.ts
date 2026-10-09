@@ -32,8 +32,10 @@ export abstract class TicketRetrievalProviderService extends Service implements 
   readFeatures: NonNullable<TicketRetrievalProvider['readFeatures']> = async () => []
   scanFeatures?: NonNullable<TicketRetrievalProvider['scanFeatures']>
   featureBlock?: NonNullable<TicketRetrievalProvider['featureBlock']>
+  featureAnchors?: NonNullable<TicketRetrievalProvider['featureAnchors']>
   resolveFeatureIds?: NonNullable<TicketRetrievalProvider['resolveFeatureIds']>
   readCandidates?: NonNullable<TicketRetrievalProvider['readCandidates']>
+  restoreSnapshot?: NonNullable<TicketRetrievalProvider['restoreSnapshot']>
 
   constructor(ctx: Context) {
     super(ctx, 'ticketRetrievalProvider')

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   TicketCandidateRef,
   type NormalizedTicketRecord,
@@ -313,6 +313,10 @@ describe('LocalTicketProvider authorization boundary', () => {
     await expect(provider.search(user, snapshot.snapshotId, spec, { topK: 1, maxScan: 100, stage: 'baseline' }))
       .rejects.toMatchObject({ code: 'SNAPSHOT_INVALID' })
     await expect(provider.status(user, snapshot.snapshotId)).resolves.toMatchObject({ snapshotValid: false })
+    provider.restoreSnapshot(user, snapshot)
+    await expect(provider.status(user, snapshot.snapshotId)).resolves.toMatchObject({ snapshotValid: true })
+    const restored = await provider.search(user, snapshot.snapshotId, spec, { topK: 1, maxScan: 100, stage: 'baseline' })
+    expect(restored.candidates[0]!.ref).toBe(first.candidates[0]!.ref)
   })
 
   it('reuses one ranking result while an exhaustive query advances through Provider pages', async () => {
@@ -382,5 +386,50 @@ describe('LocalTicketProvider recall-scoped features', () => {
     expect(empty.ids).toEqual([])
     await expect(provider.featureBlock(user, { snapshotId: snapshot.snapshotId, recallScope: 'unknown', limit: 10 }))
       .rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  })
+})
+
+
+describe('LocalTicketProvider annotation scores', () => {
+  it('ranks canonical cosine and bigram coverage independently of opposite UI RRF order and block size', async () => {
+    const query = '账号权限'
+    const rows = [
+      record({ ticketId: 'A', displayId: 'A', title: '网络', summary: '网络', problemDescription: query }),
+      record({ ticketId: 'B', displayId: 'B', title: query, summary: query }),
+      record({ ticketId: 'C', displayId: 'C', title: '账号', summary: '账号' }),
+      record({ ticketId: 'D', displayId: 'D', title: '登录', summary: '登录' }),
+    ]
+    const vectors: Record<string, number[]> = { A: [0, 1], B: [1, 0], C: [0, 1], D: [1, 0] }
+    const queryAnchors = vi.fn(async (_queries: readonly string[]) => ({ embedding_id: 'prepared', dimensions: 2, vectors: [[1, 0]], profileIdentity: {} }))
+    const ranker: RetrievalRanker = {
+      profileVersion: 'opposite-rrf', documentProjection: 'canonical-title-abstract-v1',
+      capabilities: { keyword: true, dense: true, fusion: true, reranker: false }, queryAnchors,
+      readFeatureBlock: async documents => {
+        const bytes = Buffer.alloc(documents.length * 8)
+        documents.forEach((doc, i) => vectors[doc.id]!.forEach((value, j) => bytes.writeFloatLE(value, i * 8 + j * 4)))
+        return { embedding_id: 'prepared', dimensions: 2, dense: bytes.toString('base64'), available: Buffer.alloc(documents.length, 1).toString('base64') }
+      },
+      rank: async () => { throw new Error('UI ranking is projected independently') },
+    }
+    const provider = new LocalTicketProvider(rows, { now: () => BASE_TIME, ranker, documentProjection: 'canonical-title-abstract-v1' })
+    const user = principal(), snapshot = await provider.openSnapshot(user)
+    const ranking: RankingResult = { hits: ['A', 'C', 'D', 'B'].map((id, i) => ({ documentId: id, rank: i + 1, score: 4 - i, channels: [] })),
+      execution: { requestedMode: 'hybrid', executedMode: 'hybrid', strategyVersion: 'opposite-rrf', channels: [] },
+      scanned: 4, keywordEligible: 4, rankedHits: 4, warnings: [] }
+    const spec = provider.resolve({ target: 'ranked_cases', query, mode: 'hybrid' })
+    const page = provider.projectRanking(user, snapshot.snapshotId, spec, { topK: 4, maxScan: 100, stage: 'initial_hybrid' }, ranking)
+    expect(page.candidates.map(candidate => candidate.displayId)).toEqual(['A', 'C', 'D', 'B'])
+    const request = { snapshotId: snapshot.snapshotId, recallScope: page.recallScope!, rankingQuery: query, limit: 10 }
+    const full = await provider.featureBlock(user, request)
+    expect(full.ids).toEqual([0, 1, 2, 3])
+    expect(full.scores).toEqual([0, 1, 1 / 6, .5])
+    expect(full.ids.toSorted((a, b) => full.scores![b]! - full.scores![a]!)).toEqual([1, 3, 2, 0])
+    const first = await provider.featureBlock(user, { ...request, limit: 2 })
+    const second = await provider.featureBlock(user, { ...request, limit: 2, cursor: first.next_cursor! })
+    expect([...first.scores!, ...second.scores!]).toEqual(full.scores)
+    expect((await provider.featureBlock(user, { ...request, ids: [3, 1], limit: 2 })).scores).toEqual([.5, 1])
+    expect(queryAnchors).toHaveBeenCalledTimes(1)
+    expect(queryAnchors.mock.calls[0]![0]).toEqual([query])
+    expect((await provider.featureBlock(user, { snapshotId: snapshot.snapshotId, recallScope: page.recallScope!, limit: 10 })).scores).toBeUndefined()
   })
 })

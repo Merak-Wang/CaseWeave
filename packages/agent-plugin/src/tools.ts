@@ -12,8 +12,8 @@ const POLICY = `你负责只读工单检索，首轮搜索已完成。用 ticket
 
 const OPERATOR_POLICY = `你协调只读工单检索，原句向量搜索与查询规划已完成。完整原句和用户补充决定范围，关键词与改写只用于召回。
 用 sem_filter 判断相关性，结果已保存，不逐条重判；缺证用 ticket_read 读取最少字段，随后自动复核。材料未变的未决项不重复判断；needs_selection_coverage 时再次 sem_filter 续补选型样本，复用已有标签和模型；needs_coverage 且 discovery_remaining_records>0 时可继续下一个排序窗口，无需重复补搜。
-指定 ID 只核实该工单；指定数量满足即停；未指定数量对关键词 OR 全部命中与语义召回按工单身份去重后的召回并集进行学习筛选。关键词分支完整枚举命中，未进入召回并集的授权工单不参与该次学习预测。抽样初判与命中复核累计最多 128 次独立判断请求，自动重试不重复占用额度，续跑共用额度，不再独立抽验。quality_passed 表示选择集达标；quality_fallback 表示未达原目标，采用训练效果最好的模型预测，选择集查准率至少 60%。两者均可交付模型确认集合，不宣称全局语义查全。
-model_unknown 表示不知道：最佳模型选择集查准率低于 60% 或额度内证据不足，只交付已确认工单，以 incomplete 结束；不得用补搜或定向判断绕过额度。使用最新 state_id，串行修改任务。ticket_decide 提交缺口和下一动作，通常 judgments=[]，只自行处置明确专家分歧。finish 填 coverage：满足用 satisfied，核实范围内均排除用 no_result，其余说明 incomplete。故障如实报告；通过工具提交，不用文字答复替代。`
+指定 ID 只核实该工单；指定数量满足即停；未指定数量对关键词 OR 全部命中与语义召回按工单身份去重后的召回并集进行学习筛选。关键词分支完整枚举命中，未进入召回并集的授权工单不参与该次学习预测。默认从 128 条工单起步；每个查询条件代次累计最多 128 次独立判断请求（初判与复核共用，自动重试不重复占额度），复用已有标签和模型，不再独立抽验。实际初判、复核与自动重试分别计量 QPM、TPM 和耗时，取消、超时、授权和协议检查继续生效。quality_passed 表示选择集达标；quality_fallback 表示未达原目标，采用训练效果最好的模型预测，选择集查准率至少 60%。两者均可交付模型确认集合，不宣称全局语义查全。
+model_unknown 表示质量未达标：最佳模型选择集查准率低于 60% 或无法取得有效选模依据，只交付已确认工单，以 incomplete 结束；执行失败不能补成排除样本。使用最新 state_id，串行修改任务。ticket_decide 提交缺口和下一动作，通常 judgments=[]，只自行处置明确专家分歧。finish 填 coverage：满足用 satisfied，核实范围内均排除用 no_result，其余说明 incomplete。故障如实报告；通过工具提交，不用文字答复替代。`
 
 export interface RetrievalToolApplication {
   readonly operators?: import('./semantic-operators.js').SemanticOperators
@@ -62,7 +62,7 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
       },
     }))
     ctx.tools.register(defineTool({ name: 'sem_filter',
-      description: '省略 candidate_aliases：累计最多 128 次抽样请求后用最佳模型预测，选择集查准率低于 60% 则返回不知道及已确认工单；或指定数量任务的下一批判断。传入别名：定向判断。自动重试不重复占用额度；续跑复用额度、标签和模型，不做独立抽验。',
+      description: '省略 candidate_aliases：默认从 128 条工单的标注窗口起步，按覆盖情况续跑，用最佳模型预测；选择集查准率低于 60% 则以质量未达标结束并返回已确认工单；或指定数量任务的下一批判断。传入别名：定向判断。每查询代次累计最多128次独立判断请求（初判与复核共用，自动重试不重复占额度），续跑复用标签和模型，不做独立抽验；初判、复核和重试均计量 QPM、TPM 和耗时，保留取消与超时。',
       parameters: { candidate_aliases: { type: 'array', items: { type: 'string' } } },
       output: { schema: { type: 'object', additionalProperties: false, properties: { state: { type: 'string', required: true } } }, render: (_args, value) => [{ type: 'text', text: value.state }] },
       presentCall: () => ({ card: 'generic', title: '批量复核工单', kind: 'execute' }),
@@ -188,7 +188,7 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
     if (pending.length && application.coordinator?.waitForExperts) {
       await wait(agent, pending.map(t => t.id), signal)
       const text = `专家已有结果，请复用返回的证据继续核对；其余分支可继续并行。\n${(await application.projectContext(agent)).rendered}`
-      agent.inject(createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot', sections: [{ name: 'retrieval-agent:expert-ready', text }] }, content: [{ type: 'text', text }] }))
+      agent.inject(createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot', sections: [{ name: 'retrieval-agent:expert-ready', text }] }, content: [{ type: 'text', text }] }))
       return
     }
     const generation = state.inputGeneration ?? 0, previous = completionRepairs.get(agent)
@@ -199,7 +199,7 @@ export function installRetrievalTools(ctx: Context, application: RetrievalToolAp
     completionRepairs.set(agent, { generation, attempts: attempts + 1, reply })
     const rendered = (await application.projectContext(agent)).rendered
     const text = `文字答复未保存结果。请用工具继续处理缺口，或用 ticket_decide 提交 judgments、semantic_gaps 和 finish；沿用原业务条件。\n${rendered}`
-    agent.inject(createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot', sections: [{ name: 'retrieval-agent:completion-repair', text }] }, content: [{ type: 'text', text }] }))
+    agent.inject(createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot', sections: [{ name: 'retrieval-agent:completion-repair', text }] }, content: [{ type: 'text', text }] }))
   })
   // Keep the schema available before pre-step admits a reply or starts a task;
   // execution below validates the current Agent and authoritative state.

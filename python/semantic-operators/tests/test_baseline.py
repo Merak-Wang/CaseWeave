@@ -134,8 +134,11 @@ def test_public_dispatch_reduces_actual_strong_rows_and_streams_first(make_runti
     out = asyncio.run(run())
     strong = {r for group in requests for r in group}
     proxy = {v['value']['ref'] for v in out if v['value']['basis'] == 'proxy'}
-    assert proxy and not proxy.intersection(strong)
-    assert len(out) == len(rows) == len(strong | proxy)
+    unresolved = {v['value']['ref'] for v in out if v['value']['label'] == 'undetermined'}
+    assert not proxy.intersection(strong)
+    assert rt.store.sampling_calls(rt.scope) == 128
+    assert unresolved  # 额度内没有可靠验收的剩余项保持未决，不用旧baseline填满。
+    assert len(out) == len(rows)
     assert all(v['value']['manifest_id'] is None for v in out if v['value']['basis'] == 'proxy')
     assert len(strong) < len(rows)
 

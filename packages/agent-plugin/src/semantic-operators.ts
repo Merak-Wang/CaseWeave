@@ -4,10 +4,11 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type GenerateOptions, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ReasoningEffortId, type GenerateOptions, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { RetrievalError, type ContextManifest, type OperatorDecision, type OperatorRecord,
   type RetrievalState, type SemanticQueryPlan, type TicketCandidateRef, type TicketRetrievalSpec, type TicketSearchProgress } from '@retrieval-agent/contracts'
+import { compileUserResultPolicy } from '@retrieval-agent/query-understanding'
 import { estimateContextTokens, operatorRecords, operatorRequiredFields, sourceEvidenceFields, validateOperatorRecords } from '@retrieval-agent/domain'
 import { confirmedCount, learnedResult } from '@retrieval-agent/domain/result'
 import { PythonOperatorBridge, type PythonOperatorRun } from './python-operator-bridge.js'
@@ -19,6 +20,9 @@ import { modelFailure, type ModelFailureCause } from './model-failure.js'
 import { readTaskKnowledge } from './knowledge-view.js'
 import { installSessionMetrics } from './metrics/session.js'
 import { ModelCallMetrics } from './metrics/model-call.js'
+import { assertLearnedResultAdmission } from './learned-admission.js'
+import { readLabelLogprobs } from './label-logprobs.js'
+import { canonicalSourceRequirements, canonicalSourceRequirementsMatch, assertCanonicalSourceRequirements } from './canonical-source-requirements.js'
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 // 累计调用回执只更新计量；学习状态由本轮 learning.update 更新，不能复活旧结论。
@@ -93,7 +97,7 @@ export class SemanticOperators {
   private config(agent: Agent) {
     const config = this.application.modelSelection ? this.application.modelSelection(agent) : agent.session.requestContext() ?? agent.options
     if (!config?.provider || !config.model) throw new RetrievalError('PROVIDER_UNAVAILABLE', '当前 DSH 模型未配置或已失效，请在模型设置中选择可用模型后继续。')
-    return { provider: config.provider, model: config.model, contextWindow: agent.session.requestContext()?.contextWindow ?? 32000 }
+    return { provider: config.provider, model: config.model, reasoningEffort: ('reasoningEffort' in config ? config.reasoningEffort : undefined) ?? ReasoningEffortId('off'), contextWindow: agent.session.requestContext()?.contextWindow ?? 32000 }
   }
   private async knowledge(state: RetrievalState): Promise<PythonOperatorRun['knowledge']> {
     if (!this.wikiRoot || !state.knowledgeCatalog?.releaseId) return { release: 'none', entries: [] }
@@ -108,13 +112,15 @@ export class SemanticOperators {
     signal?.throwIfAborted()
     const config = this.config(agent), input = scope.input
     const system = input.messages.find(m => m.role === 'system')?.content
+    const compactDecision = input.operation === 'sem_filter' && object(JSON.parse(input.messages.find(m => m.role === 'user')!.content)).decision_format === 'compact_binary'
+    const nextTokenDecision = input.operation === 'sem_filter' && object(JSON.parse(input.messages.find(m => m.role === 'user')!.content)).decision_format === 'next_token_binary'
     if (!system || input.messages.some(m => !['system', 'user'].includes(m.role))) throw new RetrievalError('PROTOCOL_MISMATCH', '不支持的算子模型消息。')
-    const request: GenerateOptions = { provider: config.provider, model: config.model, sessionId: SessionId(`operator-${input.manifest_id}`),
+    const request: GenerateOptions = { provider: config.provider, model: config.model, reasoningEffort: config.reasoningEffort, sessionId: SessionId(`operator-${input.manifest_id}`),
       ...(signal ? { signal } : {}), system,
-      ...(input.operation === 'query_plan' ? { maxTokens: 4096 } : {}),
-      tools: [{ name: 'submit_result', description: 'Submit the operator result with source citations.', parameters: input.schema }],
+      ...(input.operation === 'query_plan' ? { maxTokens: 2048 } : nextTokenDecision ? { maxTokens: 1, temperature: 1 } : compactDecision ? { maxTokens: 1024 } : {}),
+      tools: nextTokenDecision ? [] : [{ name: 'submit_result', description: compactDecision ? 'Submit yes/no and confidence for every supplied ticket.' : 'Submit the operator result with source citations.', parameters: input.schema }],
       messages: input.messages.filter(m => m.role === 'user').map(m => createUserMessage({ content: [{ type: 'text', text: m.content }],
-        source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot', sections: [{ name: input.operation, text: m.content }] } })) }
+        source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot', sections: [{ name: input.operation, text: m.content }] } })) }
     const contextWindow = agent.session.requestContext()?.contextWindow
       ?? (await this.ctx.llm.resolveModelInfo(config.provider, config.model)).context?.contextWindow ?? config.contextWindow
     if (estimateContextTokens(JSON.stringify(request)) + 4096 > contextWindow) throw new RetrievalError('CAPACITY_EXCEEDED', '算子当前证据批次超过模型上下文容量；请缩小批次或定向读取必要片段。')
@@ -125,6 +131,15 @@ export class SemanticOperators {
     let aggregateReceipt: unknown
     let callMetrics: ModelCallMetrics | undefined
     try {
+      if (nextTokenDecision) {
+        scope.manifests.push(this.manifest(scope, request))
+        const result = await readLabelLogprobs(this.ctx, config.provider, config.model, input.messages, input.manifest_id, signal)
+        payload = result.payload; finished = true
+        usage = 'prompt_tokens' in result.usage && typeof result.usage.prompt_tokens === 'number' && typeof result.usage.completion_tokens === 'number' ? {
+          inputTokens: result.usage.prompt_tokens, outputTokens: result.usage.completion_tokens,
+          ...(typeof result.usage.cached_prompt_tokens === 'number' ? { cacheReadTokens: result.usage.cached_prompt_tokens } : {}) } : undefined
+        return result
+      }
       if (input.operation === 'sem_agg') {
         const data = object(JSON.parse(input.messages.find(m => m.role === 'user')!.content))
         for (const source of data.sources as Record<string, unknown>[]) {
@@ -245,23 +260,39 @@ export class SemanticOperators {
     params: Record<string, unknown> = {}): PythonOperatorRun {
     if (!state.snapshot || state.accessValidation === 'required') throw new RetrievalError('UNAUTHORIZED', '算子需要当前授权快照。')
     const config = this.config(agent)
+    const judgeMode = state.query.contract?.semanticExecution?.judgeMode
+      ?? (process.env.RETRIEVAL_AGENT_SEMANTIC_JUDGE_MODE === 'anyjev_l0' ? 'anyjev_l0' : 'compact_binary')
+    const judgePrior = state.query.contract?.semanticExecution?.judgePrior ?? 'none'
     return { scope: { task_id: state.retrievalId, input_revision: state.inputGeneration ?? 0, snapshot: state.snapshot.snapshotId,
-      authorization: hash([state.principalBindingHash, state.snapshot.authorizationVersion]) }, model_identity: hash(config), knowledge, op, instruction, params, source_handle: 'current-candidates' }
+      authorization: hash([state.principalBindingHash, state.snapshot.authorizationVersion]) }, model_identity: hash([config, judgeMode, judgePrior]), judge_mode: judgeMode, judge_prior: judgePrior, knowledge, op, instruction, params, source_handle: 'current-candidates' }
   }
   async plan(agent: Agent, state: RetrievalState, signal?: AbortSignal): Promise<{ plan: SemanticQueryPlan; manifests: ContextManifest[] }> {
-    if (!state.knowledgeCatalog && this.wikiRoot) {
+    const fixed = state.query.contract?.semanticExecution?.orchestration === 'fixed'
+    if (!fixed && !state.knowledgeCatalog && this.wikiRoot) {
       const wiki = await openWiki(this.wikiRoot)
       state = { ...state, knowledgeCatalog: { ...(wiki.releaseId ? { releaseId: wiki.releaseId } : {}), status: wiki.releaseId ? 'available' : 'empty',
         domains: wiki.catalog().map(d => ({ id: d.id, description: d.title, entryIds: d.knowledgeRefs })) } }
     }
-    const catalog = await readTaskKnowledge(this.wikiRoot, state)
+    const catalog = fixed ? { releaseId: undefined, domains: [] } : await readTaskKnowledge(this.wikiRoot, state)
     const entries = catalog.domains.flatMap(d => d.entries).filter(e => !e.revoked)
     const knowledge = { release: catalog.releaseId ?? 'none', entries: [] }, manifests: ContextManifest[] = []
     let plan: SemanticQueryPlan | undefined
+    const fullUserText = [state.query.original, ...(state.userFeedback ?? []).map(f => f.text)].join('\n')
+    const resultPolicy = compileUserResultPolicy(fullUserText)
+    const fixedGoal = resultPolicy?.requestedCount ? { mode: 'examples', count: resultPolicy.requestedCount }
+      : { mode: resultPolicy?.countPolicy === 'adaptive' ? 'adaptive' : 'all', count: null }
+    const canonicalUnavailableFields = state.snapshot?.fieldCatalog
+      .filter(field => ['L2', 'L3'].includes(field.accessLevel)).map(field => field.key) ?? []
+    const canonicalFixedContext = fixed && state.snapshot?.documentProjection === 'canonical-title-abstract-v1' ? {
+      source_evidence_policy: 'canonical_text_only_for_custom_prediction', declared_projection: state.snapshot.documentProjection,
+      available_text_fields: ['title', 'summary'], unavailable_source_fields: canonicalUnavailableFields,
+      explicit_source_requirements: canonicalSourceRequirements(fullUserText, canonicalUnavailableFields),
+    } : undefined
     const metrics = await this.bridge.run(this.runInput(agent, state, knowledge, 'query_plan', state.query.original,
-      { confirmed_context: JSON.stringify({ feedback: state.userFeedback ?? [], confirmed_filters: state.query.confirmedConstraints,
+      { confirmed_context: JSON.stringify({ ...(fixed ? { fixed_orchestration: true, fixed_goal: fixedGoal, full_user_text: fullUserText } : {}), feedback: state.userFeedback ?? [], confirmed_filters: state.query.confirmedConstraints,
         search_fields: state.snapshot?.queryFields, evidence_fields: sourceEvidenceFields(state.snapshot?.fieldCatalog),
-        ...(this.wikiRoot ? { knowledge_catalog: catalog.domains.map(d => ({ id: d.id, title: d.title,
+        ...(canonicalFixedContext ? { canonical_fixed_context: canonicalFixedContext } : {}),
+        ...(!fixed && this.wikiRoot ? { knowledge_catalog: catalog.domains.map(d => ({ id: d.id, title: d.title,
           entries: d.entries.filter(e => !e.revoked).map(({ id, title, scope, kind, keywords }) => ({ id, title, scope, kind, keywords })) })) } : {}),
         query_time: state.createdAt, time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone }) }),
     async (method, payload) => {
@@ -272,8 +303,10 @@ export class SemanticOperators {
       plan = { ...object(event.value), schemaVersion: 1, inputGeneration: state.inputGeneration ?? 0 } as unknown as SemanticQueryPlan
     }, signal)
     if (!plan) throw new RetrievalError('PROTOCOL_MISMATCH', '查询规划缺少结果。')
+    if (canonicalFixedContext) assertCanonicalSourceRequirements(plan, fullUserText, canonicalUnavailableFields)
     if (!planFieldsAvailable(plan, state.snapshot?.fieldCatalog)) throw new RetrievalError('PROTOCOL_MISMATCH', '查询计划要求了不能作为原文读取的字段。')
-    if (this.wikiRoot && !plan.knowledge_routes) throw new RetrievalError('PROTOCOL_MISMATCH', '检索 Agent 尚未选择知识或明确零样本判断。')
+    if (fixed) plan = { ...plan, knowledge_routes: [] }
+    if (!fixed && this.wikiRoot && !plan.knowledge_routes) throw new RetrievalError('PROTOCOL_MISMATCH', '检索 Agent 尚未选择知识或明确零样本判断。')
     if (plan.knowledge_routes) plan = { ...plan, knowledge_routes: plan.knowledge_routes.map(route => {
       const entry = entries.find(e => e.id === route.entry_id)
       if (!entry) throw new RetrievalError('PROTOCOL_MISMATCH', '检索 Agent 选择的知识不在当前可用目录中。')
@@ -288,7 +321,12 @@ export class SemanticOperators {
     await this.application.coordinator?.validateKnowledge?.(agent)
     const state = this.application.current(agent)
     const plan = state.query.contract?.semanticPlan
-    if (plan?.inputGeneration === (state.inputGeneration ?? 0)
+    const canonical = state.query.contract?.semanticExecution?.orchestration === 'fixed'
+      && state.snapshot?.documentProjection === 'canonical-title-abstract-v1'
+    const canonicalPlanCurrent = !canonical || (plan && canonicalSourceRequirementsMatch(plan,
+      [state.query.original, ...(state.userFeedback ?? []).map(f => f.text)].join('\n'),
+      state.snapshot!.fieldCatalog.filter(field => ['L2', 'L3'].includes(field.accessLevel)).map(field => field.key)))
+    if (canonicalPlanCurrent && plan?.inputGeneration === (state.inputGeneration ?? 0)
       && (!this.wikiRoot || plan.knowledge_routes !== undefined)
       && planFieldsAvailable(plan, state.snapshot?.fieldCatalog)
       && state.contextManifests?.some(m => m.operator?.pythonManifestId === plan.manifest_id)) return state
@@ -321,7 +359,7 @@ export class SemanticOperators {
     const state = this.application.current(agent)
     const learning = state.budget.operatorUsage?.learning as { input_revision?: number; stop_reason?: string; message?: string } | undefined
     return state.phase !== 'stopped' && learning?.input_revision === (state.inputGeneration ?? 0) && learning.stop_reason === 'model_unknown'
-      ? this.application.stopIncomplete(agent, learning.message ?? '不知道：现有模型无法可靠判断，仅返回已确认工单。') : state
+      ? this.application.stopIncomplete(agent, learning.message ?? '未完成：模型质量未达标，仅返回已确认工单。') : state
   }
   async filter(agent: Agent, refs?: readonly TicketCandidateRef[], signal?: AbortSignal, deferFinish = false): Promise<RetrievalState> {
     await this.application.ensureModelAccess(agent, signal)
@@ -329,10 +367,28 @@ export class SemanticOperators {
     let state = await this.ensurePlan(agent, signal)
     const generation = state.inputGeneration ?? 0
     if (state.phase === 'stopped') return state
-    const plan = state.query.contract!.semanticPlan!, knowledge = await this.knowledge(state)
+    if (state.query.contract?.semanticExecution?.orchestration === 'fixed'
+      && state.snapshot?.documentProjection === 'canonical-title-abstract-v1') {
+      const plan = state.query.contract.semanticPlan
+      if (!plan) throw new RetrievalError('PROTOCOL_MISMATCH', '固定规划缺少结果。')
+      assertCanonicalSourceRequirements(plan, [state.query.original, ...(state.userFeedback ?? []).map(f => f.text)].join('\n'),
+        state.snapshot.fieldCatalog.filter(field => ['L2', 'L3'].includes(field.accessLevel)).map(field => field.key))
+      if (plan.unsupported_constraints?.length) {
+      await this.application.recordOperatorUsage(agent, generation, { learning: { input_revision: generation,
+        stop_reason: 'model_unknown', message: '执行未完成：用户要求的原文证据未包含在当前投影中，请读取必要输入后重试。' } })
+        return this.finishUnknown(agent)
+      }
+    }
+    const plan = state.query.contract!.semanticPlan!, knowledge = state.query.contract?.semanticExecution?.orchestration === 'fixed'
+      ? { release: 'none', entries: [] } : await this.knowledge(state)
     // 完整检索中的定向重判仍使用同一召回并集与学习额度。
-    const algorithm = plan.goal.mode === 'examples' ? 'direct' : this.filterConfig.algorithm ?? 'auto'
-    const fullScope = ['auto', 'active', 'learned'].includes(algorithm)
+    const execution = state.query.contract?.semanticExecution
+    const method = execution?.semanticMethod ?? 'auto'
+    const unlabeled = ['dual_description_margin', 'name_gmm', 'kmeans'].includes(method)
+    const algorithm = unlabeled ? method : plan.goal.mode === 'examples' || execution?.onlineLearning === false
+      || ['direct', 'direct_teacher'].includes(method) ? 'direct' : this.filterConfig.algorithm ?? 'auto'
+    const fullScope = unlabeled || plan.goal.mode !== 'examples'
+      && (execution?.onlineLearning === false || method === 'direct_teacher' || ['auto', 'active', 'learned'].includes(algorithm))
     let recallScope: string | undefined
     if (fullScope) {
       state = await this.discoverPlanned(agent, signal)
@@ -358,11 +414,13 @@ export class SemanticOperators {
     }
     const lastLearning = state.budget.operatorUsage?.learning as { input_revision?: number; recall_scope_key?: string; stop_reason?: string; discovery_key?: string; discovery_remaining_records?: number } | undefined
     const planFields = operatorRequiredFields(plan, state.snapshot?.fieldCatalog)
-    const requiredFields = planFields
+    // Numeric no-feedback proposals use canonical title/abstract features.
+    // Source evidence requirements still govern teacher/business confirmation.
+    const requiredFields = unlabeled ? [] : planFields
     const discoveryKey = (s: RetrievalState) => hash(['ngram-vector-desc-v1', recallScope, s.candidates.map(c => c.ref).sort(), s.promotedEvidence.map(e => e.evidenceId).sort(), this.filterConfig.options, requiredFields])
     if (lastLearning?.input_revision === generation && lastLearning.stop_reason === 'model_unknown') return this.finishUnknown(agent)
     if (fullScope && lastLearning?.input_revision === generation
-      && (['quality_passed', 'quality_fallback'].includes(lastLearning.stop_reason ?? '') || lastLearning.discovery_key === discoveryKey(state)
+      && (['quality_passed', 'quality_fallback', 'frozen_completed', 'complete'].includes(lastLearning.stop_reason ?? '') || lastLearning.discovery_key === discoveryKey(state)
         && (['quality_not_met', 'needs_information'].includes(lastLearning.stop_reason ?? '')
           || lastLearning.stop_reason === 'needs_coverage' && !(lastLearning.discovery_remaining_records! > 0)))) return state
     const byRef = new Map(state.candidates.map(c => [c.ref, c]))
@@ -413,6 +471,16 @@ export class SemanticOperators {
       if (!pending.length) return
       await current()
       await hydrate(pending.map(d => d.ref as TicketCandidateRef))
+      if (unlabeled) {
+        const identities = new Map(this.application.current(agent).candidates.map(c => [c.ref, c]))
+        pending = pending.map(d => {
+          const c = identities.get(d.ref as TicketCandidateRef), inference = d.inference
+          if (!c || inference?.record_identity !== hash([c.ref, c.sourceVersion, c.contentHash])) {
+            throw new RetrievalError('SNAPSHOT_INVALID', '无反馈候选预测的工单身份已变化。')
+          }
+          return { ...d, inference: { ...inference, source_version: c.sourceVersion, content_hash: c.contentHash } }
+        })
+      }
       const result = await this.application.acceptOperatorResults(agent, generation, pending, signal)
       const submitted = new Set(pending.map(d => d.ref))
       for (const j of result.judgments ?? []) if (submitted.has(j.candidateRef) && j.basis !== 'proxy') feedback.set(j.candidateRef, feedbackValue(j))
@@ -421,12 +489,14 @@ export class SemanticOperators {
     const predicate = [state.query.original, ...(state.userFeedback ?? []).map(f =>
       `用户补充：${f.question ? `针对“${f.question}”：` : ''}${f.text}`)].join('\n')
     const metrics = await this.run(agent, this.runInput(agent, state, knowledge, 'sem_filter', predicate,
-      { algorithm, scope_mode: fullScope ? 'full' : 'candidates', ...(recallScope ? { recall_scope_key: recallScope } : {}), options: this.filterConfig.options ?? {}, initial_refs: state.candidates.map(c => c.ref),
-        batch_size: batchSize, require_source: plan.steps.some(s => s.op === 'sem_filter' && s.params.require_source === true),
+      { algorithm, scope_mode: fullScope ? 'full' : 'candidates', ...(recallScope ? { recall_scope_key: recallScope } : {}), options: { ...this.filterConfig.options,
+        ...(execution?.onlineFusion ? { fusion: execution.onlineFusion } : {}),
+        ...(execution?.onlineModels ? { methods: execution.onlineModels } : {}) }, online_feedback_training: !unlabeled && method !== 'direct_teacher' && execution?.onlineLearning !== false, initial_refs: state.candidates.map(c => c.ref),
+        batch_size: batchSize, require_source: !unlabeled && plan.steps.some(s => s.op === 'sem_filter' && s.params.require_source === true),
         required_fields: requiredFields, replay_saved: true,
         host_labels: Object.fromEntries((state.judgments ?? []).filter(j => j.basis !== 'proxy').map(j =>
           [j.candidateRef, j.verdict === 'accept' ? 1 : j.verdict === 'exclude' ? 0 : -1])),
-        ...(!refs && plan.goal.mode === 'examples' ? { example_count: plan.goal.count! - state.selectedCandidateRefs.length } : {}) }),
+        ...(!unlabeled && !refs && plan.goal.mode === 'examples' ? { example_count: plan.goal.count! - state.selectedCandidateRefs.length } : {}) }),
     async (method, payload) => {
       if (method === 'llm.generate' || method === 'llm.reuse') {
         const now = await current(), requestManifests: ContextManifest[] = []
@@ -453,12 +523,27 @@ export class SemanticOperators {
         const seedScores = Object.fromEntries(seedRows.map((row, i) => { const candidate = byRef.get(row.ref)
           return [block.ids[i], block.scores?.[i] ?? (candidate ? 1 / (1 + candidate.rank) : 0)] }))
         // 种子只传数值 ID、抽样优先级和已有标签，向量随后按块取回。
-        return { ids: block.ids, feature_id: block.feature_id, scores: seedScores, known_labels: Object.fromEntries(seedRows.flatMap((row, i) => strong.has(row.ref)
+        return { ids: block.ids, feature_id: block.feature_id, ...(block.row_groups ? { row_groups: block.row_groups } : {}), scores: seedScores, known_labels: Object.fromEntries(seedRows.flatMap((row, i) => strong.has(row.ref)
           ? [[block.ids[i], strong.get(row.ref) === 'accept' ? 1 : strong.get(row.ref) === 'exclude' ? 0 : -1]] : [])) }
+      }
+      if (method === 'features.anchor') {
+        const p = object(payload), provider = this.ctx.ticketRetrievalProvider
+        if (!unlabeled || !fullScope || !recallScope || !provider.featureAnchors || typeof p.feature_id !== 'string')
+          throw new RetrievalError('PROVIDER_UNAVAILABLE', '无标签方法需要当前授权召回范围及同模型锚点接口。')
+        if (p.method !== algorithm || p.recall_scope_key !== undefined && p.recall_scope_key !== recallScope)
+          throw new RetrievalError('INVALID_REQUEST', '锚点请求不属于当前方法或召回范围。')
+        const actual = await provider.featureAnchors(await this.application.principal(agent, 'detail_read', signal), {
+          snapshotId: state.snapshot!.snapshotId, recallScope, featureId: p.feature_id,
+          texts: [`符合以下检索条件的工单：${predicate}`, `不符合以下检索条件的工单：${predicate}`],
+        }, signal ? { signal } : {})
+        if (actual.feature_id !== p.feature_id || actual.vectors.length !== 2)
+          throw new RetrievalError('PROTOCOL_MISMATCH', '锚点模型身份或维度与当前索引不同。')
+        return { feature_id: actual.feature_id, embedding_id: actual.embedding_id,
+          query_anchor: actual.vectors[0], negative_anchor: actual.vectors[1] }
       }
       if (method === 'predictions.begin') {
         modelMetadata = object(payload); written = 0
-        if (modelMetadata.input_revision !== generation || !modelMetadata.predicate_key || !modelMetadata.feature_id || Number(modelMetadata.fit_count) < 1) throw new RetrievalError('INVALID_REQUEST', '学习结果缺少当前模型来源。')
+        if (modelMetadata.input_revision !== generation || !modelMetadata.predicate_key || !modelMetadata.feature_id || Number(modelMetadata.fit_count) < 0) throw new RetrievalError('INVALID_REQUEST', '学习结果缺少当前模型来源。')
         await this.application.semanticResults.begin(state.retrievalId, String(modelMetadata.model_id))
         return {}
       }
@@ -474,9 +559,7 @@ export class SemanticOperators {
         const p = object(payload), quality = p.quality as import('@retrieval-agent/contracts').LearnedResult['quality']
         if (p.model_id !== modelMetadata?.model_id || p.scope_count !== written) throw new RetrievalError('INVALID_REQUEST', '预测集合未覆盖本次扫描。')
         if (p.passed === true) {
-          if (quality.basis !== 'selection' || !(quality.precision >= .6)
-            || (quality.acceptance !== 'fallback' && !(quality.precision >= quality.precision_target && quality.recall >= quality.recall_target)))
-            throw new RetrievalError('INVALID_REQUEST', '模型选择集查准率不足 60%，或未满足声明的准入方式。')
+          assertLearnedResultAdmission(quality, modelMetadata)
           const returned = await this.application.semanticResults.count(state.retrievalId, String(p.model_id))
           if (returned !== p.returned) throw new RetrievalError('PROTOCOL_MISMATCH', '数值集合与 Host 保存数量不一致。')
           const setHash = createHash('sha256').update(String(modelMetadata!.feature_id)); let after = -1
@@ -543,7 +626,10 @@ export class SemanticOperators {
     }, async value => {
       const event = object(value)
       if (event.type !== 'decision') throw new RetrievalError('PROTOCOL_MISMATCH', '过滤算子返回了无效事件。')
-      pending.push(event.value as OperatorDecision)
+      const decision = event.value as OperatorDecision
+      const recordIdentity = (decision as OperatorDecision & { record_identity?: unknown }).record_identity
+      if (unlabeled && (typeof recordIdentity !== 'string' || !/^[a-f0-9]{64}$/u.test(recordIdentity))) throw new RetrievalError('PROTOCOL_MISMATCH', '无反馈预测缺少原始工单身份。')
+      pending.push(decision)
       if (pending.length >= (event.value && (event.value as OperatorDecision).basis === 'proxy' ? 256 : commitBatchSize)) await flush()
     }, signal)
     await flush()
@@ -552,7 +638,7 @@ export class SemanticOperators {
   }
   async searchAndFilter(agent: Agent, signal?: AbortSignal): Promise<RetrievalState> {
     const state = await this.ensurePlan(agent, signal)
-    if (state.query.contract!.semanticPlan!.goal.mode === 'examples' || !['auto', 'active', 'learned'].includes(this.filterConfig.algorithm ?? 'auto')) {
+    if (state.query.contract!.semanticPlan!.goal.mode === 'examples' && !['dual_description_margin', 'name_gmm', 'kmeans'].includes(state.query.contract?.semanticExecution?.semanticMethod ?? '') || state.query.contract?.semanticExecution?.onlineLearning !== false && !['auto', 'active', 'learned'].includes(this.filterConfig.algorithm ?? 'auto')) {
       await this.searchPlanned(agent, signal)
       return this.filter(agent, undefined, signal)
     }
@@ -585,7 +671,7 @@ export class SemanticOperators {
   }
   async searchPlanned(agent: Agent, signal?: AbortSignal): Promise<RetrievalState> {
     const state = await this.ensurePlan(agent, signal), plan = state.query.contract!.semanticPlan!
-    if (plan.goal.mode !== 'examples' && ['auto', 'active', 'learned'].includes(this.filterConfig.algorithm ?? 'auto')) return this.discoverPlanned(agent, signal)
+    if (plan.goal.mode !== 'examples' && (state.query.contract?.semanticExecution?.onlineLearning === false || ['auto', 'active', 'learned'].includes(this.filterConfig.algorithm ?? 'auto'))) return this.discoverPlanned(agent, signal)
     const searches = [
       ...(plan.keywords.length ? [{ mode: 'keyword' as const, text: plan.keywords.join(' '), terms: plan.keywords }] : []),
       ...[...new Set([state.query.original, ...plan.retrieval_expressions])]

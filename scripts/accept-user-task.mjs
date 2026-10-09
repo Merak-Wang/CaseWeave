@@ -10,6 +10,7 @@ const { values } = parseArgs({ options: {
   query: { type: 'string' }, task: { type: 'string' },
   out: { type: 'string' }, expect: { type: 'string' },
   'timeout-ms': { type: 'string', default: '180000' },
+  'cancel-on-timeout': { type: 'string', default: 'false' },
 } })
 if (Boolean(values.query) === Boolean(values.task)) throw new Error('Supply exactly one of --query "自然语言" or --task TASK_ID')
 const timeoutMs = Number(values['timeout-ms'])
@@ -137,15 +138,16 @@ try {
     if (snapshot.question) { report.outcome = 'needs_user_reply'; break }
     await pause(1000)
   }
-  report.outcome ??= 'incomplete'
+  report.outcome ??= terminal ? 'incomplete' : 'monitoring_timeout'
 } catch (error) {
   report.outcome = 'failed'; report.error = error.message
 } finally {
-  // Only clean up a task created by this acceptance run. Never cancel an inspected existing task.
-  if (created && !terminal && taskId) {
+  // 监测超时只停止读取；只有明确的取消验收才结束本脚本创建的后台任务。
+  if (created && !terminal && taskId && values['cancel-on-timeout'] === 'true' && Date.now() >= deadline) {
     try { report.cancellation = await request('/api/retrieval-agent/tasks/' + encodeURIComponent(taskId), { kind: 'cancel', operationId: randomUUID() }) }
     catch (error) { report.cancellationError = error.message }
   }
+  if (taskId && !terminal && !report.cancellation) report.backgroundTaskRetained = true
   report.finishedAt = new Date().toISOString()
   await save('run.json', report)
   console.log(JSON.stringify({ outcome: report.outcome, taskId, output, error: report.error }))

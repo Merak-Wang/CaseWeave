@@ -22,7 +22,7 @@ function state(): RetrievalState {
   return { stateId: 'state-1', retrievalId: 'retrieval-1', phase: 'assessed', termination: 'active',
     candidates, candidateHistory: candidates, promotedEvidence: [], gaps: [], allowedActions: [{ kind: 'assess' }], } as unknown as RetrievalState
 }
-async function mounted() {
+async function mounted(operatorMode = false) {
   const current = state()
   const decisions: RetrievalDecision[] = []
   const app: RetrievalToolApplication = {
@@ -31,6 +31,7 @@ async function mounted() {
     decide: async (_agent, decision) => { decisions.push(decision); return current },
     recordToolCall: async () => current, stopIncomplete: vi.fn(async () => current),
   }
+  if (operatorMode) Object.defineProperty(app, 'operators', { value: {} })
   const ctx = new Context()
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(SystemPrompt)
@@ -42,6 +43,20 @@ async function mounted() {
 const base = { state_id: 'state-1', judgments: [], semantic_gaps: [] }
 
 describe('public decision tool', () => {
+  it('describes a record window and retains controls without a cumulative request cap', async () => {
+    const { ctx } = await mounted(true)
+    try {
+      const filter = ctx.tools.schemas().find(tool => tool.name === 'sem_filter')!
+      expect(filter.description).toContain('128 条工单')
+      expect(filter.description).toContain('累计判断请求不封顶')
+      const policy = renderPrompt(await ctx.systemPrompt.assemble())
+      expect(policy).toContain('累计判断请求不封顶')
+      expect(policy).toContain('QPM、TPM')
+      expect(policy).toContain('取消、超时')
+      expect(policy).not.toContain('最多 128 次')
+      expect(policy).not.toContain('共用额度')
+    } finally { await ctx.fiber.dispose() }
+  })
   it('keeps operator uncertainty authoritative instead of accepting an ordinary main-agent override', async () => {
     const { ctx, app, decisions, execute } = await mounted()
     Object.defineProperty(app, 'operators', { value: {} })

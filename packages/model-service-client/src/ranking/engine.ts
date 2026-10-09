@@ -34,6 +34,7 @@ export interface FusionOptions {
 }
 
 export interface HybridRankingOptions {
+  readonly documentProjection?: 'ticket-search-projection-v1' | 'canonical-title-abstract-v1'
   readonly baseUrl?: string
   readonly embeddingIdentity?: { readonly model: string; readonly revision: string; readonly dimensions: number }
   readonly rerankerIdentity?: { readonly model: string; readonly revision: string }
@@ -60,7 +61,7 @@ export class RankingError extends Error {
   }
 }
 
-const EMBEDDING_INSTRUCTION = 'Given a support ticket search query, retrieve historical tickets with matching symptoms, products, constraints, and resolution context.'
+export const EMBEDDING_INSTRUCTION = 'Given a support ticket search query, retrieve historical tickets with matching symptoms, products, constraints, and resolution context.'
 const RERANKER_INSTRUCTION = 'Given a support ticket search query, determine whether the historical ticket describes the same user problem and compatible constraints.'
 
 function stable(value: unknown): string {
@@ -77,6 +78,7 @@ function createProfile(options: HybridRankingOptions): RankingProfileParams {
   return {
     ...(options.embeddingIdentity === undefined ? {} : { embeddingIdentity: { ...options.embeddingIdentity } }),
     ...(options.rerankerIdentity === undefined ? {} : { rerankerIdentity: { ...options.rerankerIdentity } }),
+    ...(options.documentProjection === undefined ? {} : {documentProjection: options.documentProjection}),
     embeddingInstruction: options.embeddingInstruction ?? EMBEDDING_INSTRUCTION,
     rerankerInstruction: options.rerankerInstruction ?? RERANKER_INSTRUCTION,
     embeddingBatchSize: options.embeddingBatchSize ?? 16,
@@ -98,6 +100,8 @@ function createProfile(options: HybridRankingOptions): RankingProfileParams {
 function profileVersion(profile: RankingProfileParams): string {
   const identity = {
     version: 'quick-hybrid-v2',
+    denseRecallPolicy: 'cosine-gte-threshold-v1',
+    ...(profile.documentProjection === undefined || profile.documentProjection === 'ticket-search-projection-v1' ? {} : {documentProjection:profile.documentProjection}),
     embeddingIdentity: profile.embeddingIdentity ?? null,
     rerankerIdentity: profile.rerankerIdentity ?? null,
     embeddingInstruction: profile.embeddingInstruction,
@@ -224,6 +228,8 @@ function validResult(value: unknown, documents: readonly RankingDocument[], expe
 
 /** HTTP adapter for BM25F/dense/fusion/reranking implemented by the uv-managed Python service. */
 export class HybridRankingEngine implements RetrievalRanker {
+  get documentProjection(): 'ticket-search-projection-v1' | 'canonical-title-abstract-v1' { return this.#profile.documentProjection ?? 'ticket-search-projection-v1' }
+  get fusionOptions(): RankingProfileParams['fusion'] {return this.#profile.fusion}
   readonly profileVersion: string
   readonly capabilities: RetrievalRanker['capabilities']
   readonly #baseUrl: string
@@ -332,6 +338,22 @@ export class HybridRankingEngine implements RetrievalRanker {
   async readFeatureBlock(documents: readonly Pick<RankingDocument, 'id' | 'contentHash'>[], signal?: AbortSignal) {
     return this.#request<{ embedding_id: string; dense: string; dimensions: number; available: string }>('/v1/ranking/feature-block',
       { protocolVersion: RAG_SERVICE_PROTOCOL_VERSION, requestId: randomUUID(), documents, profile: this.#profile }, signal)
+  }
+
+  async queryAnchors(texts:readonly string[],signal?:AbortSignal) {
+    const identity=this.#profile.embeddingIdentity
+    if(!identity || texts.length<1 || texts.length>8 || texts.some(t=>!t.trim())) throw new RankingError('INVALID_REQUEST','Pinned dense identity and one to eight nonempty anchor texts are required')
+    const response=await this.#request<import('./types.js').QueryAnchors>('/v1/ranking/query-anchors',
+      {protocolVersion:RAG_SERVICE_PROTOCOL_VERSION,requestId:randomUUID(),texts,profile:this.#profile},signal)
+    const actual=response.profileIdentity
+    if(!actual || actual.model!==identity.model || actual.revision!==identity.revision || actual.dimensions!==identity.dimensions ||
+      actual.normalization!=='l2' || actual.pooling!=='last_token' || actual.projectionVersion!==this.documentProjection ||
+      actual.queryInstruction!==this.#profile.embeddingInstruction || response.dimensions!==identity.dimensions ||
+      response.embedding_id!==createHash('sha256').update(stable(actual)).digest('hex') ||
+      !Array.isArray(response.vectors) || response.vectors.length!==texts.length ||
+      response.vectors.some((v:unknown)=>!Array.isArray(v) || v.length!==identity.dimensions || v.some((x:unknown)=>!finite(x)) || Math.abs(Math.hypot(...v)-1)>.02))
+      throw new RankingError('PROTOCOL_MISMATCH','Anchor response differs from the pinned feature profile')
+    return response
   }
 
   async #readPreparationProgress(requestId: string, signal: AbortSignal): Promise<PreparationProgress | undefined> {

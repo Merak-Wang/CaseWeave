@@ -34,9 +34,12 @@ def dataset(kind, n, seed):
         rng.normal(0, .05, (n, 4))
         X = np.ones((n, 4)); y = np.zeros(n, dtype=int)
         y[rng.choice(n, max(1, n // 512), replace=False)] = 1
+    # Binary model outputs cannot represent unknown. Missing required evidence
+    # exercises the supported internal unresolved path without buying a false label.
     rows = [Record(str(i), 'synthetic-v1', digest(['source', i]),
         (Passage('p', 'source.raw_dialogue', f'Synthetic ticket {i}; interpretation supplied only by the scripted oracle.'),),
-        (tuple(map(float, x)),), 'synthetic-space') for i, x in enumerate(X)]
+        (tuple(map(float, x)),), 'synthetic-space',
+        {'required_evidence_fields': ['source.unavailable_fixture']} if kind == 'unknown' else {}) for i, x in enumerate(X)]
     return rows, y, groups
 
 
@@ -59,8 +62,11 @@ async def run_case(kind, n, seed, variant):
         identity = 'synthetic-oracle-not-a-business-model'
         async def generate(self, request):
             payload = json.loads(request['messages'][-1]['content'])
+            assert all(teacher[int(r['ref'])] in (0, 1) for r in payload['records']), \
+                'Unknown fixtures must stay in the internal unresolved evidence path'
             actual.append([r['ref'] for r in payload['records']])
-            return ModelReply({'rows': [{'ref': r['ref'], 'label': {-1:'undetermined', 0:'exclude', 1:'accept'}[int(teacher[int(r['ref'])])],
+            return ModelReply({'rows': [{'ref': r['ref'], 'label': 'accept' if teacher[int(r['ref'])] else 'exclude',
+                'confidence': 1.0,
                 'citations': [{'ref': r['ref'], 'passage_id': 'p', 'quote': r['passages'][0]['text']}],
                 'knowledge_ids': [], 'reason': 'Explicit synthetic oracle; not business evidence.'} for r in payload['records']]})
     store = ArtifactStore()
@@ -91,11 +97,16 @@ async def run_case(kind, n, seed, variant):
         strong = [r for batch in actual for r in batch]
         proxy = [v['ref'] for v in output if v['basis'] == 'proxy']
         assert len(output) == n and len({v['ref'] for v in output}) == n
-        assert not set(strong).intersection(proxy) and set(strong) | set(proxy) == {r.ref for r in rows}
+        unresolved = [v['ref'] for v in output if v['label'] == 'undetermined' and v['basis'] == 'unresolved']
+        assert not set(strong).intersection(proxy)
+        assert set(strong) | set(proxy) | set(unresolved) == {r.ref for r in rows}
+        if kind == 'unknown':
+            assert not actual and not proxy and len(unresolved) == n
         predicted = np.full(n, -2)
         for value in output: predicted[int(value['ref'])] = {'accept':1, 'exclude':0, 'undetermined':-1}[value['label']]
         observations = [json.loads(row[0]) for row in store.db.execute("SELECT data FROM observations WHERE kind='filter_decision'")]
         phases = Counter(v['phase'] for v in observations if v['basis'] in ('model', 'reused_model'))
+        if unresolved: phases['unresolved_no_model'] += len(unresolved)
         phase_requests = defaultdict(set)
         for v in observations:
             if v['basis'] == 'model': phase_requests[v['phase']].add(v['manifest'])
@@ -107,6 +118,8 @@ async def run_case(kind, n, seed, variant):
             'subgroups': {str(g): quality(gold[groups == g], predicted[groups == g]) for g in np.unique(groups)},
             'actual_strong_record_ids': strong, 'actual_strong_batches': actual, 'proxy_record_ids': proxy,
             'outcomes': dict(Counter(v['label'] for v in output)),
+            'fixture_protocol': 'binary_model_decision_with_confidence; unknown=missing_required_source',
+            'complete_determinate_output': not unresolved, 'unresolved_record_count': len(unresolved),
             'phase_records': dict(phases) if phases else {'reference': len(strong)},
             'phase_requests': {k: len(v) for k, v in phase_requests.items()} if phase_requests else {'reference': len(actual)},
             'training_fits': sum(c.get('model_fits', 0) for c in checks),

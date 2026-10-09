@@ -7,6 +7,7 @@ $script:exitCode = 1
 $stage = '环境检查'
 $envFile = Join-Path $PSScriptRoot '.env'
 $action = ''; $device = ''; $nonInteractive = $false; $checkOnly = $false; $build = $true
+$trial = $false; $explicitEnv = $false; $composeOptions = @()
 
 function Show-Usage {
     Write-Host @'
@@ -19,18 +20,20 @@ function Show-Usage {
   --non-interactive 缺少配置时失败，不等待输入
   --check           只检查 Docker 与已有配置，不修改或启动
   --no-build        显式跳过构建，复用已有镜像
+  --trial           三容器试用：授权JSONL、已有模型权重、MySQL和工作台
 '@
 }
 function Invoke-Docker {
     & docker @args
     if ($LASTEXITCODE -ne 0) { $script:exitCode = $LASTEXITCODE; throw 'Docker 命令未完成。' }
 }
-function Invoke-Compose { Invoke-Docker compose --env-file $envFile @args }
+function Invoke-Compose { Invoke-Docker compose --env-file $envFile @composeOptions @args }
 . (Join-Path $PSScriptRoot 'scripts/docker-windows.ps1')
+. (Join-Path $PSScriptRoot 'scripts/model-image-cache.ps1')
 function Read-Config {
     # Compose 负责 dotenv 展开；只在内存读取结果，密钥不进入控制台。
     $ErrorActionPreference = 'Continue'
-    $resolved = & docker compose --env-file $envFile config --environment 2>$null
+    $resolved = & docker compose --env-file $envFile @composeOptions config --environment 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'Compose 配置解析失败，请检查本地 .env 和 COMPOSE_FILE。' }
     $script:config = @{}
     foreach ($line in $resolved) {
@@ -40,7 +43,7 @@ function Read-Config {
 }
 function Test-ComposeConfig {
     $ErrorActionPreference = 'Continue'
-    & docker compose --env-file $envFile config --quiet 2>$null
+    & docker compose --env-file $envFile @composeOptions config --quiet 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'Compose 配置校验失败，请检查本地配置。' }
 }
 function Save-Value([string]$key, [string]$value) {
@@ -85,13 +88,18 @@ try {
             }
             '--gpu' { $device = 'gpu' }
             '--cpu' { $device = 'cpu' }
-            '--env-file' { $i++; if ($i -ge $SetupArguments.Count) { throw '--env-file 缺少路径。' }; $envFile = $SetupArguments[$i] }
+            '--env-file' { $i++; if ($i -ge $SetupArguments.Count) { throw '--env-file 缺少路径。' }; $envFile = $SetupArguments[$i]; $explicitEnv = $true }
+            '--trial' { $trial = $true }
             '--non-interactive' { $nonInteractive = $true }
             '--check' { $checkOnly = $true; $nonInteractive = $true }
             '--no-build' { $build = $false }
             { $_ -in '--help', '-h' } { Show-Usage; exit 0 }
             default { throw "未知选项：$item" }
         }
+    }
+    if ($trial) {
+        $composeOptions = @('-p', 'caseweave-trial', '-f', (Join-Path $PSScriptRoot 'config/app/compose.trial.yml'))
+        if (-not $explicitEnv) { $envFile = Join-Path $PSScriptRoot 'local.env.trial' }
     }
     if (-not $action) { if ($device -or $checkOnly -or -not $build) { $action = 'install' } else { $action = 'start' } }
     if ($checkOnly -and $device) { throw '--check 不修改设备配置，请单独运行 --gpu 或 --cpu。' }
@@ -111,12 +119,39 @@ try {
     }
     $created = -not (Test-Path -LiteralPath $envFile)
     if ($created) {
+        if ($trial) { throw '试用配置缺失：请在local.env.trial填写CASEWEAVE_TRIAL_DATA、CASEWEAVE_TRIAL_MODEL_VOLUME和已有模型服务配置。' }
         if ($checkOnly -or $action -ne 'install') { throw '配置文件不存在，请运行 start.cmd 完成首次初始化。' }
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot '.env.example') -Destination $envFile
         Write-Host "已创建配置：$envFile"
     }
     $stage = '读取配置'; Read-Config
     $port = $script:config.RETRIEVAL_AGENT_WEB_PORT; if (-not $port) { $port = '3080' }
+    if ($trial) {
+        # 试用入口只消费已授权JSONL及已有权重，不下载示例集或初始化Milvus。
+        Test-ComposeConfig
+        if ($checkOnly) { Write-Host '三容器试用配置检查通过；未修改、构建或启动。'; exit 0 }
+        switch ($action) {
+            { $_ -in 'install', 'start' } {
+                if ($build) {
+                    $modelImage = $script:config.CASEWEAVE_TRIAL_MODEL_IMAGE
+                    if (-not $modelImage) { $modelImage = 'retrieval-agent-model-service:trial' }
+                    $modelInputs = Get-ModelBuildFingerprint $PSScriptRoot $script:config.CASEWEAVE_BUILD_UV_IMAGE
+                    if (Test-ModelImageCurrent $modelImage $modelInputs) {
+                        Write-Host '模型构建输入未变化，复用已有模型镜像。'
+                    } else {
+                        Step '模型输入变化或镜像缺失，构建模型服务' @('build', '--build-arg', "CASEWEAVE_MODEL_INPUT_HASH=$modelInputs", 'model-service')
+                    }
+                    Step '构建试用应用更新（复用缓存）' @('build', 'app')
+                }
+                Step '启动三容器试用并等待健康' @('up', '-d', '--wait', '--no-build', '--pull', 'never', 'mysql', 'model-service', 'app')
+                Write-Host "`n试用工作台已启动：http://127.0.0.1:$port/retrieval"
+            }
+            'stop' { Step '停止三容器试用，保留数据卷' @('stop', '--timeout', '60') }
+            'status' { Invoke-Compose ps --all }
+            'logs' { Invoke-Compose logs --tail 100 app model-service mysql }
+        }
+        exit 0
+    }
     if ($action -ne 'install') {
         Test-ComposeConfig
         switch ($action) {

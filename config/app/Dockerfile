@@ -1,4 +1,22 @@
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.12.10@sha256:2bb3ebca0a796a155094a27773d290c4b074572e6107f171d88d086682fd2500
+FROM ${UV_IMAGE} AS uv
+FROM python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7 AS operators
+COPY --from=uv /uv /usr/local/bin/uv
+WORKDIR /app
+ENV UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
+COPY pyproject.toml uv.lock ./
+COPY python/evals/pyproject.toml python/evals/README.md ./python/evals/
+COPY python/model-service/pyproject.toml python/model-service/README.md ./python/model-service/
+COPY python/semantic-operators/pyproject.toml python/semantic-operators/README.md ./python/semantic-operators/
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --package caseweave-semantic-operators --no-dev --no-install-workspace
+COPY python/semantic-operators/src ./python/semantic-operators/src
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --package caseweave-semantic-operators --no-dev --no-editable
+
 FROM node:24.13.0-bookworm-slim@sha256:4660b1ca8b28d6d1906fd644abe34b2ed81d15434d26d845ef0aced307cf4b6f
+COPY --from=operators /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources && apt-get update && apt-get install -y --no-install-recommends libgomp1 libexpat1 libsqlite3-0 libffi8 libssl3 && apt-get clean
+COPY --from=operators /usr/local/ /usr/local/
+ENV CASEWEAVE_PYTHON=/app/.venv/bin/python PYTHONDONTWRITEBYTECODE=1
 ENV PNPM_HOME=/opt/pnpm
 ENV PATH="/opt/pnpm:$PATH"
 WORKDIR /app
@@ -11,7 +29,9 @@ RUN cd /opt/retrieval-runtime/dsh-runner && pnpm install --frozen-lockfile --ign
 COPY --chown=node:node pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm fetch --frozen-lockfile --ignore-scripts
 COPY --chown=node:node . .
-RUN pnpm install --offline --frozen-lockfile --ignore-scripts && pnpm build
+RUN pnpm install --offline --frozen-lockfile --ignore-scripts && pnpm -r --if-present run build
+COPY --from=operators /app/.venv/ /app/.venv/
+RUN /app/.venv/bin/python -c 'import ssl, sqlite3, numpy, scipy, sklearn; import caseweave_ops.server'
 # Install the pinned DSH in the image; user profiles and credentials stay in a volume.
 RUN mkdir -p /app/.cache /app/data/raw /app/data/tickets/esft /app/data/evals/esft-summary-v1 /app/output \
     && node scripts/wiki-store.mjs verify

@@ -1,3 +1,5 @@
+import { ticketGroupHashes, type TicketGroupingSource } from '@retrieval-agent/provider-local'
+import type { NumericFeatureRowGroup } from '@retrieval-agent/contracts'
 import { RetrievalError, assertTrustedPrincipal, type NormalizedTicketRecord, type QueryExpression, type QueryFieldCapability,
   type TicketFieldDescriptor, type TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import { LEGACY_FIELD_CATALOG, stableJson, overviewOrigin } from '@retrieval-agent/provider-local'
@@ -73,6 +75,27 @@ export class DatabaseQueryStore {
     const catalog = [...result.values()].sort((a, b) => a.key.localeCompare(b.key))
     await this.db.pool.query('INSERT IGNORE INTO ra_generation_catalog(generation,catalog_json) VALUES (?,?)', [generation, JSON.stringify(catalog)])
     return catalog
+  }
+  /** Read only true grouping fields for an already authorized, bounded ID window. */
+  async groupHashes(generation: string, ids: readonly string[]): Promise<Map<string, NumericFeatureRowGroup>> {
+    if (!ids.length) return new Map()
+    const keys = ['group_id', 'ticket_id', 'large_model_title', 'large_model_abstract'] as const
+    const payload = keys.map(key => `'${key}',record_json->'$.rawSource.payload.${key}'`).join(',')
+    const presence = keys.map(key => `'${key}',JSON_CONTAINS_PATH(record_json,'one','$.rawSource.payload.${key}')`).join(',')
+    const result = new Map<string, NumericFeatureRowGroup>()
+    for (let offset = 0; offset < ids.length; offset += 2048) {
+      const rows = await this.db.rows<{ ticket_id: string; group_source: TicketGroupingSource; raw_presence: Record<string, number> }>(
+        `SELECT ticket_id,JSON_OBJECT('tenantId',record_json->'$.tenantId','title',record_json->'$.title','summary',record_json->'$.summary',
+          'rawSource',JSON_OBJECT('datasetId',record_json->'$.rawSource.datasetId','payload',JSON_OBJECT(${payload}))) AS group_source,
+          JSON_OBJECT(${presence}) AS raw_presence FROM ra_ticket WHERE generation=? AND ticket_id IN (?)`, [generation, ids.slice(offset, offset + 2048)])
+      for (const row of rows) {
+        const actual: Record<string, unknown> = {}
+        for (const key of keys) if (Number(row.raw_presence[key]) === 1) actual[key] = row.group_source.rawSource?.payload?.[key]
+        result.set(row.ticket_id, ticketGroupHashes({ ...row.group_source,
+          rawSource: { ...row.group_source.rawSource, payload: actual } }))
+      }
+    }
+    return result
   }
   async records(generation: string, ids: readonly string[], full: boolean): Promise<NormalizedTicketRecord[]> {
     if (!ids.length) return []

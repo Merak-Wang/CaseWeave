@@ -72,7 +72,9 @@ class Record:
     def model_payload(self) -> dict[str, Any]:
         # 只向模型暴露可核验正文及业务属性，主动剔除本地向量特征。
         return {"ref": self.ref, "version": self.version, "content_hash": self.content_hash,
-                "passages": [asdict(p) for p in self.passages], "attributes": self.attributes}
+                "passages": [asdict(p) for p in self.passages],
+                "attributes": {k: v for k, v in self.attributes.items()
+                    if k not in {"group_hashes", "group_projection"}}}
 
     @property
     def identity(self) -> str:
@@ -159,6 +161,8 @@ class Decision:
     manifest_id: str | None = None
     error: str | None = None
     inference: dict[str, Any] | None = None
+    # 模型对其二选一结论的自报确信程度；不是校准概率或判定门槛。
+    confidence: float | None = None
 
 
 def verify_citations(raw: Any, records: list[Record]) -> tuple[Citation, ...]:

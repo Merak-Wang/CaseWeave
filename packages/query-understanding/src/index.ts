@@ -404,4 +404,4 @@ export async function buildFastTicketRequest(
   }
 }
 
-export { buildSemanticTicketRequest } from './semantic-request.js'
+export { buildSemanticTicketRequest, DEFAULT_SEMANTIC_EXECUTION } from './semantic-request.js'

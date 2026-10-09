@@ -12,6 +12,7 @@ import pytest
 from retrieval_agent_model_service.errors import ServiceError
 from retrieval_agent_model_service.ranking import (
     BM25F_VERSION,
+    DEFAULT_FIELDS,
     RAG_PROTOCOL_VERSION,
     RetrievalRankingBackend,
     profile_version,
@@ -185,7 +186,7 @@ def test_tokenizer_and_profile_identity_are_versioned() -> None:
     assert RAG_PROTOCOL_VERSION == "retrieval-agent.rag.v1"
     assert profile_version({
         **profile(), "embeddingIdentity": profile()["embeddingIdentity"], "rerankerIdentity": None,
-    }) == "quick-hybrid-v2:42c14be3ea9515ba"
+    }) == "quick-hybrid-v2:4c6c282cb764497c"
 
 
 def test_hybrid_keeps_keyword_and_semantic_candidates_and_caches_vectors(tmp_path) -> None:
@@ -382,13 +383,13 @@ def test_dense_threshold_union_does_not_truncate_keyword_or_vector_matches() -> 
     assert hybrid["execution"]["channels"][1]["resultCount"] == 25
 
 
-@pytest.mark.parametrize("qualifying, expected", [(260, 260), (5, 15), (0, 15)])
-def test_dense_top15_floor_and_strict_threshold(qualifying, expected):
+@pytest.mark.parametrize("qualifying, remaining_score, expected", [(260, .74, 260), (5, .74, 5), (0, .74, 0), (5, .75, 280)])
+def test_dense_inclusive_threshold_without_topk_floor(qualifying, remaining_score, expected):
     class ScoredModels(FakeModels):
         def embed(self, texts, input_type, instruction, dimensions):
             if input_type == "query": return [[1., 0.]]
             return [[score, float(np.sqrt(1-score*score))]
-                    for text in texts for score in [.9 if int(text.split()[1]) < qualifying else .75]]
+                    for text in texts for score in [.9 if int(text.split()[1]) < qualifying else remaining_score]]
     corpus = [{"id": str(i), "contentHash": str(i), "title": str(i), "summary": "", "body": "", "metadata": ""} for i in range(280)]
     backend = RetrievalRankingBackend(ScoredModels())
     result = backend.rank(corpus, {"text": "query", "mode": "dense"}, {"maxScan": 300}, {**profile(), "minimumDenseScore": .75})
@@ -422,3 +423,48 @@ def test_fast_path_without_keywords_skips_keyword_channel_and_keeps_dense() -> N
     assert result["execution"]["executedMode"] == "dense"
     assert [channel["channel"] for channel in result["execution"]["channels"]] == ["vector"]
     assert result["warnings"] == ["keyword_unavailable_dense_only"]
+
+def test_bm25_statistics_use_full_corpus_and_reuse_across_or_queries():
+    import math
+    backend = RetrievalRankingBackend(FakeModels())
+    corpus = [
+        {"id": "a", "contentHash": "a", "title": "needle", "summary": "", "body": "", "metadata": ""},
+        {"id": "b", "contentHash": "b", "title": "other other other other", "summary": "", "body": "", "metadata": ""},
+    ]
+    p = profile()
+    p["bm25f"] = {"fields": {name: {"weight": values["weight"], "b": 0} for name, values in DEFAULT_FIELDS.items()}}
+    first = backend.rank(corpus, {"text": "needle", "mode": "keyword", "keywordQuery": {"terms": ["needle"], "operator": "or"}}, {"maxScan": 10}, p)
+    assert [hit["documentId"] for hit in first["hits"]] == ["a"]
+    assert first["hits"][0]["score"] == pytest.approx(math.log(2) * 2.2 * 3 / 4.2)
+    index = next(iter(backend._lexical_cache.values()))
+    assert index.average_lengths["title"] == 2.5
+    backend.rank(corpus, {"text": "other", "mode": "keyword", "keywordQuery": {"terms": ["other"], "operator": "or"}}, {"maxScan": 10}, p)
+    assert len(backend._lexical_cache) == 1
+    assert next(iter(backend._lexical_cache.values())) is index
+
+
+def test_literal_or_members_remain_when_bm25_score_is_zero():
+    backend = RetrievalRankingBackend(FakeModels())
+    p = profile()
+    p["bm25f"] = {"minimumScore": 1000000}
+    result = backend.rank(documents(), {"text": "副卡", "mode": "keyword", "keywordQuery": {"terms": ["副卡"], "operator": "or"}}, {"maxScan": 10}, p)
+    assert [(hit["documentId"], hit["score"]) for hit in result["hits"]] == [("lexical", 0)]
+
+
+def test_hybrid_channels_overlap_without_waiting_for_lexical(monkeypatch):
+    from retrieval_agent_model_service.ranking import Bm25fIndex
+    lexical_started, dense_started = Event(), Event()
+    original = Bm25fIndex.search
+    def lexical(index, query, excluded, member_ids=None):
+        lexical_started.set()
+        assert dense_started.wait(2), 'dense was serialized behind lexical'
+        return original(index, query, excluded, member_ids)
+    class Models(FakeModels):
+        def embed(self, *args, **kwargs):
+            dense_started.set()
+            assert lexical_started.wait(2), 'lexical did not overlap dense'
+            return super().embed(*args, **kwargs)
+    monkeypatch.setattr(Bm25fIndex, 'search', lexical)
+    backend = RetrievalRankingBackend(Models())
+    result = backend.rank(documents(), {"text": "副卡", "mode": "hybrid", "keywordQuery": {"terms": ["副卡"], "operator": "or"}}, {"maxScan": 10}, profile())
+    assert {channel["channel"] for channel in result["execution"]["channels"]} == {"keyword", "vector"}

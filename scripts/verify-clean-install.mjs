@@ -23,7 +23,7 @@ async function collectRuntimePackage(name) {
 await collectRuntimePackage('@retrieval-agent/bundle')
 const releaseEntries = contract.packages.filter(p => runtimePackages.has(p.name))
 const manager = packageManager()
-const pinnedDshVersion = '0.1.5-rc.2'
+const pinnedDshVersion = '0.2.0-rc.2'
 const tempRoot = mkdtempSync(join(tmpdir(), 'retrieval-agent-clean-install-'))
 const browserReview = process.env.RETRIEVAL_AGENT_BROWSER_REVIEW === '1'
 

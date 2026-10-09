@@ -12,32 +12,18 @@ the configured semantic-recall results, not every ticket in the authorized corpu
 The keyword branch enumerates all literal hits. `learned` is the same implementation;
 `active` is a thin configuration alias for existing callers. Missing numerical resources
 fail explicitly. They never select all-row LLM fallback.
-Explicit `direct`/candidate scopes serve small references; `baseline/cluster` retain
-the old filter for matched migration comparisons only.
+`direct` with full scope enumerates every authorized recall-union ID and reads actual
+source rows for frozen teacher judgments, without fitting or feedback training. Missing
+vectors do not drop tickets. Candidate/example scopes remain small references;
+`baseline/cluster` retain the old filter for matched migration comparisons only.
 
-Aligned IDs and float32/optional CSR blocks are separate from text. Index preparation
-aggregates and normalizes document chunks once. A bounded pool ranks records inside
-that recall union by original-query n-gram coverage and vector similarity; only
-training/selection samples read source text. Shared labels fit sklearn LR, LinearSVC,
-shallow MLP and HGB.
-Separate selection labels choose the model and threshold. Once both selection P/R
-targets pass, one numerical scan writes recall-union predictions without additional
-sampling or LLM calls. Linear inference folds the fitted scaler without quantization.
+Aligned IDs and float32/optional CSR blocks are separate from text. Index preparation normalizes document vectors once. Rank the complete keyword-OR and cosine>=0.75 recall union by original-query n-gram coverage and cosine, then label exactly the first128 tickets (or the entire union if smaller). Do not replace them with random exploration, extend the sample or request a second positive review.
 
-Quality metadata uses `basis=selection`, `precision` and `recall`: these are empirical
-model-selection metrics, not population lower bounds. Existing known labels override
-predictions; unknown labels and missing features remain unresolved. Initial labels and
-positive reviews share a maximum of 128 independent judgment requests per query generation.
-The initial attempt reserves one slot even if it fails; automatic retries and cache hits
-do not consume another slot. Resumes and restarts reuse the same budget. All physical
-attempts, including retries, still count toward usage, failures, QPM, tokens and elapsed time.
-When targets fail, use the best trained model by selection F1 (including earlier fits).
-Selection precision must be at least 0.60: `quality_fallback` identifies this weaker
-acceptance. Lower precision or insufficient selection evidence at the limit returns
-`model_unknown` and only already confirmed tickets; it never publishes a prediction set. Legacy
-`validation_size`/`delta` options are ignored by the default learned route; the explicit
-old baseline remains separate. The sampling limit does not prove completion; other
-call/token/time totals remain metering.
+S2 emits only yes/no and confidence. The valid teacher pseudo-label is y; embeddings are X, and ranking similarity is never the label. Fit LR, LinearSVC, shallow MLP, HGB, feedback prototypes and relation logistic on the shared labels. Training OOF selects models and thresholds; refit selected models on all valid128 labels and use at most three binary voters for remaining union members. Even ties use the best OOF member. No fixed final-reference or precision gate blocks publication. One-class samples use a real-label constant fallback, without fabricating another class.
+
+With learning disabled, the chosen no-feedback operator directly classifies the full recall union without training labels. Teacher yes labels and final model yes labels form the ordinary result/XLSX collection, without human confirmation. Preserve teacher/model origin; do not fabricate a per-row teacher receipt. Confidence and empirical OOF metrics are not calibrated business accuracy.
+
+Transport, parsing and feature failures are execution errors, never no labels or a third semantic class. Resumes reuse completed fixed-sample labels; all physical requests, AnyJev rotations and retries count toward usage, QPM, TPM and time. Technical retries do not expand the128-ticket sample. Legacy baseline routes remain explicit research comparisons only.
 
 The production MySQL result store saves accepted IDs in batches; state carries one
 model/quality descriptor. Paging, reports and downloads use that descriptor, not the

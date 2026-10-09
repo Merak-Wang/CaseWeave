@@ -82,7 +82,7 @@ export class MilvusClient {
       const unique = new Map<string, MilvusHit>()
       const hits = [...best, ...outcomes.flatMap(o => o.status === 'fulfilled' ? o.value : [])]
       for (const hit of hits.sort((a, b) => b.distance - a.distance || a.ticket_id.localeCompare(b.ticket_id))) if (!unique.has(hit.ticket_id)) unique.set(hit.ticket_id, hit)
-      best = [...unique.values()].filter((hit, i) => i < topK || threshold !== undefined && hit.distance > threshold)
+      best = [...unique.values()].filter((hit, i) => threshold === undefined ? i < topK : hit.distance >= threshold)
     }
     const recall = async (batch: readonly string[]) => {
       const hits: MilvusHit[] = [], size = threshold === undefined ? topK : 100
@@ -91,9 +91,9 @@ export class MilvusClient {
         const page = await this.searchFilter(name, vector, `ticket_id in ${JSON.stringify(batch)}`, size, combined, offset)
         if (page.some(h => !batch.includes(h.ticket_id))) throw new Error('Milvus returned an ID outside the authorized filter')
         hits.push(...page)
-        if (threshold === undefined || page.length < size || page.at(-1)!.distance <= threshold) break
+        if (threshold === undefined || page.length < size || page.at(-1)!.distance < threshold) break
       }
-      return hits.filter((hit, i) => i < topK || threshold !== undefined && hit.distance > threshold)
+      return hits.filter((hit, i) => threshold === undefined ? i < topK : hit.distance >= threshold)
     }
     try {
       for await (const batch of batches) {

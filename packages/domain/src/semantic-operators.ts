@@ -1,4 +1,5 @@
-import { RetrievalError, type OperatorRecord, type OperatorDecision, type RetrievalState, type TicketCandidate,
+import { createHash } from 'node:crypto'
+import { assertTicketFilter, RetrievalError, type OperatorRecord, type OperatorDecision, type RetrievalState, type TicketCandidate,
   type TicketCandidateRef, type TicketEvidenceSegment, type SemanticQueryPlan } from '@retrieval-agent/contracts'
 import { mergeCandidateJudgments } from './decision.js'
 import { operatorRequiredFields, requiredEvidenceFields } from './evidence-requirements.js'
@@ -19,7 +20,7 @@ export function operatorRecord(state: RetrievalState, candidate: TicketCandidate
     text: e.text, start: e.start, origin: e.origin?.kind ?? 'unknown' })
   const unresolved = state.judgments?.find(j => j.candidateRef === candidate.ref && j.verdict === 'undetermined')
   return { ref: candidate.ref, version: candidate.sourceVersion, content_hash: candidate.contentHash, passages,
-    attributes: { summary_origin: candidate.summaryOrigin ?? { kind: 'unknown' },
+    attributes: { ...(candidate.groupHashes ? { group_hashes: candidate.groupHashes } : {}), summary_origin: candidate.summaryOrigin ?? { kind: 'unknown' },
       // 重读后保留待解决的具体疑点；它是复核问题，不是来源事实或新的纳入条件。
       ...(unresolved ? { unresolved_issue: unresolved.reason } : {}),
       required_evidence_fields: candidate.summaryOrigin?.verification === 'conflicting' ? candidate.summaryOrigin.requiredEvidenceFields ?? [] : [] } }
@@ -109,9 +110,19 @@ export function admitOperatorDecisions(state: RetrievalState, generation: number
       }))) {
       throw new RetrievalError('INVALID_REQUEST', '判断缺少当前要求的、实际送达模型的原文引用；请定向读取后重新复核。')
     }
+    const unmeasured = missing && inference?.quality === 'unmeasured'
+    if (unmeasured && (!['dual_description_margin', 'name_gmm', 'kmeans'].includes(inference.algorithm)
+      || inference.algorithm !== state.query.contract?.semanticExecution?.semanticMethod
+      || !['accept', 'exclude', 'undetermined'].includes(String(inference.proposed_label))
+      || inference.input_revision !== generation || inference.source_version !== candidate.sourceVersion
+      || inference.content_hash !== candidate.contentHash
+      || inference.record_identity !== createHash('sha256').update(JSON.stringify([candidate.ref, candidate.sourceVersion, candidate.contentHash])).digest('hex'))) {
+      throw new RetrievalError('INVALID_REQUEST', '候选预测未绑定当前任务、判别方法或工单来源身份。')
+    }
     judgments.push({ candidateRef: candidate.ref, verdict: d.label, reason: d.reason,
+      ...(d.confidence != null ? { confidence: d.confidence } : {}),
       evidenceRefs: [...new Set(evidenceRefs.length ? evidenceRefs : [candidate.ref])], basis: d.basis,
-      ...(proxy ? { operatorInference: inference } : manifest ? { operatorManifestId: manifest.id } : {}) })
+      ...(proxy || unmeasured ? { operatorInference: inference } : manifest ? { operatorManifestId: manifest.id } : {}) })
   }
   return mergeCandidateJudgments(state, judgments)
 }
@@ -122,14 +133,27 @@ export function semanticPlanPatch(state: RetrievalState, plan: SemanticQueryPlan
     || !['adaptive', 'examples', 'all'].includes(plan.goal.mode)
     || (plan.goal.mode === 'examples' ? !Number.isSafeInteger(plan.goal.count) || plan.goal.count! < 1 : plan.goal.count !== null)
     || [...plan.keywords, ...plan.retrieval_expressions].some(s => !s.trim() || s.length > 4000)) throw new RetrievalError('INVALID_REQUEST', '自然语言算子计划无效或已过期。')
+  const originalText = [state.query.original, ...(state.userFeedback ?? []).map(f => f.text)].join('\n')
+  const fields = new Map(state.snapshot?.queryFields?.map(f => [f.key, f]))
+  const sourced = plan.structured_conditions ?? []
+  for (const condition of sourced) {
+    assertTicketFilter(condition)
+    const field = fields.get(condition.field)
+    const op = condition.op === 'gte' || condition.op === 'lte' ? 'range' : condition.op === 'neq' ? 'eq' : condition.op
+    if (state.query.contract?.semanticExecution?.orchestration !== 'fixed' || !condition.source_text.trim()
+      || !originalText.includes(condition.source_text) || field?.origin !== 'source' || field.availability !== 'available'
+      || !field.operations.includes(op)) throw new RetrievalError('INVALID_REQUEST', '结构化条件缺少用户原文依据或可用来源字段。')
+  }
+  const filters = [...new Map([...state.query.confirmedConstraints, ...sourced.map(({ source_text: _source, ...filter }) => filter)]
+    .map(filter => [JSON.stringify(filter), filter])).values()]
   const countPolicy = plan.goal.mode === 'all' ? 'exhaustive' as const : plan.goal.mode === 'examples' ? 'explicit' as const : 'adaptive' as const
   const { requestedCount: _taskCount, ...task } = state.task
   const { requestedCount: _specCount, queryPlan: _oldAst, requiredConcepts: _concepts, ...spec } = state.query.spec
   const { resultLimit: _limit, maxResults: _oldLimit, queryPlan: _plan, nlp: _nlp, logic: _logic, ...contract } = state.query.contract!
   return { task: { ...task, countPolicy, ...(plan.goal.count === null ? {} : { requestedCount: plan.goal.count }), completenessRequirement: countPolicy === 'exhaustive' ? 'exhaustive' : 'top_k' },
-    query: { ...state.query, unresolvedConstraints: [], spec: { ...spec, countPolicy, ambiguities: [], compilerVersion: 'python-semantic-plan-v1',
+    query: { ...state.query, confirmedConstraints: filters, unresolvedConstraints: [], spec: { ...spec, filters, countPolicy, ambiguities: [], compilerVersion: 'python-semantic-plan-v1',
       ...(plan.goal.count === null ? {} : { requestedCount: plan.goal.count }) },
-    contract: { ...contract, schemaVersion: 10, semanticPlan: plan, userRequirements: [], ambiguities: [],
+    contract: { ...contract, schemaVersion: 10, semanticPlan: plan, constraints: filters, userRequirements: sourced.map(({ source_text, ...filter }) => ({ text: source_text, status: 'compiled' as const, filters: [filter] })), ambiguities: [],
       resultPolicy: countPolicy === 'exhaustive' ? 'exhaustive_current_snapshot' : countPolicy === 'explicit' ? 'explicit_top_k' : 'adaptive_top_k',
       ...(plan.goal.count === null ? {} : { resultLimit: plan.goal.count }), compilerVersion: 'python-semantic-plan-v1' } } }
 }

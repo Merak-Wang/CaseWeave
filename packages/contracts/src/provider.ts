@@ -81,6 +81,8 @@ export interface TicketRetrievalProvider {
     /** 原始业务查询；仅用于安排标注顺序，不产生相关性结论。 */
     readonly rankingQuery?: string;
   }, options?: ProviderCallOptions): Promise<NumericFeatureBlock>
+  /** Two independently embedded query descriptions, bound to an authorized completed feature scope. */
+  featureAnchors?(principal:TrustedPrincipalContext,request:{readonly snapshotId:TicketSnapshotId;readonly recallScope:string;readonly featureId:string;readonly texts:readonly string[]},options?:ProviderCallOptions):Promise<NumericFeatureAnchors>
   resolveFeatureIds?(principal: TrustedPrincipalContext, request: { readonly snapshotId: TicketSnapshotId;
     readonly ids: readonly number[] }, options?: ProviderCallOptions): Promise<readonly import('./types.js').TicketCandidate[]>
   readonly providerId: string
@@ -100,6 +102,8 @@ export interface TicketRetrievalProvider {
       readonly embedding_id: string; readonly vectors: readonly (readonly number[])[] }[]>
   resolve(request: TicketRetrievalRequest): TicketRetrievalSpec
   openSnapshot(principal: TrustedPrincipalContext, options?: ProviderCallOptions): Promise<TicketSnapshot>
+  /** Rehydrate a Host-owned persisted snapshot under a fresh trusted grant; never issue a replacement snapshot. */
+  restoreSnapshot?(principal: TrustedPrincipalContext, snapshot: TicketSnapshot, options?: ProviderCallOptions): void | Promise<void>
   search(
     principal: TrustedPrincipalContext,
     snapshotId: TicketSnapshotId,
@@ -119,10 +123,19 @@ export interface TicketRetrievalProvider {
   status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus>
 }
 
+/** Provider-derived grouping metadata, local only; absent hashes mean unverified grouping. */
+export interface NumericFeatureRowGroup {
+  readonly group_projection: 'business-and-canonical-nfkc-whitespace-v1'
+  readonly business_hash?: string; readonly canonical_hash?: string
+}
 export interface NumericFeatureBlock {
+  /** Exactly aligned with ids. Both true-source hashes are required for strict group validation. */
+  readonly row_groups?: readonly NumericFeatureRowGroup[];
   readonly ids: readonly number[]; readonly dense: string; readonly dimensions: number;
   readonly available: string; readonly feature_id: string; readonly next_cursor?: string | null;
   /** 与 ids 对齐的 query n-gram / cosine 融合分数，独立于分页和块宽。 */
   readonly scores?: readonly number[];
   readonly sparse?: { readonly data: string; readonly indices: string; readonly indptr: string; readonly columns: number }
 }
+
+export interface NumericFeatureAnchors {readonly feature_id:string;readonly embedding_id:string;readonly dimensions:number;readonly vectors:readonly (readonly number[])[];readonly profileIdentity:Readonly<Record<string,string|number|boolean|null>>}

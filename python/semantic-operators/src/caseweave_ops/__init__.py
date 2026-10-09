@@ -14,21 +14,25 @@ async def invoke_rows(op: str, runtime: Runtime, source: AsyncIterable[Record], 
     """不执行任意代码，也不接受模型覆盖配额、身份或服务端点。"""
     p = params or {}
     # 先按算子执行封闭参数白名单，任何未知操作或附加参数都立即拒绝。
-    allowed = {"sem_filter": {"scope_mode", "batch_size", "require_source", "required_fields", "example_count", "queries", "embedding_id", "keywords", "replay_saved", "algorithm", "options", "host_labels", "initial_refs", "recall_scope_key"},
+    allowed = {"sem_filter": {"scope_mode", "batch_size", "require_source", "required_fields", "example_count", "queries", "embedding_id", "keywords", "replay_saved", "algorithm", "options", "host_labels", "initial_refs", "recall_scope_key", "online_feedback_training", "query_anchor", "negative_anchor"},
                "sem_extract": {"batch_size", "output_schema", "field_map"}, "sem_agg": {"fan_in", "numeric_fields", "evidence_window", "population_count"}}
     if op not in allowed or set(p)-allowed[op]: raise ProtocolError("Unknown operator/argument")
     if op == "sem_filter":
+        if type(p.get("online_feedback_training", True)) is not bool:
+            raise ProtocolError("online_feedback_training must be boolean")
         fields = p.get("required_fields", [])
         if not isinstance(fields, list) or any(not isinstance(f, str) or not f.strip() for f in fields):
             raise ProtocolError("required_fields must contain field names")
-        # 产品和对照都进入同一实现；查询向量只用于检索，不另建实验筛选器。
+        # 产品与对照共用授权入口；无标签方法冻结完整召回池和描述锚点。
         async for result in sem_filter(runtime, source, instruction, batch_size=p.get("batch_size", 8),
                 algorithm=p.get("algorithm", "auto"), options=p.get("options"),
+                online_feedback_training=p.get("online_feedback_training", True),
                 host_labels=p.get("host_labels"), require_source=p.get("require_source", True),
                 required_fields=tuple(fields),
                 replay_saved=p.get("replay_saved", False),
                 scope_mode=p.get("scope_mode", "full"), initial_refs=p.get("initial_refs", []),
-                recall_scope_key=p.get("recall_scope_key"),
+                recall_scope_key=p.get("recall_scope_key"), embedding_id=p.get("embedding_id"),
+                query_anchor=p.get("query_anchor"), negative_anchor=p.get("negative_anchor"),
                 stop_after_accepted=p.get("example_count")):
             yield result if isinstance(result, dict) else {"type": "decision", "value": asdict(result)}
     elif op == "sem_extract":

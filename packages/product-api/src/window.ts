@@ -1,23 +1,25 @@
 import { createHash } from 'node:crypto'
 import { RetrievalError, type RetrievalState, type TicketCandidate, type TicketCandidateNode } from '@retrieval-agent/contracts'
 import { confirmedTickets, confirmedCount } from '@retrieval-agent/domain/result'
+import { predictionRows } from './predictions.js'
 
-export type CandidateView = 'current' | 'confirmed' | 'history'
+export type CandidateView = 'current' | 'confirmed' | 'history' | 'predictions' | 'predictions_all'
 export interface CandidateWindow {
   view: CandidateView; version: string; offset: number; total: number; limit: number;
   items: readonly TicketCandidate[];
   readableCandidateRefs: readonly string[];
-  judgments: readonly { candidateRef: string; verdict: string; reason: string; basis?: string; evidenceRefs: readonly string[] }[];
+  judgments: readonly { candidateRef: string; verdict: string; reason: string; basis?: string; confidence?: number; operatorInference?: import('@retrieval-agent/contracts').OperatorDecision['inference']; evidenceRefs: readonly string[] }[];
   nextCursor?: string;
 }
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 export function candidateWindow(state: RetrievalState, view: CandidateView = 'current', cursor?: string, limit = 30): CandidateWindow {
-  if (!['current', 'confirmed', 'history'].includes(view) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+  if (!['current', 'confirmed', 'history', 'predictions', 'predictions_all'].includes(view) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
     throw new RetrievalError('INVALID_REQUEST', '列表范围或页宽无效，页宽应在 1–100 之间。')
   }
   const excluded = new Set(state.excludedCandidateRefs)
   const items = ['permission_blocked', 'snapshot_invalid'].includes(state.termination) ? []
     : view === 'history' ? state.candidateHistory : view === 'confirmed' ? confirmedTickets(state)
+      : view === 'predictions' || view === 'predictions_all' ? predictionRows(state, view === 'predictions_all' ? 'all' : 'accept').map(row => row.candidate)
       : state.candidates.filter(c => !excluded.has(c.ref))
   // Display-only reads do not invalidate a cursor. New inputs, identities or judgments do.
   const version = digest([state.retrievalId, state.inputGeneration, state.query.confirmedConstraints, view,
@@ -44,9 +46,10 @@ export function candidateWindow(state: RetrievalState, view: CandidateView = 'cu
 export function windowedNode(state: RetrievalState, node: TicketCandidateNode): TicketCandidateNode {
   const page = candidateWindow(state)
   const confirmed = candidateWindow(state, 'confirmed')
-  const refs = new Set(page.items.map(c => c.ref))
+  const refs = new Set(page.items.map(c => c.ref)), predictions = predictionRows(state, 'all')
   return { ...node, candidates: page.items, alreadyReadEvidence: [],
+    predictionExportEnabled: Boolean(node.result && predictions.length && state.snapshot?.capabilities.exportRead && state.accessValidation === 'current'),
     selectedCandidateRefs: node.selectedCandidateRefs?.filter(ref => refs.has(ref)) ?? [],
-    collectionWindow: { current: page.total, history: state.candidateHistory.length, confirmed: confirmedCount(state), version: page.version, limit: page.limit },
+    collectionWindow: { current: page.total, history: state.candidateHistory.length, confirmed: confirmedCount(state), predictions: predictions.filter(row => row.judgment.operatorInference?.proposed_label === 'accept').length, predictionTotal: predictions.length, version: page.version, limit: page.limit },
     ...(node.result ? { result: { ...node.result, tickets: confirmed.items, judgments: node.result.judgments.filter(j => confirmed.items.some(c => c.ref === j.candidateRef)), evidence: [] } } : {}) }
 }

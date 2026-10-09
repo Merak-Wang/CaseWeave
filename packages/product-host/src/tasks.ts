@@ -9,11 +9,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { RetrievalError, RetrievalId, type TicketCandidateNode, type TicketRetrievalProvider } from '@retrieval-agent/contracts'
+import { assertSemanticExecutionOptions, RetrievalError, RetrievalId, type TicketCandidateNode, type TicketRetrievalProvider } from '@retrieval-agent/contracts'
 import { DurableRetrievalAgentService, MySqlTaskStore, compileTaskInformation, executeTaskJob, taskOwner, callReportModel, type TaskJob, type TaskCommand } from '@retrieval-agent/agent-plugin'
 import { projectTicketCandidateState, windowedNode, candidateWindow, candidateEvidence, CandidateDetailService, InMemoryDetailReadAuditSink, learnedResultWindow, materializeLearnedRefs, type CandidateView } from '@retrieval-agent/product-api'
 import { learnedResult } from '@retrieval-agent/domain/result'
-import { SpacyQueryAnalyzer, type TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
+import { DEFAULT_SEMANTIC_EXECUTION, SpacyQueryAnalyzer, type TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
 import { TASK_WORKBENCH_HTML } from './workbench.js'
 import { TaskDeliveryHost, deliveryView, type DeliveryOptions } from './delivery.js'
 
@@ -44,14 +44,16 @@ export function parseTaskCommand(value: unknown): { operationId: string; command
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RetrievalError('INVALID_REQUEST', '命令必须是 JSON 对象。')
   const v = value as Record<string, unknown>
   if (typeof v.operationId !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(v.operationId)) throw new RetrievalError('INVALID_REQUEST', '命令需要有效的幂等键。')
-  const fields: Record<string, string[]> = { query: ['text'], supplement: ['text'], feedback: ['text', 'candidateRef', 'relevance'], answer: ['text', 'questionId'], resume: [], cancel: [] }
+  const fields: Record<string, string[]> = { query: ['text', 'execution'], supplement: ['text'], feedback: ['text', 'candidateRef', 'relevance'], answer: ['text', 'questionId'], resume: [], cancel: [] }
   if (typeof v.kind !== 'string' || !Object.hasOwn(fields, v.kind)
     || Object.keys(v).some(key => !['kind', 'operationId', ...fields[v.kind as string]!].includes(key))) throw new RetrievalError('INVALID_REQUEST', '命令类型或字段无效。')
   if (v.kind !== 'cancel' && v.kind !== 'resume' && (typeof v.text !== 'string' || !v.text.trim() || v.text.length > 2000)) throw new RetrievalError('INVALID_REQUEST', '请输入 1–2000 字的内容。')
   const text = v.text as string
   let command: TaskCommand
   switch (v.kind) {
-    case 'query': command = { kind: 'query', text }; break
+    case 'query':
+      if (v.execution !== undefined) assertSemanticExecutionOptions(v.execution)
+      command = { kind: 'query', text, execution: v.execution ?? DEFAULT_SEMANTIC_EXECUTION }; break
     case 'cancel': command = { kind: 'cancel' }; break
     case 'supplement': command = { kind: 'supplement', text, information: compileTaskInformation(text) }; break
     case 'answer':
@@ -245,7 +247,7 @@ export class TaskHost {
           if (command.kind !== 'query') throw new RetrievalError('INVALID_REQUEST', '新任务需要查询。')
           const agent = await this.options.agentFor(operationId, true)
           const principal = await this.options.applicationFor(agent).principal(agent, 'detail_read')
-          send(response, 202, await this.store.create(operationId, String(agent.session.id), principal, command.text, operationId))
+          send(response, 202, await this.store.create(operationId, String(agent.session.id), principal, command.text, operationId, command.execution))
         } else {
           if (command.kind === 'query') throw new RetrievalError('INVALID_REQUEST', '请通过新任务入口提交查询。')
           const { principal, application, agent } = await this.access(id)

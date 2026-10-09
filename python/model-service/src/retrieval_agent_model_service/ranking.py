@@ -7,6 +7,8 @@ import re
 import threading
 import time
 import unicodedata
+from collections import Counter, OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -19,9 +21,10 @@ from .vector_cache import VECTOR_CACHE_FORMAT_VERSION, VectorCacheStore
 
 RAG_PROTOCOL_VERSION = "retrieval-agent.rag.v1"
 RANKING_TOKENIZER_VERSION = "unicode-han-bigram-v1"
-BM25F_VERSION = f"bm25f-v1:{RANKING_TOKENIZER_VERSION}"
+BM25F_VERSION = f"bm25f-v2-full-corpus:{RANKING_TOKENIZER_VERSION}"
 DENSE_RANKING_VERSION = "exact-cosine-v1"
 DENSE_PROJECTION_VERSION = "ticket-search-projection-v1"
+CANONICAL_PROJECTION_VERSION = "canonical-title-abstract-v1"
 FUSION_VERSION = "weighted-rrf-v1"
 DEFAULT_EMBEDDING_INSTRUCTION = (
     "Given a support ticket search query, retrieve historical tickets with matching "
@@ -150,6 +153,9 @@ def _profile(value: Any) -> dict[str, Any]:
             "model": _string(reranker.get("model"), "reranker model", 500, allow_empty=False),
             "revision": _string(reranker.get("revision"), "reranker revision", 500, allow_empty=False),
         }
+    projection = value.get("documentProjection", DENSE_PROJECTION_VERSION)
+    if projection not in {DENSE_PROJECTION_VERSION, CANONICAL_PROJECTION_VERSION}:
+        raise ServiceError(400, "INVALID_REQUEST", "document projection is invalid.")
     fusion = value.get("fusion", {})
     bm25f = value.get("bm25f", {})
     if not isinstance(fusion, dict) or not isinstance(bm25f, dict):
@@ -178,6 +184,7 @@ def _profile(value: Any) -> dict[str, Any]:
             "vectorWeight": _number(fusion.get("vectorWeight", 0.45), "vector weight", 0),
         },
         "bm25f": bm25f,
+        "documentProjection": projection,
     }
     if not isinstance(result["rerankerEnabled"], bool) or not isinstance(result["allowKeywordFallback"], bool):
         raise ServiceError(400, "INVALID_REQUEST", "ranking profile flags are invalid.")
@@ -191,6 +198,7 @@ def _profile(value: Any) -> dict[str, Any]:
 def profile_version(profile: dict[str, Any]) -> str:
     serializable = {
         "version": "quick-hybrid-v2",
+        "denseRecallPolicy": "cosine-gte-threshold-v1",
         "embeddingIdentity": profile["embeddingIdentity"],
         "rerankerIdentity": profile["rerankerIdentity"],
         "embeddingInstruction": profile["embeddingInstruction"],
@@ -203,6 +211,8 @@ def profile_version(profile: dict[str, Any]) -> str:
         "rerankerEnabled": profile["rerankerEnabled"],
         "rerankTopN": profile["rerankTopN"],
     }
+    if profile.get("documentProjection", DENSE_PROJECTION_VERSION) != DENSE_PROJECTION_VERSION:
+        serializable["documentProjection"] = profile["documentProjection"]
     encoded = _javascript_stable(serializable)
     return f"quick-hybrid-v2:{hashlib.sha256(encoded.encode()).hexdigest()[:16]}"
 
@@ -232,7 +242,8 @@ def _javascript_stable(value: Any) -> str:
 class Bm25fIndex:
     def __init__(self, documents: list[dict[str, str]], options: dict[str, Any]) -> None:
         self.documents = [
-            {"id": document["id"], "fields": {field: tokenize_ranking_text(document[field]) for field in DEFAULT_FIELDS}}
+            {"id": document["id"], "fields": {field: tokenize_ranking_text(document[field]) for field in DEFAULT_FIELDS},
+             "frequencies": {field: Counter(tokenize_ranking_text(document[field])) for field in DEFAULT_FIELDS}}
             for document in documents
         ]
         self.k1 = _number(options.get("k1", 1.2), "BM25F k1", 0.000001)
@@ -262,16 +273,15 @@ class Bm25fIndex:
         count = max(1, len(self.documents))
         self.average_lengths = {field: totals[field] / count for field in DEFAULT_FIELDS}
 
-    def search(self, query: str, excluded_terms: list[str]) -> tuple[list[dict[str, Any]], float]:
+    def search(self, query: str, excluded_terms: list[str], member_ids: set[str] | None = None) -> tuple[list[dict[str, Any]], float]:
         started = time.perf_counter()
         terms = list(dict.fromkeys(tokenize_ranking_text(query)))
         excluded = set(token for term in excluded_terms for token in tokenize_ranking_text(term))
         hits: list[dict[str, Any]] = []
         for document in self.documents:
-            frequencies = {
-                field: {token: document["fields"][field].count(token) for token in set(document["fields"][field])}
-                for field in DEFAULT_FIELDS
-            }
+            if member_ids is not None and document["id"] not in member_ids:
+                continue
+            frequencies = document["frequencies"]
             if any(any(term in frequencies[field] for field in DEFAULT_FIELDS) for term in excluded):
                 continue
             score = 0.0
@@ -292,12 +302,40 @@ class Bm25fIndex:
             if score > self.minimum_score:
                 hits.append({"documentId": document["id"], "score": score})
         hits.sort(key=lambda item: (-item["score"], item["documentId"]))
-        for rank, hit in enumerate(hits, start=1):
-            hit["rank"] = rank
+        _source_ranks(hits)
         return hits, max(0.0, (time.perf_counter() - started) * 1000)
 
 
-def _projection(document: dict[str, str]) -> str:
+def _source_ranks(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Competition ranks: equal raw scores share a rank; ID only breaks output ties."""
+    hits.sort(key=lambda item: (-item["score"], item["documentId"]))
+    previous = None
+    rank = 0
+    for position, hit in enumerate(hits, start=1):
+        if previous is None or hit["score"] != previous:
+            rank = position
+        hit["rank"] = rank
+        previous = hit["score"]
+    return hits
+
+
+def _project_documents(documents: list[dict[str, str]], profile: dict[str, Any]) -> list[dict[str, str]]:
+    if profile["documentProjection"] != CANONICAL_PROJECTION_VERSION:
+        return documents
+    result = []
+    for doc in documents:
+        title = doc["title"].replace("\r\n", "\n").replace("\r", "\n").strip()
+        summary = doc["summary"].replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not title or not summary:
+            raise ServiceError(400, "INVALID_REQUEST", "Canonical title and abstract must both contain text.")
+        result.append({**doc, "title": title, "summary": summary, "body": "", "metadata": ""})
+    return result
+
+
+def _projection(document: dict[str, str], projection: str = DENSE_PROJECTION_VERSION) -> str:
+    if projection == CANONICAL_PROJECTION_VERSION:
+        # Preserve all content; backend complete=True rejects unsupported token lengths.
+        return f"【标题】{document['title']}\n【摘要】{document['summary']}"
     values = [
         f"title: {document['title']}",
         f"summary: {document['summary']}",
@@ -316,6 +354,7 @@ class PreparedCorpus:
     rows: dict[str, tuple[int, str]]
     vectors: np.ndarray
     identity: dict[str, Any]
+    source_hashes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -343,9 +382,18 @@ class RetrievalRankingBackend:
         model_backend: Any,
         vector_cache_dir: Path | None = None,
         checkpoint_every_batches: int = 8,
+        lexical_cache_size: int = 4,
     ) -> None:
         if checkpoint_every_batches < 1:
             raise ValueError("checkpoint_every_batches must be positive")
+        if lexical_cache_size < 1:
+            raise ValueError("lexical_cache_size must be positive")
+        self.lexical_cache_size = lexical_cache_size
+        self._lexical_cache: OrderedDict[str, Bm25fIndex] = OrderedDict()
+        self._lexical_lock = threading.Lock()
+        self._channels = ThreadPoolExecutor(max_workers=2, thread_name_prefix="retrieval-channel")
+        self._anchor_lock = threading.Lock()
+        self._anchor_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self.model_backend = model_backend
         self.vector_cache_dir = vector_cache_dir.resolve() if vector_cache_dir else None
         self.checkpoint_every_batches = checkpoint_every_batches
@@ -378,12 +426,46 @@ class RetrievalRankingBackend:
             raise ServiceError(503, "HYBRID_UNAVAILABLE", "Configured embedding identity is not loaded.", retryable=True)
         return identity
 
-    def _identity(self, documents: list[dict[str, str]], identity: dict[str, Any]) -> dict[str, Any]:
-        return {
-            **identity,
-            "projectionVersion": DENSE_PROJECTION_VERSION,
-            "documents": [{"id": item["id"], "contentHash": item["contentHash"]} for item in documents],
-        }
+    def _feature_identity(self, profile: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
+        return {**identity, "projectionVersion": profile["documentProjection"],
+                "normalization": "l2", "pooling": "last_token", "documentInstruction": None,
+                "queryInstruction": profile["embeddingInstruction"]}
+
+    def _document_hash(self, doc: dict[str, str], profile: dict[str, Any]) -> str:
+        return self._cache_key({"contentHash": doc["contentHash"],
+                               "text": _projection(doc, profile["documentProjection"])})
+
+    def _identity(self, documents: list[dict[str, str]], identity: dict[str, Any],
+                  profile: dict[str, Any]) -> dict[str, Any]:
+        return {**self._feature_identity(profile, identity),
+                "documents": [{"id": item["id"], "contentHash": self._document_hash(item, profile)}
+                              for item in documents]}
+
+    def _lexical_index(self, documents: list[dict[str, str]], profile: dict[str, Any]) -> Bm25fIndex:
+        # The document fields themselves protect against a stale upstream contentHash.
+        key = self._cache_key({"projection": profile["documentProjection"], "bm25f": profile["bm25f"],
+            "documents": sorted(documents, key=lambda doc: doc["id"])})
+        with self._lexical_lock:
+            index = self._lexical_cache.get(key)
+            if index is None:
+                index = Bm25fIndex(documents, profile["bm25f"])
+                self._lexical_cache[key] = index
+            self._lexical_cache.move_to_end(key)
+            while len(self._lexical_cache) > self.lexical_cache_size:
+                self._lexical_cache.popitem(last=False)
+            return index
+
+    def _lexical_hits(self, allowed, keyword_allowed, query, profile):
+        # 完整授权语料提供 DF/均长，OR 成员决定召回；零分成员仍保留。
+        keyword_query = query["keywordQuery"]
+        text = " ".join(keyword_query["terms"]) if keyword_query else query["text"]
+        members = {document["id"] for document in keyword_allowed}
+        hits, elapsed = self._lexical_index(allowed, profile).search(text, query["excludedTerms"], members)
+        if keyword_query is not None:
+            seen = {hit["documentId"] for hit in hits}
+            hits.extend({"documentId": ident, "rank": 0, "score": 0.0} for ident in sorted(members - seen))
+        _source_ranks(hits)
+        return hits, elapsed
 
     def _cache_key(self, identity: dict[str, Any]) -> str:
         return hashlib.sha256(_stable(identity).encode()).hexdigest()
@@ -418,38 +500,81 @@ class RetrievalRankingBackend:
                 "estimatedRemainingMs": eta,
             }
 
+    def _feature_documents(self, documents, profile):
+        return [_project_documents([doc], profile)[0] if all(k in doc for k in DEFAULT_FIELDS) else doc
+                for doc in documents]
+
+    def _matches_feature(self, doc, profile, prepared):
+        found = prepared.rows.get(doc["id"])
+        if not found:
+            return False
+        return found[1] == self._document_hash(doc, profile) if all(k in doc for k in DEFAULT_FIELDS) else prepared.source_hashes.get(doc["id"]) == doc["contentHash"]
+
+    def query_anchors(self, texts, raw_profile):
+        profile = _profile(raw_profile)
+        if not isinstance(texts,list) or not 1 <= len(texts) <= 8:
+            raise ServiceError(400,"INVALID_REQUEST","Anchor texts must contain one to eight inputs.")
+        texts = [_string(text,"anchor text",100_000,allow_empty=False) for text in texts]
+        identity = self._verify_model_identity(profile, True)
+        actual = self._feature_identity(profile, identity)
+        if self.prepared is None or any(self.prepared.identity.get(k) != v for k,v in actual.items()):
+            raise ServiceError(409,"INVALID_VECTOR","Anchor profile differs from prepared features.")
+        key = self._cache_key({"profile":actual,"texts":texts,"schema":"query-anchors-v1"})
+        with self._anchor_lock:
+            cached = self._anchor_cache.get(key)
+            if cached is not None:
+                self._anchor_cache.move_to_end(key)
+                return cached
+            vectors = []
+            width = min(profile["embeddingBatchSize"],self.model_backend.max_batch_size)
+            for offset in range(0,len(texts),width):
+                vectors.extend(self._embed(texts[offset:offset+width],"query",profile["embeddingInstruction"],
+                                          identity["dimensions"],complete=True))
+            values = np.asarray(vectors,dtype=np.float32)
+            if values.shape != (len(texts),identity["dimensions"]) or not np.isfinite(values).all() or not np.allclose(np.linalg.norm(values,axis=1),1,atol=.02):
+                raise ServiceError(500,"INVALID_VECTOR","Anchors must be finite L2 vectors of the pinned dimensions.")
+            result = {"embedding_id":self._cache_key(actual),"dimensions":identity["dimensions"],
+                      "vectors":values.tolist(),"profileIdentity":actual}
+            self._anchor_cache[key]=result
+            while len(self._anchor_cache)>8:
+                self._anchor_cache.popitem(last=False)
+            return result
+
     def read_features(self, documents, raw_profile):
         """Read the prepared corpus by stable ID/hash; never embed a missing row."""
         profile = _profile(raw_profile)
+        documents = self._feature_documents(documents, profile)
         prepared = self.prepared
         if prepared is None:
             return {"embedding_id": "", "rows": []}
         identity = self._verify_model_identity(profile, True)
-        if any(prepared.identity[k] != identity[k] for k in ("model", "revision", "dimensions")):
+        if any(prepared.identity.get(k) != v for k, v in self._feature_identity(profile, identity).items()):
             raise ServiceError(409, "INVALID_VECTOR", "Prepared feature identity differs.")
         rows = []
         for doc in documents:
             found = prepared.rows.get(doc["id"])
-            if found and found[1] == doc["contentHash"]:
+            if found and self._matches_feature(doc, profile, prepared):
                 rows.append({"id": doc["id"], "vector": prepared.vectors[found[0]].tolist()})
-        return {"embedding_id": self._cache_key({**identity, "projectionVersion": DENSE_PROJECTION_VERSION}), "rows": rows}
+        return {"embedding_id": self._cache_key(self._feature_identity(profile, identity)), "rows": rows}
 
     def read_feature_block(self, documents, raw_profile):
         """预处理矩阵按授权 ID 取列块，不重复归一化，不展开 JSON 浮点列表。"""
         import base64
-        identity = self._verify_model_identity(_profile(raw_profile), True)
+        profile = _profile(raw_profile)
+        documents = self._feature_documents(documents, profile)
+        identity = self._verify_model_identity(profile, True)
         prepared = self.prepared
-        if prepared is None or any(prepared.identity[k] != identity[k] for k in ("model", "revision", "dimensions")):
+        if prepared is None or any(prepared.identity.get(k) != v for k, v in self._feature_identity(profile, identity).items()):
             raise ServiceError(409, "INVALID_VECTOR", "Prepared feature generation is unavailable.")
         matrix = np.zeros((len(documents), identity["dimensions"]), dtype="<f4")
         available = np.zeros(len(documents), dtype=np.uint8)
         for i, doc in enumerate(documents):
             found = prepared.rows.get(doc["id"])
-            if found and found[1] == doc["contentHash"]:
+            if found and self._matches_feature(doc, profile, prepared):
                 matrix[i] = prepared.vectors[found[0]]; available[i] = 1
         return {"dense": base64.b64encode(matrix.tobytes()).decode(), "dimensions": matrix.shape[1],
                 "available": base64.b64encode(available.tobytes()).decode(),
-                "embedding_id": self._cache_key({**identity, "projectionVersion": DENSE_PROJECTION_VERSION})}
+                "embedding_id": self._cache_key(self._feature_identity(profile, identity))}
 
     def _vectors(
         self,
@@ -459,7 +584,7 @@ class RetrievalRankingBackend:
         cancel: threading.Event | None = None,
         timings: dict[str, float] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
-        identity = self._identity(documents, self._verify_model_identity(profile, True))
+        identity = self._identity(documents, self._verify_model_identity(profile, True), profile)
         store = VectorCacheStore(self.vector_cache_dir, self._cache_key(identity), identity)
         cached = store.load_final()
         if cached is not None:
@@ -488,7 +613,9 @@ class RetrievalRankingBackend:
         for offset in range(resumed, len(documents), batch_size):
             batch = documents[offset:offset + batch_size]
             values = np.asarray(self._embed(
-                [_projection(document) for document in batch], "document", None, identity["dimensions"], cancel, timings
+                [_projection(document, profile["documentProjection"]) for document in batch], "document", None,
+                identity["dimensions"], cancel, timings,
+                complete=profile["documentProjection"] == CANONICAL_PROJECTION_VERSION
             ), dtype=np.float32)
             if values.shape != (len(batch), identity["dimensions"]):
                 raise ServiceError(500, "INVALID_VECTOR", "Document embedding dimensions changed.")
@@ -528,8 +655,9 @@ class RetrievalRankingBackend:
         started = time.perf_counter()
         documents = _documents(raw_documents, max_scan)
         profile = _profile(raw_profile)
+        documents = _project_documents(documents, profile)
         embedding_identity = self._verify_model_identity(profile, True)
-        key = self._cache_key(self._identity(documents, embedding_identity))
+        key = self._cache_key(self._identity(documents, embedding_identity, profile))
         batch_size = min(profile["embeddingBatchSize"], self.model_backend.max_batch_size)
 
         with self._prepare_lock:
@@ -583,9 +711,10 @@ class RetrievalRankingBackend:
         try:
             vectors, identity = self._vectors(documents, profile, flight)
             prepared = PreparedCorpus(
-                rows={document["id"]: (row, document["contentHash"]) for row, document in enumerate(documents)},
+                rows={document["id"]: (row, self._document_hash(document, profile)) for row, document in enumerate(documents)},
                 vectors=vectors,
                 identity=identity,
+                source_hashes={doc["id"]:doc["contentHash"] for doc in documents},
             )
         except BaseException as error:
             with self._prepare_lock:
@@ -612,11 +741,14 @@ class RetrievalRankingBackend:
         if cancel is not None and cancel.is_set():
             raise ServiceError(499, "CANCELLED", "Ranking cancelled; no further batches will run.")
 
-    def _embed(self, texts, input_type, instruction, dimensions, cancel=None, timings=None):
+    def _embed(self, texts, input_type, instruction, dimensions, cancel=None, timings=None, complete=False):
         self._check_cancel(cancel)
         measured: dict[str, float] = {}
-        if cancel is not None and hasattr(self.model_backend, "embed_measured"):
-            result = self.model_backend.embed_measured(texts, input_type, instruction, dimensions, measured, cancel, False)
+        if hasattr(self.model_backend, "embed_measured") and (cancel is not None or complete):
+            result = self.model_backend.embed_measured(texts, input_type, instruction, dimensions, measured,
+                                                       cancel if cancel is not None else threading.Event(), complete)
+        elif complete:
+            result = self.model_backend.embed(texts, input_type, instruction, dimensions, complete=True)
         else:
             result = self.model_backend.embed(texts, input_type, instruction, dimensions)
         if timings is not None:
@@ -631,8 +763,9 @@ class RetrievalRankingBackend:
         started = time.perf_counter()
         prepared = self.prepared
         selected_rows: list[int] | None = None
-        if prepared is not None and all(
-            document["id"] in prepared.rows and prepared.rows[document["id"]][1] == document["contentHash"]
+        identity = self._verify_model_identity(profile, True)
+        if prepared is not None and all(prepared.identity.get(k) == v for k, v in self._feature_identity(profile, identity).items()) and all(
+            document["id"] in prepared.rows and prepared.rows[document["id"]][1] == self._document_hash(document, profile)
             for document in documents
         ):
             vectors, identity = prepared.vectors, prepared.identity
@@ -641,21 +774,21 @@ class RetrievalRankingBackend:
             vectors, identity = self._vectors(documents, profile, cancel=cancel, timings=timings)
         if timings is not None:
             timings["corpusMs"] = (time.perf_counter() - started) * 1000
-        [query_vector] = self._embed(
-            [query], "query", profile["embeddingInstruction"], identity["dimensions"], cancel, timings
-        )
+        expressions = sorted(set(text.strip() for text in query if text.strip())) if isinstance(query,list) else [query]
+        query_vectors = []
+        width = min(profile["embeddingBatchSize"],self.model_backend.max_batch_size)
+        for offset in range(0,len(expressions),width):
+            query_vectors.extend(self._embed(expressions[offset:offset+width],"query",profile["embeddingInstruction"],
+                identity["dimensions"],cancel,timings,
+                complete=profile["documentProjection"] == CANONICAL_PROJECTION_VERSION))
         matrix = vectors if selected_rows is None else vectors[selected_rows]
-        scores = matrix @ np.asarray(query_vector, dtype=np.float32)
-        hits = [
-            {"documentId": document["id"], "score": float(scores[index])}
-            for index, document in enumerate(documents)
-            if math.isfinite(float(scores[index]))
-        ]
-        hits.sort(key=lambda item: (-item["score"], item["documentId"]))
-        # Top-K 保底与严格阈值取并集，阈值命中不会被页宽截断。
-        hits = [hit for i, hit in enumerate(hits) if i < profile["denseTopK"] or hit["score"] > profile["minimumDenseScore"]]
-        for rank, hit in enumerate(hits, start=1):
-            hit["rank"] = rank
+        all_scores = matrix @ np.asarray(query_vectors,dtype=np.float32).T
+        scores = all_scores.max(axis=1)
+        # 每票取各改写的最高余弦；阈值筛选不补低分票，也不限制命中数量。
+        selected = set(np.flatnonzero(np.isfinite(scores) & (scores >= profile["minimumDenseScore"])).tolist())
+        hits = [{"documentId":doc["id"],"score":float(scores[i])}
+                for i,doc in enumerate(documents) if i in selected and math.isfinite(float(scores[i]))]
+        _source_ranks(hits)
         return hits, {
             "elapsedMs": max(0.0, (time.perf_counter() - started) * 1000),
             "model": identity["model"], "revision": identity["revision"], "dimensions": identity["dimensions"],
@@ -674,6 +807,7 @@ class RetrievalRankingBackend:
         if mode not in {"keyword", "dense", "hybrid"}:
             raise ServiceError(400, "INVALID_REQUEST", "ranking mode is invalid.")
         profile = _profile(raw_profile)
+        documents = _project_documents(documents, profile)
         query = {
             "text": _string(raw_query.get("text"), "ranking query", 12_000, allow_empty=False),
             "fastPath": raw_query.get("fastPath", False),
@@ -693,7 +827,7 @@ class RetrievalRankingBackend:
         keyword_query = query["keywordQuery"]
         if keyword_query is not None and (
             not isinstance(keyword_query, dict) or keyword_query.get("operator") not in {"and", "or"}
-            or not isinstance(keyword_query.get("terms"), list) or not 1 <= len(keyword_query["terms"]) <= 8
+            or not isinstance(keyword_query.get("terms"), list) or not 1 <= len(keyword_query["terms"]) <= 64
             or not all(isinstance(term, str) and term.strip() for term in keyword_query["terms"])
         ):
             raise ServiceError(400, "INVALID_REQUEST", "keyword query is invalid.")
@@ -705,14 +839,17 @@ class RetrievalRankingBackend:
         keyword_allowed = [document for document in allowed if self._keyword_eligible(document, query)] if keyword_enabled else []
         lexical: list[dict[str, Any]] | None = None
         lexical_elapsed = 0.0
-        if keyword_enabled:
-            text = " ".join(keyword_query["terms"]) if keyword_query and keyword_query["terms"] else query["text"]
-            lexical, lexical_elapsed = Bm25fIndex(keyword_allowed, profile["bm25f"]).search(text, query["excludedTerms"])
-            if keyword_query is not None:
-                seen = {hit["documentId"] for hit in lexical}
-                for document in sorted(keyword_allowed, key=lambda item: item["id"]):
-                    if document["id"] not in seen:
-                        lexical.append({"documentId": document["id"], "rank": len(lexical) + 1, "score": 0.0})
+        expressions = [query["semanticText"] or query["text"], *query["semanticHints"]]
+        dense_query = expressions if profile["documentProjection"] == CANONICAL_PROJECTION_VERSION else "\n".join(filter(None, expressions))
+        # 常驻两线程调度独立通道，GPU 请求仍经过现有模型后端队列。
+        parallel = keyword_enabled and mode == "hybrid" and profile["embeddingIdentity"] is not None
+        dense_future = None
+        if parallel:
+            lexical_future = self._channels.submit(self._lexical_hits, allowed, keyword_allowed, query, profile)
+            dense_future = self._channels.submit(self._dense, allowed, dense_query, profile, cancel, timings)
+            lexical, lexical_elapsed = lexical_future.result()
+        elif keyword_enabled:
+            lexical, lexical_elapsed = self._lexical_hits(allowed, keyword_allowed, query, profile)
         keyword_execution = None if lexical is None else {
             "channel": "keyword", "implementation": "bm25f", "version": BM25F_VERSION,
             "resultCount": len(lexical), "elapsedMs": lexical_elapsed,
@@ -727,9 +864,8 @@ class RetrievalRankingBackend:
                 raise ServiceError(503, "HYBRID_UNAVAILABLE", "Dense retrieval requires a configured embedding identity.", retryable=True)
             hits = [self._channel_hit(item, "keyword") for item in lexical or []]
             return self._result(mode, "keyword_fallback", profile, hits, [keyword_execution], allowed, keyword_allowed, ["dense_unavailable_keyword_fallback"])
-        dense_query = "\n".join(filter(None, [query["semanticText"] or query["text"], *query["semanticHints"]]))
         try:
-            dense, dense_meta = self._dense(allowed, dense_query, profile, cancel, timings)
+            dense, dense_meta = dense_future.result() if dense_future is not None else self._dense(allowed, dense_query, profile, cancel, timings)
         except ServiceError as error:
             if error.code == "CANCELLED":
                 raise
@@ -745,7 +881,7 @@ class RetrievalRankingBackend:
         if mode == "dense":
             return self._result(mode, "dense", profile, [self._channel_hit(item, "vector") for item in dense], [dense_execution], allowed, keyword_allowed, [])
         fused = bool(lexical)
-        hits = self._fusion(lexical, dense, profile["fusion"]) if fused else [self._channel_hit(item, "vector") for item in dense]
+        hits = self._fusion(lexical or [], dense, profile["fusion"])
         channels = [keyword_execution, dense_execution]
         warnings = [] if fused else ["keyword_no_hits_dense_only" if lexical is not None else "keyword_unavailable_dense_only"]
         reranker = None
@@ -782,7 +918,8 @@ class RetrievalRankingBackend:
 
     @staticmethod
     def _channel_hit(hit: dict[str, Any], channel: str) -> dict[str, Any]:
-        return {**hit, "channels": [{"channel": channel, "rank": hit["rank"], "score": hit["score"]}]}
+        raw = "lexical_raw" if channel == "keyword" else "dense_raw"
+        return {**hit, raw: hit["score"], "channels": [{"channel": channel, "rank": hit["rank"], "score": hit["score"]}]}
 
     @staticmethod
     def _fusion(keyword: Iterable[dict[str, Any]], dense: Iterable[dict[str, Any]], options: dict[str, float]) -> list[dict[str, Any]]:
@@ -790,15 +927,25 @@ class RetrievalRankingBackend:
         for channel, hits, weight in (("keyword", keyword, options["keywordWeight"]), ("vector", dense, options["vectorWeight"])):
             if weight == 0:
                 continue
+            best: dict[str, dict[str, Any]] = {}
             for hit in hits:
+                if not math.isfinite(hit["score"]):
+                    continue
+                old = best.get(hit["documentId"])
+                if old is None or hit["score"] > old["score"]:
+                    best[hit["documentId"]] = {"documentId": hit["documentId"], "score": hit["score"]}
+            # Rank each globally deduplicated source from its raw scores.
+            for hit in _source_ranks(list(best.values())):
                 row = rows.setdefault(hit["documentId"], {"score": 0.0, "channels": []})
                 row["score"] += weight / (options["rankConstant"] + hit["rank"])
+                row["lexical_raw" if channel == "keyword" else "dense_raw"] = hit["score"]
                 row["channels"].append({"channel": channel, "rank": hit["rank"], "score": hit["score"]})
-        values = [{"documentId": key, **value} for key, value in rows.items()]
+        values = [{"documentId": key, **value, "fused": value["score"]} for key, value in rows.items()]
         values.sort(key=lambda item: (-item["score"], item["documentId"]))
         for rank, hit in enumerate(values, start=1):
             hit["rank"] = rank
         return values
+
 
     def _rerank(self, hits: list[dict[str, Any]], documents: list[dict[str, str]], query: dict[str, Any], profile: dict[str, Any]) -> tuple[list[dict[str, Any]], Any, str | None, Any]:
         started = time.perf_counter()
@@ -833,6 +980,8 @@ class RetrievalRankingBackend:
 
     @staticmethod
     def _result(requested: str, executed: str, profile: dict[str, Any], hits: list[dict[str, Any]], channels: list[Any], allowed: list[Any], keyword_allowed: list[Any], warnings: list[str]) -> dict[str, Any]:
+        # Overall page rank is ordinal; each source channel preserves tied competition ranks.
+        hits = [{**hit, "rank": index + 1} for index, hit in enumerate(hits)]
         return {
             "hits": hits,
             "execution": {

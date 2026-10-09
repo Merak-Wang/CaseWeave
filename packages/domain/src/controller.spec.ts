@@ -1053,3 +1053,107 @@ describe('RetrievalController', () => {
   })
 
 })
+
+describe('trusted Provider snapshot restoration during presentation', () => {
+  it('restores a completed numeric collection after same-source snapshot reauthorization', async () => {
+    const { controller } = setup(provider())
+    const active = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    const stopped = controller.stopIncomplete(active, 'snapshot expired')
+    const state = { ...stopped, termination: 'snapshot_invalid' as const, accessValidation: 'required' as const,
+      budget: { ...stopped.budget, operatorUsage: { learning: { input_revision: stopped.inputGeneration ?? 0,
+        stop_reason: 'complete', result_set: { returned: 3 } } } } }
+    const restored = await controller.reauthorize(PRINCIPAL, state)
+    expect(restored).toMatchObject({ phase: 'stopped', termination: 'top_k_accepted', accessValidation: 'current' })
+    expect(restored.budget.operatorUsage).toEqual(state.budget.operatorUsage)
+    expect(restored.frozenEvidence?.packId).toBe(state.frozenEvidence?.packId)
+  })
+  it.each(['active', 'terminal'] as const)('restores the exact persisted %s snapshot after a provider restart without a new snapshot or state revision', async lifecycle => {
+    const base = provider()
+    let registered = true, restores = 0, statuses = 0, opens = 0
+    const abort = new AbortController()
+    const port: TicketRetrievalProvider = { ...base,
+      async openSnapshot(...args) { opens++; return base.openSnapshot(...args) },
+      async status(...args) { statuses++; return registered ? base.status(...args) : { providerId: base.providerId, ready: true, readOnly: true, snapshotValid: false, warnings: ['snapshot_invalid'] } },
+      async restoreSnapshot(principal, snapshot, options) {
+        expect(principal).toBe(PRINCIPAL)
+        expect(snapshot).toBe(initial.snapshot)
+        expect(options?.signal).toBe(abort.signal)
+        restores++; registered = true
+      },
+    }
+    const { controller } = setup(port)
+    const active = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    const initial = lifecycle === 'terminal' ? controller.stopIncomplete(active, 'Synthetic snapshot restoration fixture') : active
+    registered = false; statuses = 0
+    const restored = await controller.reauthorize(PRINCIPAL, initial, abort.signal)
+    expect(restored).toBe(initial)
+    expect(restored.snapshot).toBe(initial.snapshot)
+    expect(restored.stateId).toBe(initial.stateId)
+    expect(restored.candidates).toEqual(initial.candidates)
+    expect(restored.phase).toBe(initial.phase)
+    expect(restored.frozenEvidence?.packId ?? restored.stateId).toBe(initial.frozenEvidence?.packId ?? initial.stateId)
+    if (lifecycle === 'terminal') {
+      expect(restored).toMatchObject({ phase: 'stopped', termination: 'partial' })
+      expect(restored.frozenEvidence?.packId).toBeDefined()
+      expect(createTicketResultCollection(restored)).toEqual(createTicketResultCollection(initial))
+      expect(createTicketResultCollection(restored).resultRevision).toBe(createTicketResultCollection(initial).resultRevision)
+    } else {
+      expect(restored.phase).not.toBe('stopped')
+      expect(() => createTicketResultCollection(initial)).toThrow(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
+      expect(() => createTicketResultCollection(restored)).toThrow(expect.objectContaining({ code: 'INVALID_TRANSITION' }))
+    }
+    expect({ restores, statuses, opens }).toEqual({ restores: 1, statuses: 2, opens: 1 })
+    await controller.reauthorize(PRINCIPAL, restored)
+    expect(restores).toBe(1)
+  })
+
+  it.each(['source', 'index', 'expired'])('keeps the existing %s invalidation when strict restoration rejects', async cause => {
+    const base = provider()
+    let registered = true
+    const { controller } = setup({ ...base,
+      async status(...args) { return registered ? base.status(...args) : { providerId: base.providerId, ready: true, readOnly: true, snapshotValid: false, warnings: ['snapshot_invalid'] } },
+      async restoreSnapshot() { throw new RetrievalError('SNAPSHOT_INVALID', cause) },
+    })
+    const initial = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    registered = false
+    expect(await controller.reauthorize(PRINCIPAL, initial)).toMatchObject({ termination: 'snapshot_invalid', accessValidation: 'required', candidates: [] })
+  })
+
+  it('does not trust a successful restore return until current Provider status validates the original snapshot', async () => {
+    const base = provider()
+    let registered = true
+    const { controller } = setup({ ...base,
+      async status(...args) { return registered ? base.status(...args) : { providerId: base.providerId, ready: true, readOnly: true, snapshotValid: false, warnings: ['snapshot_invalid'] } },
+      async restoreSnapshot() {},
+    })
+    const initial = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    registered = false
+    expect(await controller.reauthorize(PRINCIPAL, initial)).toMatchObject({ termination: 'snapshot_invalid', candidates: [] })
+  })
+
+  it('keeps permission withdrawal when the fresh grant cannot restore the persisted snapshot', async () => {
+    const base = provider()
+    let registered = true
+    const { controller } = setup({ ...base,
+      async status(...args) { return registered ? base.status(...args) : { providerId: base.providerId, ready: true, readOnly: true, snapshotValid: false, warnings: ['snapshot_invalid'] } },
+      async restoreSnapshot() { throw new RetrievalError('UNAUTHORIZED', 'grant changed') },
+    })
+    const initial = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    registered = false
+    expect(await controller.reauthorize(PRINCIPAL, initial)).toMatchObject({ termination: 'permission_blocked', candidates: [] })
+  })
+
+  it('keeps cancellation uncommitted when aborted during restoration', async () => {
+    const base = provider(), abort = new AbortController()
+    let registered = true
+    const { controller, journal } = setup({ ...base,
+      async status(...args) { return registered ? base.status(...args) : { providerId: base.providerId, ready: true, readOnly: true, snapshotValid: false, warnings: ['snapshot_invalid'] } },
+      async restoreSnapshot() { abort.abort(new Error('cancel restore')) },
+    })
+    const initial = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })
+    const events = journal.read(initial.retrievalId).length
+    registered = false
+    await expect(controller.reauthorize(PRINCIPAL, initial, abort.signal)).rejects.toThrow('cancel restore')
+    expect(journal.read(initial.retrievalId)).toHaveLength(events)
+  })
+})

@@ -72,14 +72,14 @@ def test_only_query_operations_retry(tmp_path, monkeypatch):
     assert len(port.requests) == 1
 
 
-def test_retry_uses_shared_sampling_budget_across_restart(tmp_path, monkeypatch):
+def test_retry_last_slot_counts_physical_calls_and_restart_preserves_cap(tmp_path, monkeypatch):
     path = tmp_path / "budget.sqlite"
     store = ArtifactStore(path)
     scope = Scope("t", 1, "s", "a")
     for _ in range(127):
-        ident = store.begin("t", scope.key, "sem_filter", {"input_revision": 1}, sampling_scope=scope)
+        ident = store.begin("t", scope.key, "sem_filter", {"input_revision": 1})
         store.finish(ident, "error", Usage(), "prior_failure")
-    port = Port([ModelRequestError("TRANSPORT", "failed", True), {"ok": True}])
+    port = Port([ModelRequestError("TRANSPORT", "failed", True), {"ok": True}, {"ok": True}])
     rt = Runtime(scope, port, store, Knowledge("w"))
     result = asyncio.run(rt.call("sem_filter", "x", {}, {"type": "object"}, sampling=True, use_cache=False))
     assert result.payload == {"ok": True} and len(port.requests) == 2
@@ -91,11 +91,18 @@ def test_retry_uses_shared_sampling_budget_across_restart(tmp_path, monkeypatch)
     assert store.db.execute("select count(*) from calls").fetchone()[0] == 129
     resumed = ArtifactStore(path)
     rt.store = resumed
-    with pytest.raises(SamplingLimitReached): asyncio.run(rt.call("sem_filter", "x", {"new": True}, {"type": "object"}, sampling=True, use_cache=False))
-    assert len(port.requests) == 2 and resumed.sampling_calls(scope) == 128
+    try:
+        with pytest.raises(SamplingLimitReached):
+            asyncio.run(rt.call("sem_filter", "x", {"new": True}, {"type": "object"}, sampling=True, use_cache=False))
+        assert len(port.requests) == 2 and resumed.sampling_calls(scope) == 128
+        assert resumed.metrics("t")["llm_adapter_calls"] == 129
+        assert resumed.metrics("t")["running"] == 0
+    finally:
+        resumed.close()
+        store.close()
 
 
-def test_concurrent_retries_do_not_consume_additional_logical_quota(tmp_path, monkeypatch):
+def test_concurrent_retries_meter_all_attempts_without_crossing_128_logical_calls(tmp_path, monkeypatch):
     class ConcurrentPort:
         identity = "concurrent-retry"
         def __init__(self): self.calls = 0
@@ -110,9 +117,10 @@ def test_concurrent_retries_do_not_consume_additional_logical_quota(tmp_path, mo
     rt = Runtime(Scope("t", 1, "s", "a"), port, store, Knowledge("w"))
     async def run():
         return await asyncio.gather(*(rt.call("sem_filter", "x", {"i": i}, {"type": "object"}, sampling=True,
-            use_cache=False) for i in range(128)), return_exceptions=True)
+            use_cache=False) for i in range(256)), return_exceptions=True)
     results = asyncio.run(run())
-    assert all(not isinstance(result, Exception) for result in results)
+    assert sum(not isinstance(result, Exception) for result in results) == 128
+    assert sum(isinstance(result, SamplingLimitReached) for result in results) == 128
     assert store.sampling_calls(rt.scope) == 128
     assert port.calls == 192
     assert store.metrics("t")["failed_attempts"] == 64
@@ -143,13 +151,13 @@ def test_filter_cancels_and_settles_sibling_requests_after_retry_exhaustion(make
 def test_missing_knowledge_ids_in_three_of_four_rows_retries_under_one_sampling_slot(tmp_path, monkeypatch):
     no_delay(monkeypatch)
     malformed = {"rows": [
-        {"ref": "@r1", "label": "accept", "citations": [], "knowledge_ids": [], "reason": "ok"},
-        {"ref": "@r2", "label": "exclude", "citations": [], "reason": "missing knowledge_ids"},
-        {"ref": "@r3", "label": "undetermined", "citations": [], "reason": "missing knowledge_ids"},
-        {"ref": "@r4", "label": "accept", "citations": [], "reason": "missing knowledge_ids"},
+        {"ref": "@r1", "label": "accept", "confidence": .9, "citations": [], "knowledge_ids": [], "reason": "ok"},
+        {"ref": "@r2", "label": "exclude", "confidence": .4, "citations": [], "reason": "missing knowledge_ids"},
+        {"ref": "@r3", "label": "exclude", "confidence": .3, "citations": [], "reason": "missing knowledge_ids"},
+        {"ref": "@r4", "label": "accept", "confidence": .8, "citations": [], "reason": "missing knowledge_ids"},
     ]}
     corrected = {"rows": [
-        {"ref": f"@r{i}", "label": "undetermined", "citations": [], "knowledge_ids": [], "reason": "ok"}
+        {"ref": f"@r{i}", "label": "exclude", "confidence": .5, "citations": [], "knowledge_ids": [], "reason": "ok"}
         for i in range(1, 5)
     ]}
     port = Port([malformed, corrected])
@@ -174,7 +182,7 @@ def test_missing_knowledge_ids_in_three_of_four_rows_retries_under_one_sampling_
 def test_three_output_schema_failures_settle_with_usage_and_one_quota_slot(tmp_path, monkeypatch):
     no_delay(monkeypatch)
     malformed = {"rows": [
-        {"ref": "@r1", "label": "accept", "citations": [], "reason": "missing knowledge_ids"},
+        {"ref": "@r1", "label": "accept", "confidence": .9, "citations": [], "reason": "missing knowledge_ids"},
     ]}
     port = Port([malformed, malformed, malformed])
     store = ArtifactStore(tmp_path / "output-schema-exhausted.sqlite")

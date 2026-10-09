@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, IconDownloadOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconDownloadOutlineMedium, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   describeExportCandidatesFailure,
@@ -68,7 +68,7 @@ export function ProductHeaderExport({ sessionId, useChat }: ProductHeaderExportP
         <Button
           variant="ghost"
           size="sm"
-          icon={<IconDownloadOutline16 />}
+          icon={<IconDownloadOutlineMedium />}
           disabled={disabled}
           aria-busy={status === 'preparing'}
           aria-label="下载全部确认工单"

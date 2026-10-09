@@ -4,9 +4,9 @@
 
 主要实现入口为 [语义计划契约](../../packages/contracts/src/semantic-operators.ts)、[Python 规划器](../../python/semantic-operators/src/caseweave_ops/search.py) 和 [数据库 Provider](../../packages/provider-database/src/provider.ts)。数据库当前物理表以 [store.ts 的 DDL](../../packages/provider-database/src/store.ts) 为事实源：`ra_generation`/`ra_ticket`/独立字段投影、`ra_index`/job/checkpoint/cache、原子 publication、每路 search_run/search_hit。它们存来源与检索产物；确认、反馈和合法转移仍由 Controller 和权威任务状态维护，不能用 SQL 命中直接替代 Agent 判断。
 
-当前字段映射 `normalized-fields-v2` 遍历完整原始字段值，不沿用旧 searchText 的 256 值上限；NULL 保持未知，生成字段能力显式引用生成策略。MySQL 导入时将规范化字段拆为唯一 bigram，写入 `ra_gram`。查询以 NFKC 小写文本编译精确二进制 LOCATE；bigram 仅缩小候选，原字面谓词仍负责最终匹配。AND 可使用任一正向必要 gram，OR 仅使用所有分支共同需要的 gram，NOT 不作正向剪枝；选择最窄 posting，覆盖超过语料 10% 时改走精确扫描，避免宽 posting 强制 join。默认规划检索将完整关键词命中集通过 SQL `INSERT … SELECT` 写入候选表，数据集仅存 ID 与命中信息，不把全库正文搬入 Host；候选视窗、排序页宽与向量工单 Top-K 分开。
+当前字段映射 `normalized-fields-v2` 遍历完整原始字段值，不沿用旧 searchText 的 256 值上限；NULL 保持未知，生成字段能力显式引用生成策略。MySQL 导入时将规范化字段拆为唯一 bigram，写入 `ra_gram`。查询以 NFKC 小写文本编译精确二进制 LOCATE；bigram 仅缩小候选，原字面谓词仍负责最终匹配。AND 可使用任一正向必要 gram，OR 仅使用所有分支共同需要的 gram，NOT 不作正向剪枝；选择最窄 posting，覆盖超过语料 10% 时改走精确扫描，避免宽 posting 强制 join。默认规划检索将完整关键词命中集通过 SQL `INSERT … SELECT` 写入候选表，数据集仅存 ID 与命中信息，不把全库正文搬入 Host；候选视窗和排序页宽不限制向量阈值命中数量。
 
-索引使用 `field-codepoints-v3`：ESFT 摘要与完整 raw_dialogue，360 Unicode 字符分片、保留全部尾部；problem_description 是客户轮次的派生副本，避免重复索引。模型身份包含 revision/维度/归一化/距离、切片版本；每个命中复核 ticket/contentHash/sourceVersion/片段位置及哈希。SQL 生成授权且满足硬条件的工单集合，按 ID 游标分片，每片最多 1,000 个 ID、最多四片并发。Milvus 按工单聚合最佳片段，每页取 100 条，持续读取直到分片穷尽或分数不再大于 0.75；合并后保留全局 Top 15 和全部阈值命中的并集，100 不构成总量上限。分片避免超过 Milvus 的深分页范围，Python 搜索算子继续读取全部 Provider 结果页。本地 JSONL 的精确余弦路径采用同一并集规则。任一批失败不把剩余批次冒充完整向量结果。更新和删除生成新的不可变来源/集合，复用相同内容 embedding；完全就绪后单一发布指针切换，滞后索引不能混入当前 SQL 版本。
+索引使用 `field-codepoints-v3`：ESFT 摘要与完整 raw_dialogue，360 Unicode 字符分片、保留全部尾部；problem_description 是客户轮次的派生副本，避免重复索引。模型身份包含 revision/维度/归一化/距离、切片版本；每个命中复核 ticket/contentHash/sourceVersion/片段位置及哈希。SQL 生成授权且满足硬条件的工单集合，按 ID 游标分片，每片最多 1,000 个 ID、最多四片并发。Milvus 按工单聚合最佳片段，每页取 100 条，持续读取直到分片穷尽或分数低于 0.75；合并后保留余弦相似度大于等于 0.75 的全部工单，不以 Top-K 补入低分工单，100 不构成总量上限。分片避免超过 Milvus 的深分页范围，Python 搜索算子继续读取全部 Provider 结果页。本地 JSONL 的精确余弦路径采用同一阈值规则。任一批失败不把剩余批次冒充完整向量结果。更新和删除生成新的不可变来源/集合，复用相同内容 embedding；完全就绪后单一发布指针切换，滞后索引不能混入当前 SQL 版本。
 
 ## 模型服务部署边界
 
@@ -61,6 +61,8 @@ Python 负责语义计算，Host 负责身份、来源、当前输入代次、�
 查询计划完成后，默认 `auto/learned` 全集发现由数据库一次执行关键词集合写入，并与向量召回并行；候选集合留在 SQL，Host 只读取供界面和 Agent 使用的有限窗口。显式结构化查询或需要逐条取候选的路径仍按稳定查询版本、唯一身份和 keyset 游标分页。任一路未完成或失败都保留通道状态，不将部分结果说成全集。
 
 ## 4. Milvus 语义召回与融合
+
+数据库关键词通道先枚举完整字面命中集，再按该集合计算 BM25F 分数；全局排名以每批 500 条写入 `ra_search_hit`，两路完成后统一计算 weighted RRF。批次大小只控制 SQL 写入次数，不限制候选数量，也不改变同分排名。在线学习的 n-gram 与向量采样排序由 Python 算子处理，与 Provider 的 RRF 候选展示顺序分别记录。
 
 首轮向量输入保持用户原句。查询 embedding 使用与索引一致的模型/revision、向量维度、归一化及距离约定；缓存键包含这些身份。后续可并行发多个经 Agent 解释的搜索表达，避免仅把首句反复执行。
 

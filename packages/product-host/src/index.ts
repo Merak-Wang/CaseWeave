@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-workspace'
@@ -10,7 +10,8 @@ import {
   RetrievalId,
   TicketCandidateRef,
 } from '@retrieval-agent/contracts'
-import type {} from '@retrieval-agent/agent-plugin'
+import { DurableRetrievalAgentService } from '@retrieval-agent/agent-plugin'
+import { trustedExportBinding } from './export-binding.js'
 import { installTaskHost } from './tasks.js'
 export * from './tasks.js'
 import {
@@ -48,7 +49,7 @@ export function parseExportCandidatesParams(value: unknown): ExportCandidatesPar
     throw new RetrievalError('INVALID_REQUEST', '导出请求格式无效。')
   }
   const record = value as Record<string, unknown>
-  if (Object.keys(record).some(key => !['sessionId', 'retrievalId', 'candidateRefs', 'resultRevision'].includes(key))) {
+  if (Object.keys(record).some(key => !['sessionId', 'retrievalId', 'candidateRefs', 'resultRevision', 'format', 'collection', 'predictionSelection'].includes(key))) {
     throw new RetrievalError('INVALID_REQUEST', '导出请求包含未知字段。')
   }
   if (typeof record.sessionId !== 'string' || record.sessionId.trim().length === 0 || record.sessionId.length > 512) {
@@ -58,6 +59,9 @@ export function parseExportCandidatesParams(value: unknown): ExportCandidatesPar
     || record.resultRevision.trim().length === 0 || record.resultRevision.length > 512) {
     throw new RetrievalError('INVALID_REQUEST', '检索或候选引用无效。')
   }
+  if (record.format !== undefined && !['csv', 'xlsx'].includes(String(record.format))) throw new RetrievalError('INVALID_REQUEST', '导出格式无效。')
+  if (record.collection !== undefined && !['confirmed', 'predictions'].includes(String(record.collection))
+    || record.predictionSelection !== undefined && (record.collection !== 'predictions' || !['accept', 'all'].includes(String(record.predictionSelection)))) throw new RetrievalError('INVALID_REQUEST', '导出集合或候选预测范围无效。')
   if (record.candidateRefs !== undefined && (!Array.isArray(record.candidateRefs)
     || record.candidateRefs.length === 0 || record.candidateRefs.some(ref => typeof ref !== 'string'))) {
     throw new RetrievalError('INVALID_REQUEST', '候选引用无效。')
@@ -66,6 +70,9 @@ export function parseExportCandidatesParams(value: unknown): ExportCandidatesPar
     sessionId: record.sessionId.trim(),
     retrievalId: RetrievalId(record.retrievalId),
     resultRevision: record.resultRevision,
+    ...(record.format === undefined ? {} : { format: record.format as 'csv' | 'xlsx' }),
+    ...(record.collection === undefined ? {} : { collection: record.collection as 'confirmed' | 'predictions' }),
+    ...(record.predictionSelection === undefined ? {} : { predictionSelection: record.predictionSelection as 'accept' | 'all' }),
     ...(record.candidateRefs === undefined ? {} : {
       candidateRefs: (record.candidateRefs as string[]).map(ref => TicketCandidateRef(ref)),
     }),
@@ -255,6 +262,8 @@ export async function exportCandidatesForAgent(
   if (state === undefined || state.retrievalId !== params.retrievalId) {
     throw new RetrievalError('INVALID_REQUEST', '当前会话没有对应的检索结果。')
   }
+  const exportBinding = retrievalAgent instanceof DurableRetrievalAgentService
+    ? await trustedExportBinding(retrievalAgent.store, state, params.resultRevision) : undefined
   const assertCurrentResult = async (): Promise<void> => {
     const current = await (retrievalAgent.stateForTask?.(agent, params.retrievalId) ?? retrievalAgent.currentOrUndefined(agent))
     if (current?.retrievalId !== state.retrievalId || current.phase !== 'stopped'
@@ -264,12 +273,20 @@ export async function exportCandidatesForAgent(
     if (['permission_blocked', 'snapshot_invalid'].includes(current.termination)) {
       throw new RetrievalError('SNAPSHOT_INVALID', '当前确认结果的访问资格已失效，请重新复核。')
     }
+    if (exportBinding && retrievalAgent instanceof DurableRetrievalAgentService) {
+      await trustedExportBinding(retrievalAgent.store, current, params.resultRevision, exportBinding)
+    }
   }
   await assertCurrentResult()
   const principal = await retrievalAgent.principal(agent, 'export', signal)
   await assertCurrentResult()
-  const exported = await new CandidateExportService(provider, audit, { assertCurrentResult, semanticResults: retrievalAgent.semanticResults })
-    .exportCsv(principal, state, params.candidateRefs, signal)
+  const exporter = new CandidateExportService(provider, audit, { ...(exportBinding ? { exportBinding } : {}), assertCurrentResult, semanticResults: retrievalAgent.semanticResults })
+  if (params.format === 'xlsx') {
+    const exported = await exporter.exportXlsx(principal, state, params.candidateRefs, signal, { ...(params.collection ? { collection: params.collection } : {}), ...(params.predictionSelection ? { predictionSelection: params.predictionSelection } : {}) })
+    await retrievalAgent.recordExport(agent, exported.receipt)
+    return { fileName: exported.fileName, mediaType: exported.mediaType, contentBase64: Buffer.from(exported.content).toString('base64'), receipt: exported.receipt }
+  }
+  const exported = await exporter.exportCsv(principal, state, params.candidateRefs, signal, { ...(params.collection ? { collection: params.collection } : {}), ...(params.predictionSelection ? { predictionSelection: params.predictionSelection } : {}) })
   await retrievalAgent.recordExport(agent, exported.receipt)
   return {
     fileName: exported.fileName,

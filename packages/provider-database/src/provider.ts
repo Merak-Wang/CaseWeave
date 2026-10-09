@@ -4,19 +4,22 @@ import { RetrievalError, assertTrustedPrincipal, validateQueryExpression, normal
   type TicketRetrievalRequest, type TicketRetrievalSpec, type TicketSearchOptions, type TicketSearchPage,
   type TicketSnapshot, type TrustedPrincipalContext, type QueryExpression } from '@retrieval-agent/contracts'
 import { LocalTicketProvider, principalBinding, sha256, stableJson, shortOpaque, candidateL0, matchFragment,
-  overviewOrigin, projectDetails, projectEvidence } from '@retrieval-agent/provider-local'
+  overviewOrigin, projectDetails, projectEvidence, rankingDocuments } from '@retrieval-agent/provider-local'
+import { rankSourceHits, type DocumentProjection, type RetrievalRanker, type RankingDocument } from '@retrieval-agent/model-service-client/ranking'
+import { rankRewriteHits, type RewriteHit } from './recall.js'
 import type { RetrievalModelGateway } from '@retrieval-agent/model-service-client'
 import type { ResultSetHeader } from 'mysql2/promise'
 import { TicketDatabase, type Generation, type IndexGeneration } from './store.js'
 import { DatabaseQueryStore } from './query-store.js'
 import { MilvusClient } from './milvus.js'
 import { grams, ticketChunks } from './projection.js'
+import { effectiveQueryInstruction, queryEmbeddingIdentity } from './embedding-policy.js'
 
-const PROFILE = 'mysql-milvus-set-vector-v2'
+const PROFILE = 'mysql-milvus-set-vector-v5-cosine-gte-threshold'
 interface Entry { source: Generation; index?: IndexGeneration; snapshot: TicketSnapshot }
 interface Channel { channel: 'keyword' | 'vector'; status: 'running' | 'completed' | 'failed' | 'skipped'; count: number; error?: string; cursor?: string }
 interface Run { channels: Channel[]; timings: Record<string, number>; total: number; eligible: number; authorized: number; finished: boolean }
-interface Hit { ticket_id: string; keyword_hit: number; vector_rank: number | null; vector_score: number | null; fused_score: number }
+interface Hit { ticket_id: string; keyword_rank?:number; keyword_score?:number; keyword_hit: number; vector_rank: number | null; vector_score: number | null; fused_score: number }
 interface Cursor { run: string; score: number; id: string; offset: number }
 const all: QueryExpression = { kind: 'constant', value: true }
 const and = (...children: QueryExpression[]): QueryExpression => ({ kind: 'and', children })
@@ -34,8 +37,13 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
   readonly #queryVectors = new Map<string, Promise<readonly number[]>>()
   readonly #resolver = new LocalTicketProvider([], { defaultMode: 'hybrid' })
   readonly #query: DatabaseQueryStore
+  readonly #profile: string
   constructor(readonly db: TicketDatabase, readonly milvus: MilvusClient, readonly model: RetrievalModelGateway,
-    readonly datasetId = 'esft-development', readonly denseTopK = 15) { this.#query = new DatabaseQueryStore(db) }
+    readonly datasetId = 'esft-development', readonly denseTopK = 15,
+    readonly ranking: {lexicalRanker?:RetrievalRanker;documentProjection?:DocumentProjection} = {}) {
+    this.#query = new DatabaseQueryStore(db)
+    this.#profile = ranking.lexicalRanker ? `mysql-milvus-bm25f-rrf-v4-pinned-query:${ranking.lexicalRanker.profileVersion}:${ranking.documentProjection??'ticket-search-projection-v1'}` : PROFILE
+  }
   resolve(request: TicketRetrievalRequest): TicketRetrievalSpec { return this.#resolver.resolve(request) }
   async openSnapshot(principal: TrustedPrincipalContext, options?: ProviderCallOptions): Promise<TicketSnapshot> {
     assertTrustedPrincipal(principal); options?.signal?.throwIfAborted()
@@ -43,7 +51,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     const snapshotId = TicketSnapshotId(shortOpaque('snap', principalBinding(principal), source.id, index?.id ?? '', randomUUID()))
     const snapshot: TicketSnapshot = { snapshotId, shortId: sha256(snapshotId).slice(0, 10), providerId: this.providerId,
       createdAt: new Date().toISOString(), sourceVersion: source.id, indexVersion: index?.id ?? 'vector-unavailable',
-      retrievalProfileVersion: PROFILE, authorizationVersion: principal.entitlementVersion,
+      retrievalProfileVersion: this.#profile, authorizationVersion: principal.entitlementVersion,
       principalBindingHash: principalBinding(principal), queryPolicyVersion: 'query-policy-v1', queryFields: source.fields_json,
       fieldCatalog: (await this.#query.catalog(source.id)).map(f => { const capability = source.fields_json.find(c => c.key === f.key); return { ...f, ...(capability ? { capability } : {}) } }),
       capabilities: { exhaustive: true, pagination: true, evidencePromotion: true, detailRead: true, exportRead: true,
@@ -64,18 +72,18 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     const source = await this.db.generation(saved.generation)
     const index = saved.index_id ? (await this.db.rows<IndexGeneration>('SELECT * FROM ra_index WHERE id=?', [saved.index_id]))[0] : undefined
     // Pre-v2 snapshots used LocalTicketProvider's composite source/index hashes.
-    if (source.dataset_id !== this.datasetId || snapshot.retrievalProfileVersion === PROFILE
+    if (source.dataset_id !== this.datasetId || snapshot.retrievalProfileVersion === this.#profile
         && (snapshot.sourceVersion !== source.id || snapshot.indexVersion !== (saved.index_id ?? 'vector-unavailable'))
       || saved.index_id && (!index || index.generation !== source.id || index.status !== 'ready'
         || index.watermark !== source.source_watermark || index.completed_chunks !== index.total_chunks)) throw new RetrievalError('SNAPSHOT_INVALID', '快照来源或索引已不可用。')
+    if(index && this.ranking.documentProjection==='canonical-title-abstract-v1' && (index.identity_json.documentProjection!=='canonical-title-abstract-v1' || index.identity_json.chunkVersion!=='canonical-title-abstract-codepoints-v1' || !index.identity_json.queryInstruction?.trim() || index.identity_json.pooling!=='last_token')) throw new RetrievalError('PROVIDER_UNAVAILABLE','Canonical retrieval requires a compatible canonical publication; legacy body vectors cannot be reused.')
     return { source, ...(index ? { index } : {}), snapshot }
   }
   async #queryVector(entry: Entry, query: string, options?: ProviderCallOptions,
     onTiming?: (values: Readonly<Record<string, number>>) => void): Promise<readonly number[]> {
     options?.signal?.throwIfAborted()
     const identity = entry.index!.identity_json
-    const cacheIdentity = sha256(stableJson({ model: identity.model, revision: identity.revision,
-      dimensions: identity.dimensions, normalization: identity.normalization, inputType: 'query' }))
+    const cacheIdentity = sha256(stableJson(queryEmbeddingIdentity(identity)))
     const textHash = sha256(query), key = `${entry.snapshot.snapshotId}:${cacheIdentity}:${textHash}`
     let pending = this.#queryVectors.get(key)
     if (!pending) {
@@ -86,6 +94,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
         const ready = await this.model.ready(options?.signal), active = ready.models.find(m => m.kind === 'embedding')
         if (active?.model !== identity.model || active.revision !== identity.revision || active.dimensions !== identity.dimensions) throw new Error('Query model and published index identities differ')
         const [vector] = await this.model.embed({ texts: [query], inputType: 'query', requireCompleteInput: true,
+          instruction: effectiveQueryInstruction(identity),
           ...(onTiming ? { onTiming } : {}), ...(options?.signal ? { signal: options.signal } : {}) })
         if (!vector || vector.length !== identity.dimensions) throw new Error('Embedding/index dimension mismatch')
         await this.db.pool.query('INSERT IGNORE INTO ra_embedding_cache(identity_hash,text_hash,vector_json) VALUES (?,?,?)',
@@ -104,7 +113,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
   async search(principal: TrustedPrincipalContext, snapshotId: TicketSnapshot['snapshotId'], spec: TicketRetrievalSpec, options: TicketSearchOptions): Promise<TicketSearchPage> {
     if (!Number.isInteger(options.topK) || options.topK < 1 || options.topK > 100 || !Number.isSafeInteger(options.maxScan) || options.maxScan < 1) throw new RetrievalError('INVALID_REQUEST', '单页数量必须为 1–100，读取批次容量必须为正整数。')
     options.signal?.throwIfAborted()
-    const entry = await this.#entry(principal, snapshotId), key = sha256(stableJson({ snapshotId, spec, profile: PROFILE,
+    const entry = await this.#entry(principal, snapshotId), key = sha256(stableJson({ snapshotId, spec, profile: this.#profile,
       vectorRecall: { minimum: this.denseTopK, threshold: .75, expressions: spec.semanticHints } }))
     let pending = this.#inflight.get(key)
     if (!pending) {
@@ -133,19 +142,22 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
         if (!cursor || cursor.run !== key || !Number.isFinite(cursor.score) || typeof cursor.id !== 'string' || !Number.isSafeInteger(cursor.offset) || cursor.offset < 0) throw new RetrievalError('INVALID_REQUEST', '游标不属于当前查询。')
       }
     }
-    const hits = await this.db.rows<Hit>(`SELECT ticket_id,keyword_hit,vector_rank,vector_score,fused_score FROM ra_search_candidate
-      WHERE run_id=? ${cursor ? 'AND (fused_score<? OR (fused_score=? AND ticket_id>?))' : ''}
-      ORDER BY fused_score DESC,ticket_id LIMIT ?`, [key, ...(cursor ? [cursor.score, cursor.score, cursor.id] : []), options.topK + 1])
+    const hits = await this.db.rows<Hit>(`SELECT c.ticket_id,c.keyword_hit,c.vector_rank,c.vector_score,c.fused_score,k.rank_no keyword_rank,k.score keyword_score FROM ra_search_candidate c
+      LEFT JOIN ra_search_hit k ON k.run_id=c.run_id AND k.ticket_id=c.ticket_id AND k.channel='keyword'
+      WHERE c.run_id=? ${cursor ? 'AND (c.fused_score<? OR (c.fused_score=? AND c.ticket_id>?))' : ''}
+      ORDER BY c.fused_score DESC,c.ticket_id LIMIT ?`, [key, ...(cursor ? [cursor.score, cursor.score, cursor.id] : []), options.topK + 1])
     const selected = hits.slice(0, options.topK), ids = selected.map(h => h.ticket_id)
     await this.#query.validate(entry.source.id, (await this.db.publication(this.datasetId)).source.id, ids, principal)
     const records = new Map((await this.#query.records(entry.source.id, ids, false)).map(r => [r.ticketId as string, r]))
     const offset = cursor?.offset ?? 0, terms = spec.keywordQuery?.terms ?? []
+    const groups = await this.#query.groupHashes(entry.source.id, selected.map(hit => hit.ticket_id))
     const candidates = selected.map((hit, i) => {
       const r = records.get(hit.ticket_id)!
       const fragment = (field: 'title' | 'summary') => { const match = matchFragment(r[field], terms); return match ? [{ field, ...match }] : [] }
       return { ref: TicketCandidateRef(shortOpaque('cand', entry.snapshot.snapshotId, r.ticketId)), displayId: r.displayId,
         sourceVersion: r.sourceVersion, snapshotId: entry.snapshot.snapshotId, contentHash: r.contentHash,
         evidenceLevel: 'L1' as const, projectionVersion: 2 as const, title: r.title, summary: r.summary,
+        ...(groups.get(hit.ticket_id) ? { groupHashes: groups.get(hit.ticket_id)! } : {}),
         summaryOrigin: overviewOrigin(r, 'summary'), titleOrigin: overviewOrigin(r, 'title'), l0: candidateL0(r), rank: offset + i + 1,
         matchFragments: [...fragment('title'), ...fragment('summary')], matchSignals: { keywordTerms: [...terms],
           channels: [...(hit.keyword_hit ? ['keyword' as const] : []), ...(hit.vector_rank ? ['vector' as const] : [])] } }
@@ -160,12 +172,12 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
       scanned: run.eligible, returned: candidates.length, elapsedMs: run.timings.elapsedMs ?? 0, appliedFilters: [...spec.filters],
       warnings: [...run.channels.filter(c => c.status === 'failed').map(c => `channel_failed:${c.channel}:${c.error}`), ...(rebased ? ['ranking_rebased:排序规则升级，已从头枚举并保留原候选引用。'] : [])],
       trace: { stage: options.stage, requestedMode: spec.mode,
-        executedMode: complete.length === 2 ? 'hybrid' : complete[0]?.channel === 'vector' ? 'dense' : 'keyword', strategyVersion: PROFILE,
-        channels: complete.map(c => ({ channel: c.channel, implementation: c.channel === 'keyword' ? 'mysql-locate-set' : 'milvus-rest',
+        executedMode: complete.length === 2 ? 'hybrid' : complete[0]?.channel === 'vector' ? 'dense' : 'keyword', strategyVersion: this.#profile,
+        channels: complete.map(c => ({ channel: c.channel, implementation: c.channel === 'keyword' ? this.ranking.lexicalRanker ? 'bm25f' : 'mysql-locate-set' : 'milvus-rest',
           version: c.channel === 'keyword' ? entry.source.id : entry.index!.id, resultCount: c.count, elapsedMs: run.timings[`${c.channel}Ms`] ?? 0,
           querySource: options.stage === 'repair_search' ? 'agent_rewrite' : c.channel === 'keyword' ? 'direct_user_keywords' : 'direct_user_original' })),
         signals: candidates.map((c, i) => { const h = selected[i]!; return { candidateRef: c.ref, finalRank: c.rank, fusedScore: h.fused_score,
-          channels: [...(h.keyword_hit ? [{ channel: 'keyword' as const, rank: 1, score: 1 }] : []),
+          channels: [...(h.keyword_hit ? [{ channel: 'keyword' as const, rank: h.keyword_rank??1, score: h.keyword_score??1 }] : []),
             ...(h.vector_rank ? [{ channel: 'vector' as const, rank: h.vector_rank, score: h.vector_score! }] : [])] } }) },
       boundary: { authorizedCorpusSize: run.authorized, documentsAfterStructuredFilters: run.eligible,
         documentsEligibleForKeywordChannel: run.channels[0]!.count, rankedHits: run.total,
@@ -177,7 +189,14 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     const keyword = unchanged && spec.queryPlan ? spec.queryPlan.keyword : spec.keywordQuery
       ? { kind: spec.keywordQuery.operator, children: spec.keywordQuery.terms.map(text => ({ kind: 'literal' as const, op: 'contains' as const, text })) } as QueryExpression
       : spec.queryPlan?.keyword ?? { kind: 'constant' as const, value: false }
-    const expression = and(hard, keyword, ...spec.excludedTerms.map(text => ({ kind: 'not' as const, child: { kind: 'literal' as const, op: 'contains' as const, text } })))
+    const projected = (e:QueryExpression):QueryExpression => {
+      if(this.ranking.documentProjection!=='canonical-title-abstract-v1') return e
+      if(e.kind==='literal' && e.field===undefined) return {kind:'or',children:['title','summary'].map(field=>({...e,field}))}
+      if(e.kind==='and'||e.kind==='or') return {...e,children:e.children.map(projected)}
+      if(e.kind==='not') return {...e,child:projected(e.child)}
+      return e
+    }
+    const expression = and(hard, projected(keyword), ...spec.excludedTerms.map(text => ({ kind: 'not' as const, child: projected({ kind: 'literal' as const, op: 'contains' as const, text }) })))
     validateQueryExpression(expression, entry.source.fields_json); validateQueryExpression(hard, entry.source.fields_json)
     const scope = (e: QueryExpression) => this.#query.scope(entry.source.id, current.source.id, principal, e, entry.source.fields_json, Boolean(entry.source.grams_ready))
     const [authorizedScope, eligibleScope, keywordScope] = await Promise.all([scope(all), scope(hard), scope(expression)])
@@ -240,6 +259,31 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
           SELECT ?,c.ticket_id,'keyword',1,1,t.content_hash,NULL FROM ra_search_candidate c
           JOIN ra_ticket t ON t.generation=? AND t.ticket_id=c.ticket_id WHERE c.run_id=? AND c.keyword_hit=TRUE
           ON DUPLICATE KEY UPDATE rank_no=1,score=1,detail_json=NULL`, [key, entry.source.id, key])
+        if(this.ranking.lexicalRanker) {
+          const documents:RankingDocument[]=[]
+          for await(const ids of this.#query.ids(keywordScope,Math.min(500,options.maxScan),options.signal)) {
+            const records=await this.#query.records(entry.source.id,ids,this.ranking.documentProjection!=='canonical-title-abstract-v1')
+            documents.push(...rankingDocuments(records,this.ranking.documentProjection))
+          }
+          if(documents.length) {
+            const ranked=await this.ranking.lexicalRanker.rank(documents,{text:spec.keywordQuery?.terms.join(' ')||spec.normalizedQuery,mode:'keyword',
+              ...(spec.keywordQuery ? {keywordQuery:spec.keywordQuery} : {}),semanticHints:[],excludedTerms:[]},
+              {maxScan:documents.length,...(options.signal ? {signal:options.signal} : {})})
+            const raw=ranked.hits.flatMap(hit=>hit.channels.filter(c=>c.channel==='keyword').map(c=>({documentId:hit.documentId,score:c.score})))
+            const present=new Set(raw.map(hit=>hit.documentId))
+            for(const doc of documents) if(!present.has(doc.id)) raw.push({documentId:doc.id,score:0})
+            const hashes = new Map(documents.map(document => [document.id, document.contentHash]))
+            const hits = rankSourceHits(raw)
+            // 字面候选已完整入库；只批量更新全局 BM25 排名，最终融合统一读取这些排名。
+            for (let offset = 0; offset < hits.length; offset += 500) {
+              options.signal?.throwIfAborted()
+              const rows = hits.slice(offset, offset + 500).map(hit => [key, hit.documentId, 'keyword',
+                hit.rank, hit.score, hashes.get(hit.documentId), '{"implementation":"bm25f"}'])
+              await this.db.pool.query(`INSERT INTO ra_search_hit(run_id,ticket_id,channel,rank_no,score,source_hash,detail_json) VALUES ?
+                ON DUPLICATE KEY UPDATE rank_no=VALUES(rank_no),score=VALUES(score),detail_json=VALUES(detail_json)`, [rows])
+            }
+          }
+        }
         run.timings.sqlFirstBatchMs = performance.now() - started
         run.timings.sqlMs = performance.now() - at
       }),
@@ -247,7 +291,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
         if (!entry.index) throw new Error('No index published for this SQL generation')
         const expressions = [...new Set([options.stage === 'repair_search' ? spec.semanticQuery ?? spec.normalizedQuery : spec.queryPlan?.vector.text ?? spec.fastQuery?.vector.text ?? spec.originalQuery,
           ...(options.stage === 'repair_search' ? spec.semanticHints : [])])]
-        const seen = new Set<string>()
+        const rewriteHits:RewriteHit[]=[]
         for (const expression of expressions) {
         const at = performance.now()
         const vector = await this.#queryVector(entry, expression, options,
@@ -261,15 +305,17 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
         await this.#query.validate(entry.source.id, (await this.db.publication(this.datasetId)).source.id, ids, principal)
         const records = new Map((await this.#query.records(entry.source.id, ids, true)).map(r => [r.ticketId as string, r]))
         for (const hit of found) {
-          if (seen.has(hit.ticket_id)) continue
           const record = records.get(hit.ticket_id)
           if (!record || record.contentHash !== hit.content_hash || record.sourceVersion !== hit.source_version) throw new Error('Milvus source identity mismatch')
-          const chunk = ticketChunks(record, entry.index.identity_json.chunkChars).find(c => c.id === hit.id)
+          const chunk = ticketChunks(record, entry.index.identity_json.chunkChars, entry.index.identity_json.documentProjection).find(c => c.id === hit.id)
           if (!chunk || chunk.textHash !== hit.text_hash || chunk.field !== hit.field || chunk.part !== Number(hit.part) || chunk.start !== Number(hit.start) || chunk.end !== Number(hit.end)) throw new Error('Milvus fragment identity mismatch')
-          await add([hit.ticket_id], 'vector', ++run.channels[1]!.count, hit.distance, hit)
-          seen.add(hit.ticket_id)
+          rewriteHits.push({hit,source:sha256(expression)})
         }
-        // 原句命中即可交给采样；改写表达继续召回，不挡住分类学习。
+        const globallyRanked=rankRewriteHits(rewriteHits)
+        run.channels[1]!.count=globallyRanked.length
+        for(const ranked of globallyRanked) await add([ranked.hit.ticket_id],'vector',ranked.rank,ranked.hit.distance,{...ranked.hit,sources:ranked.sources})
+        // Each completed expression updates the best raw cosine and the global source ranks.
+
         await notify()
         }
       }),
@@ -277,6 +323,12 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     await tail
     const failed = outcomes.find(o => o.status === 'rejected')
     if (failed?.status === 'rejected') throw failed.reason
+    const weights=this.ranking.lexicalRanker ? [.55,.45] : [1,1]
+    await this.db.pool.query(`UPDATE ra_search_candidate c
+      LEFT JOIN ra_search_hit k ON k.run_id=c.run_id AND k.ticket_id=c.ticket_id AND k.channel='keyword'
+      LEFT JOIN ra_search_hit v ON v.run_id=c.run_id AND v.ticket_id=c.ticket_id AND v.channel='vector'
+      SET c.fused_score=IF(k.rank_no IS NULL,0,?/(60+k.rank_no))+IF(v.rank_no IS NULL,0,?/(60+v.rank_no))
+      WHERE c.run_id=?`,[...weights,key])
     run.finished = true; run.timings.elapsedMs = performance.now() - started
     await this.db.pool.query('UPDATE ra_search_run SET status_json=? WHERE id=?', [JSON.stringify(run), key])
     return run
@@ -302,7 +354,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     const records = await this.#query.records(entry.source.id, [...refs.values()], true)
     const vectors = new Map<string, number[][]>()
     for (const record of records) {
-      const chunks = ticketChunks(record, entry.index.identity_json.chunkChars)
+      const chunks = ticketChunks(record, entry.index.identity_json.chunkChars, entry.index.identity_json.documentProjection)
       const parts: number[][] = []
       for (let start = 0; start < chunks.length; start += 256) {
         const batch = chunks.slice(start, start + 256)
@@ -368,7 +420,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     const refIds = request.refs ? [...(await this.#references(entry, principal, request.refs)).values()] : undefined
     const selector = request.ids ? 'f.ordinal IN (?)' : refIds ? 'f.ticket_id IN (?)' : 'f.ordinal>?'
     const featureId = request.recallScope !== undefined ? sha256(stableJson({ index: entry.index.id, recallScope: request.recallScope })) : entry.index.id
-    if (request.ids?.length === 0 || refIds?.length === 0) return { ids: [], dense: '', available: '', dimensions: entry.index.identity_json.dimensions, feature_id: featureId, next_cursor: null }
+    if (request.ids?.length === 0 || refIds?.length === 0) return { ids: [], row_groups: [], dense: '', available: '', dimensions: entry.index.identity_json.dimensions, feature_id: featureId, next_cursor: null }
     const rows = await this.db.rows<{ ordinal: number; ticket_id: string; vector_blob: Buffer | null }>(
       `SELECT f.ordinal,f.ticket_id,f.vector_blob FROM ${scope.from}${request.recallScope !== undefined ? ' JOIN ra_search_candidate rc ON rc.run_id=? AND rc.ticket_id=t.ticket_id' : ''} JOIN ra_numeric_feature f ON f.index_id=? AND f.ticket_id=t.ticket_id WHERE ${scope.where} AND ${selector} ORDER BY f.ordinal LIMIT ?`,
       // scope 的 FROM 参数在 JOIN 参数之前，WHERE 参数在之后。
@@ -388,7 +440,8 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
       const queryGrams = grams(request.rankingQuery), normalized = normalizeLiteral(request.rankingQuery)
       if (!queryGrams.length && normalized) queryGrams.push(normalized)
       const ids = ordered.map(r => r.ticket_id)
-      const indexed = entry.source.grams_ready && Array.from(normalized).length > 1
+      const canonical=entry.index.identity_json.documentProjection==='canonical-title-abstract-v1'
+      const indexed = !canonical && entry.source.grams_ready && Array.from(normalized).length > 1
       const [vector, matched] = await Promise.all([
         this.#queryVector(entry, request.rankingQuery, options),
         queryGrams.length ? this.db.rows<{ ticket_id: string; n: number }>(indexed
@@ -396,7 +449,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
           : `SELECT s.ticket_id,COUNT(DISTINCT q.gram) n FROM ra_search_field s
             JOIN JSON_TABLE(?,'$[*]' COLUMNS(gram VARCHAR(8) PATH '$')) q
             ON LOCATE(CAST(q.gram AS BINARY),CAST(s.text_value AS BINARY))>0
-            WHERE s.generation=? AND s.ticket_id IN (?) GROUP BY s.ticket_id`,
+            WHERE s.generation=? AND s.ticket_id IN (?) ${canonical ? "AND s.field_key IN ('title','summary')" : ''} GROUP BY s.ticket_id`,
         indexed ? [entry.source.id, ids, queryGrams] : [JSON.stringify(queryGrams), entry.source.id, ids]) : [],
       ])
       const overlap = new Map(matched.map(r => [r.ticket_id, Number(r.n)])), queryNorm = Math.hypot(...vector)
@@ -412,12 +465,28 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
         return (coverage + cosine) / 2
       })
     }
-    return { ids: ordered.map(r => Number(r.ordinal)), dimensions,
+    const groups = await this.#query.groupHashes(entry.source.id, ordered.map(r => r.ticket_id))
+    return { ids: ordered.map(r => Number(r.ordinal)), row_groups: ordered.map(r => groups.get(r.ticket_id) ?? { group_projection: 'business-and-canonical-nfkc-whitespace-v1' as const }), dimensions,
       dense: Buffer.concat(ordered.map(r => r.vector_blob ?? Buffer.alloc(dimensions * 4))).toString('base64'),
       available: Buffer.from(ordered.map(r => r.vector_blob ? 1 : 0)).toString('base64'),
       feature_id: featureId,
       ...(scores ? { scores } : {}),
       next_cursor: !request.ids && !request.refs && rows.length === request.limit ? String(rows.at(-1)!.ordinal) : null }
+  }
+  async featureAnchors(principal:TrustedPrincipalContext,request:Parameters<NonNullable<TicketRetrievalProvider['featureAnchors']>>[1],options?:ProviderCallOptions) {
+    const block=await this.featureBlock(principal,{snapshotId:request.snapshotId,recallScope:request.recallScope,ids:[],limit:1},options)
+    if(block.feature_id!==request.featureId) throw new RetrievalError('INVALID_REQUEST','Anchor feature identity differs from the actual completed recall scope')
+    const entry=await this.#entry(principal,request.snapshotId)
+    if(!entry.index || request.texts.length<1 || request.texts.length>8 || request.texts.some(t=>!t.trim())) throw new RetrievalError('INVALID_REQUEST','Published dense index and one to eight nonempty anchor descriptions are required')
+    const identity=entry.index.identity_json
+    const vectors=[]
+    for(const text of request.texts) vectors.push(await this.#queryVector(entry,text,options))
+    await this.#entry(principal,request.snapshotId)
+    if(vectors.some(v=>v.length!==block.dimensions || v.some(x=>!Number.isFinite(x)) || Math.abs(Math.hypot(...v)-1)>.02)) throw new RetrievalError('PROVIDER_UNAVAILABLE','Anchors must use the pinned dimensions and L2 normalization')
+    return {feature_id:block.feature_id,embedding_id:block.feature_id,dimensions:block.dimensions,vectors,
+      profileIdentity:{model:identity.model,revision:identity.revision,dimensions:identity.dimensions,
+        normalization:identity.normalization,pooling:identity.pooling??'last_token',projectionVersion:identity.documentProjection??'ticket-search-projection-v1',
+        queryInstruction:effectiveQueryInstruction(identity),aggregation:'mean-chunks-l2-v1',recallScope:request.recallScope}}
   }
   async resolveFeatureIds(principal: TrustedPrincipalContext,
     request: Parameters<NonNullable<TicketRetrievalProvider['resolveFeatureIds']>>[1], options?: ProviderCallOptions) {
@@ -439,12 +508,13 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     const entry = await this.#entry(principal, request.snapshotId), refs = await this.#references(entry, principal, request.candidateRefs)
     if (refs.size !== new Set(request.candidateRefs).size) throw new RetrievalError('UNAUTHORIZED', '工单不属于授权全库。')
     const records = new Map((await this.#query.records(entry.source.id, [...refs.values()], false)).map(r => [r.ticketId as string, r]))
+    const groups = await this.#query.groupHashes(entry.source.id, [...refs.values()])
     return request.candidateRefs.map(ref => {
       const r = records.get(refs.get(ref)!)!
       return { ref, displayId: r.displayId, sourceVersion: r.sourceVersion, contentHash: r.contentHash,
         snapshotId: request.snapshotId, evidenceLevel: 'L1' as const, projectionVersion: 2 as const, rank: 0,
         title: r.title, summary: r.summary, summaryOrigin: overviewOrigin(r, 'summary'), titleOrigin: overviewOrigin(r, 'title'),
-        l0: candidateL0(r), matchFragments: [], matchSignals: { channels: [], keywordTerms: [] } }
+        l0: candidateL0(r), ...(groups.get(r.ticketId) ? { groupHashes: groups.get(r.ticketId)! } : {}), matchFragments: [], matchSignals: { channels: [], keywordTerms: [] } }
     })
   }
   async readEvidence(principal: TrustedPrincipalContext, request: EvidenceReadRequest, options?: ProviderCallOptions) {

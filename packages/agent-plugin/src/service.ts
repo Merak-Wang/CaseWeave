@@ -2,6 +2,7 @@ import type { ModelRequestMeasurement, ModelResponseMeasurement } from '@retriev
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import {
   RetrievalError,
   type CandidateDetailReadReceipt,
@@ -77,7 +78,7 @@ function latestRetrieval(agent: Agent): { readonly events: ReturnType<typeof rea
 
 /** Per-session product application; model calls only intents on this service. */
 export class RetrievalAgentService extends Service {
-  modelSelection?: (agent: Agent) => { provider: string; model: string } | undefined
+  modelSelection?: (agent: Agent) => { provider: string; model: string; reasoningEffort?: ReasoningEffortId } | undefined
   operators?: SemanticOperators
   semanticResults: import('@retrieval-agent/contracts').SemanticResultStore = new MemorySemanticResultStore()
   coordinator?: { prepare(agent: Agent, signal?: AbortSignal): Promise<void>; validateKnowledge?(agent: Agent): Promise<void>; runPending(agent: Agent, signal?: AbortSignal): Promise<void>; waitForExperts?(agent: Agent, taskIds: readonly string[], signal?: AbortSignal): Promise<void>; settlePending?(agent: Agent, signal?: AbortSignal): Promise<void>; cancelPending?(agent: Agent): void; isExpert(agent: Agent): boolean; knowledgeView?(state: RetrievalState, entryId?: string): Promise<import('./knowledge-view.js').KnowledgeView> }
@@ -298,9 +299,13 @@ export class RetrievalAgentService extends Service {
     return await this.mutate(entry, async state => entry.controller.stop(state, 'cancelled'))
   }
 
-  async stopIncomplete(agent: Agent, explanation: string): Promise<RetrievalState> {
+  async stopIncomplete(agent: Agent, explanation: string, expected?: Pick<RetrievalState, 'retrievalId' | 'inputGeneration'>): Promise<RetrievalState> {
     const entry = this.entry(agent)
-    return await this.mutate(entry, async state => entry.controller.stopIncomplete(state, explanation))
+    return await this.mutate(entry, async state => {
+      if (expected && (state.retrievalId !== expected.retrievalId || (state.inputGeneration ?? 0) !== (expected.inputGeneration ?? 0))) return state
+      if (state.phase === 'stopped' || state.phase === 'awaiting_clarification') return state
+      return entry.controller.stopIncomplete(state, explanation)
+    })
   }
 
   async authorizePresentation(agent: Agent, retrievalId: RetrievalId, signal?: AbortSignal): Promise<RetrievalState> {

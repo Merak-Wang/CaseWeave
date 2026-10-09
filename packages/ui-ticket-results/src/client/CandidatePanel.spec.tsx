@@ -120,19 +120,21 @@ describe('CandidatePanel density', () => {
     expect(html).not.toContain('继续检索下一批')
   })
 
-  it.each(['selection', 'legacy'])('renders learned set count and %s quality without changing the metric meaning', (basis) => {
+  it.each(['selection', 'legacy', 'training_group_crossfit'])('renders learned set count and %s quality without changing the metric meaning', (basis) => {
     const current = data()
     const learnedSet = { model_id: 'model', input_revision: 0, predicate_key: 'predicate', feature_id: 'index',
       returned: 12000, scope_count: 40000, metadata: {}, quality: { precision_target: .95, recall_target: .95,
-        ...(basis === 'selection' ? { basis: 'selection' as const, precision: .97, recall: .96 } : { precision_lower: .97, recall_lower: .96 }) } }
+        ...(basis === 'training_group_crossfit' ? { basis: 'training_group_crossfit' as const, reference_basis: 'teacher' as const, precision: .97, recall: .96 }
+          : basis === 'selection' ? { basis: 'selection' as const, precision: .97, recall: .96 } : { precision_lower: .97, recall_lower: .96 }) } }
     const html = renderToStaticMarkup(<AuthorizedCandidatePanel {...({
       node: { data: { ...current, result: { ...current.result!, learnedSet } } }, sessionId: 'session-ui',
     } as CandidatePanelProps)} />)
-    expect(html).toContain('已确认 12000 条工单')
-    expect(html).toContain('下载全部确认工单（12000 条 CSV）')
+    expect(html).toContain('模型推断相关 12000 条工单')
+    expect(html).toContain('下载全部模型推断相关工单（12000 条 CSV）')
     expect(html).toContain('未逐条经过语言模型判断')
-    expect(html).toContain(basis === 'selection' ? '选择集查准率' : '历史抽验查准率下界')
-    if (basis === 'selection') expect(html).not.toContain('下界')
+    expect(html).toContain(basis === 'training_group_crossfit' ? '训练组交叉拟合教师参考查准率' : basis === 'selection' ? '选择集查准率' : '历史抽验查准率下界')
+    if (basis !== 'legacy') expect(html).not.toContain('下界')
+    if (basis === 'training_group_crossfit') expect(html).toContain('不代表业务准确率或最终独立验收')
   })
 
   it('prefers the current query keyword terms over the first-round fast query', () => {

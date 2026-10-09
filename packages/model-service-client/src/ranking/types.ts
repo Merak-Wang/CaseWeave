@@ -34,7 +34,12 @@ export interface RankingChannelScore {
   readonly score: number
 }
 
+export type DocumentProjection = 'ticket-search-projection-v1' | 'canonical-title-abstract-v1'
+
 export interface RankingHit {
+  readonly lexical_raw?: number
+  readonly dense_raw?: number
+  readonly fused?: number
   readonly documentId: string
   readonly rank: number
   readonly score: number
@@ -108,7 +113,12 @@ export interface PrepareOptions {
   readonly onProgress?: (progress: PreparationProgress) => void
 }
 
+export interface QueryAnchors {readonly embedding_id:string;readonly dimensions:number;readonly vectors:readonly (readonly number[])[];readonly profileIdentity:Readonly<Record<string,string|number|boolean|null>>}
+
 export interface RetrievalRanker {
+  queryAnchors?(texts:readonly string[],signal?:AbortSignal):Promise<QueryAnchors>
+  readonly fusionOptions?:{readonly rankConstant:number;readonly keywordWeight:number;readonly vectorWeight:number}
+  readonly documentProjection?: DocumentProjection
   readFeatureBlock?(documents: readonly Pick<RankingDocument, 'id' | 'contentHash'>[], signal?: AbortSignal): Promise<{
     readonly embedding_id: string; readonly dense: string; readonly dimensions: number; readonly available: string }>
   readonly profileVersion: string

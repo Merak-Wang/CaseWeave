@@ -25,6 +25,13 @@ export interface InstallReceipt {
   readonly dataPath: string
   readonly dataRoot: string
   readonly workspacePath: string
+  readonly profileScope: 'jsonl' | 'mysql_milvus'
+  readonly dataInstalled: boolean
+}
+
+export interface InstallAssetOptions {
+  readonly skipData?: boolean
+  readonly profileScope?: 'jsonl' | 'mysql_milvus'
 }
 
 export interface UninstallReceipt {
@@ -111,20 +118,31 @@ export async function installLocalProductAssets(
   dshHome: string,
   overwrite = false,
   requestedDataRoot?: string,
+  options: InstallAssetOptions = {},
 ): Promise<InstallReceipt> {
+  const profileScope = options.profileScope ?? 'jsonl'
+  const skipData = options.skipData ?? false
+  if (profileScope !== 'jsonl' && profileScope !== 'mysql_milvus') throw new Error('invalid asset profile scope')
+  if ((profileScope === 'mysql_milvus') !== skipData) {
+    throw new Error('mysql_milvus asset scope requires skipData; jsonl scope must install data')
+  }
   const { home, presetPath, productRoot } = localAssetTargets(dshHome)
   const presetRoot = resolve(home, '.agent-presets')
   const dataRoot = resolve(productRoot, 'data')
   const dataPath = resolve(dataRoot, 'default.jsonl')
   const workspacePath = resolve(productRoot, 'workspace')
-  const sourceDataRoot = bundledFixtureRoot(requestedDataRoot)
-  const manifest = dataManifest(sourceDataRoot)
-  const sourcePaths = bundledDefaultTicketPaths(sourceDataRoot)
-  const sourceProfile = manifest.ticketProfiles[manifest.defaultTicketProfile]!
+  const source = skipData ? undefined : (() => {
+    const sourceDataRoot = bundledFixtureRoot(requestedDataRoot)
+    const manifest = dataManifest(sourceDataRoot)
+    return { manifest, sourcePaths: bundledDefaultTicketPaths(sourceDataRoot),
+      sourceProfile: manifest.ticketProfiles[manifest.defaultTicketProfile]! }
+  })()
   await mkdir(presetRoot, { recursive: true })
-  await mkdir(dataRoot, { recursive: true })
   await mkdir(workspacePath, { recursive: true })
   await cp(bundledPresetPath(), presetPath, { recursive: true, force: overwrite, errorOnExist: !overwrite })
+  if (source === undefined) return { presetRoot, dataPath, dataRoot, workspacePath, profileScope, dataInstalled: false }
+  const { manifest, sourcePaths, sourceProfile } = source
+  await mkdir(dataRoot, { recursive: true })
   await cp(sourcePaths[0]!, dataPath, { force: overwrite, errorOnExist: !overwrite })
   for (const sourcePath of sourcePaths.slice(1)) {
     await appendFile(dataPath, await readFileSync(sourcePath))
@@ -140,7 +158,7 @@ export async function installLocalProductAssets(
     installedTicketProfile: manifest.defaultTicketProfile,
     installedTicketPaths: ['default.jsonl'],
   }, undefined, 2)}\n`, { encoding: 'utf8', flag: overwrite ? 'w' : 'wx' })
-  return { presetRoot, dataPath, dataRoot, workspacePath }
+  return { presetRoot, dataPath, dataRoot, workspacePath, profileScope, dataInstalled: true }
 }
 
 /** Remove only the two exact product-owned asset directories under an explicit DSH home. */

@@ -22,7 +22,11 @@ class ScriptedModel:
 
 
 def decisions(payload, _request=None, label="accept"):
+    if payload.get('decision_format') == 'compact_binary':
+        return {"rows": [{"ref": r["ref"], "label": "yes" if label == "accept" else "no",
+                          "confidence": 1.0} for r in payload["records"]]}
     return {"rows": [{"ref": r["ref"], "label": label,
+       "confidence": 1.0,
        "citations": [{"ref": r["ref"], "passage_id": r["passages"][0]["id"], "quote": r["passages"][0]["text"]}],
        "knowledge_ids": [], "reason": "synthetic fixture decision"} for r in payload["records"]]}
 

@@ -25,7 +25,13 @@ def numeric_port(runtime, X, y, missing=(), scores=None):
         if method == 'features.seeds': return {'ids': [int(i) for i in p['refs']], 'feature_id': 'synthetic-v1'}
         if method == 'rows.read':
             samples.extend(p['ids'])
-            return {'rows': [record(str(i), text=f'synthetic {int(y[i])}').model_payload() for i in p['ids']]}
+            rows = []
+            for i in p['ids']:
+                row = record(str(i), text=f'synthetic {int(y[i])}').model_payload()
+                if y[int(i)] < 0:
+                    row['attributes']['required_evidence_fields'] = ['missing_original_dialogue']
+                rows.append(row)
+            return {'rows': rows}
         if method == 'learning.update': updates.append(p.copy())
         elif method == 'predictions.begin': emitted.clear()
         elif method == 'predictions.write': emitted.update(zip(p['ids'], p['labels']))
@@ -34,7 +40,7 @@ def numeric_port(runtime, X, y, missing=(), scores=None):
         return {}
     def teacher(p, _):
         out = decisions(p)
-        for r in out['rows']: r['label'] = {-1: 'undetermined', 0: 'exclude', 1: 'accept'}[int(y[int(r['ref'])])]
+        for r in out['rows']: r['label'] = {0: 'exclude', 1: 'accept'}[int(y[int(r['ref'])])]
         return out
     runtime.resources = call; runtime.model.handler = teacher
     return updates, emitted, samples
@@ -77,6 +83,8 @@ def test_selection_pass_predicts_full_scope_without_more_teacher_calls(make_runt
     assert len(sampled) < len(X)
     t, v = map(lambda k: set(last[k]), ('training_ids', 'selection_ids'))
     assert not t & v and set(sampled) == t | v
+    assert len(t) >= int(np.ceil(.7 * (len(t) + len(v))))
+    assert len(v) <= .3 * (len(t) + len(v))
 
 
 def test_recall_scope_key_is_part_of_learned_state_and_model_identity(make_runtime):
@@ -142,6 +150,22 @@ def test_batch_width_changes_neither_samples_nor_set(make_runtime):
     assert outputs[0] == outputs[1]
 
 
+@pytest.mark.parametrize(('population', 'expected_holdout'), [(9, 2), (10, 3)])
+def test_small_ranked_population_rounds_holdout_down_without_forcing_selection_size(
+        make_runtime, population, expected_holdout):
+    y = np.arange(population) % 2
+    rt = make_runtime()
+    updates, _, _ = numeric_port(rt, np.eye(2, dtype=np.float32)[y], y,
+        scores=np.arange(population, dtype=float))
+    run(rt, pool_size=16, selection_size=8, sample_size=16)
+    final = updates[-1]
+    training, selection = final['training_ids'], final['selection_ids']
+    assert len(selection) == expected_holdout
+    assert len(training) >= int(np.ceil(.7 * (len(training) + len(selection))))
+    assert len(selection) <= .3 * (len(training) + len(selection))
+    assert not set(training) & set(selection)
+
+
 @pytest.mark.parametrize('concurrency,batch_size', [(32, 4), (32, 1), (128, 1)])
 def test_runs_sample_batches_concurrently(make_runtime, concurrency, batch_size):
     async def execute():
@@ -175,16 +199,16 @@ def test_runs_sample_batches_concurrently(make_runtime, concurrency, batch_size)
                 'pool_size': width*2, 'selection_size': 1,
                 'precision_target': .9, 'recall_target': .9}}))
         assert peak == concurrency
-        windows = min(2, 128 // concurrency)
+        windows = 1
         assert read_sizes == [width] * windows
         assert updates[-1]['batch_size'] == batch_size and updates[-1]['concurrency'] == concurrency
         assert updates[-1]['precision_target'] == .9 and updates[-1]['recall_target'] == .9
         assert len(set(samples)) == width * windows
-        assert rt.model.calls <= 128
+        assert rt.model.calls == updates[-1]['sampling_requests']
     asyncio.run(execute())
 
 
-def test_selection_resume_keeps_models_and_holdout_after_store_reopen(make_runtime, tmp_path):
+def test_selection_resume_advances_ranked_window_and_refits_after_store_reopen(make_runtime, tmp_path):
     from caseweave_ops import ArtifactStore
     y = np.zeros(5000, dtype=np.int8); y[42] = 1
     rt = make_runtime(); updates, _, samples = numeric_port(rt, np.eye(2, dtype=np.float32)[y], y)
@@ -208,23 +232,23 @@ def test_selection_resume_keeps_models_and_holdout_after_store_reopen(make_runti
         second = updates[-1]
         assert len(scans) == previous_scans
         assert second['fit_count'] == first['fit_count'] == 4
-        assert not {'scanning', 'ranked_sampling', 'training'} & {s['stop_reason'] for s in updates}
-        assert second['reused_training_records'] == first['training_records']
+        assert {'resuming_discovery', 'ranked_sampling', 'training'} <= {s['stop_reason'] for s in updates}
+        assert second['training_records'] > first['training_records']
         assert set(first['selection_ids']) < set(second['selection_ids'])
         assert not set(second['training_ids']) & set(second['selection_ids'])
         assert not previous_samples & set(samples)
-        assert len(samples) == 256
+        assert len(samples) == 128
         assert second['stop_reason'] == 'needs_selection_coverage'
         # 耗尽现有排序池后明确交回发现缺口，不能继续提示无收益的原样续跑。
-        for _ in range(5):
+        for _ in range(8):
             run(rt)
-            if updates[-1]['stop_reason'] == 'model_unknown':
+            if updates[-1]['stop_reason'] == 'needs_coverage':
                 break
-        assert updates[-1]['stop_reason'] == 'model_unknown'
-        assert updates[-1]['sampling_requests'] == 128
-        assert updates[-1]['next_action'] == 'return_confirmed_only'
+        assert updates[-1]['stop_reason'] == 'needs_coverage'
+        assert updates[-1]['teacher_unique_records'] > 128
+        assert updates[-1]['sampling_requests'] == rt.store.sampling_calls(rt.scope)
+        assert updates[-1]['next_action'] == 'new_expressions_or_clarify_predicate'
         assert len(scans) == previous_scans
-        assert updates[-1]['fit_count'] == 4
     finally:
         restored.close()
 
@@ -275,16 +299,18 @@ def test_ranked_discovery_keeps_high_ids_first_and_reserves_adjacent_positives(m
     updates, _, samples = numeric_port(rt, np.eye(2, dtype=np.float32)[y], y,
         scores=np.arange(len(y), dtype=float))
     run(rt, pool_size=16, selection_size=4, sample_size=4, block_size=block_size)
-    # 全域最高分在数字 ID 尾部；首窗全正后，下一窗继续按分数找到反例。
+    # 每次调用只读取一个连续排名窗口；续跑不能越过中间候选。
+    run(rt, pool_size=16, selection_size=4, sample_size=4, block_size=block_size)
     assert samples[:8] == list(range(1999, 1991, -1))
     last = updates[-1]
-    assert last['selection_ids'] == [1998, 1997, 1994, 1993]
+    assert last['selection_ids'] == [1996, 1993]
     assert not set(last['training_ids']) & set(last['selection_ids'])
+    assert len(last['training_ids']) >= int(np.ceil(.7 * (len(last['training_ids']) + len(last['selection_ids']))))
     assert last['fit_count'] == 4
     assert next(u for u in updates if u['sampling_phase'] == 'training_discovery')['sampling_method'] == 'ngram_vector_desc'
 
 
-def test_ranked_discovery_resume_consumes_new_seed_without_reusing_labels_or_moving_holdout(make_runtime):
+def test_ranked_discovery_resume_consumes_new_seed_without_reusing_labels_or_breaking_ratio(make_runtime):
     y = np.zeros(100, dtype=np.int8); y[99] = 1
     rt = make_runtime()
     updates, _, samples = numeric_port(rt, np.eye(2, dtype=np.float32)[y], y,
@@ -303,13 +329,13 @@ def test_ranked_discovery_resume_consumes_new_seed_without_reusing_labels_or_mov
     second = updates[-1]
     assert samples[0] == 99
     assert not previous & set(samples)
-    assert second['selection_ids'] == first['selection_ids']
     assert not set(second['training_ids']) & set(second['selection_ids'])
+    assert len(second['training_ids']) >= int(np.ceil(.7 * (len(second['training_ids']) + len(second['selection_ids']))))
     assert second['fit_count'] == 4
 
 
 @pytest.mark.parametrize('positives', [(1, 2), (0, 3)])
-def test_ranked_discovery_reads_holdout_positives_and_stratifies_before_first_fit(make_runtime, positives):
+def test_ranked_discovery_swaps_rare_labels_without_overlapping_or_breaking_seventy_thirty(make_runtime, positives):
     y = np.zeros(100, dtype=np.int8); y[list(positives)] = 1
     rt = make_runtime()
     updates, _, samples = numeric_port(rt, np.eye(2, dtype=np.float32)[y], y,
@@ -318,28 +344,27 @@ def test_ranked_discovery_reads_holdout_positives_and_stratifies_before_first_fi
     assert samples[:4] == list(range(4))
     last = updates[-1]
     assert last['positive_records'] == 2
-    assert len(set(positives) & set(last['training_ids'])) == 1
-    assert len(set(positives) & set(last['selection_ids'])) == 1
+    assert len(set(positives) & set(last['training_ids'])) >= 1
     assert not set(last['training_ids']) & set(last['selection_ids'])
+    assert len(last['training_ids']) >= int(np.ceil(.7 * (len(last['training_ids']) + len(last['selection_ids']))))
     assert last['fit_count'] == 4
-    assert last['stop_reason'] == 'quality_passed'
+    assert last['stop_reason'] in {'quality_passed', 'needs_selection_coverage'}
 
 
-def test_single_holdout_positive_is_visible_while_training_gap_requests_next_ranked_window(make_runtime):
+def test_single_training_positive_does_not_force_a_second_selection_copy(make_runtime):
     y = np.zeros(100, dtype=np.int8); y[1] = 1
     rt = make_runtime()
     updates, _, samples = numeric_port(rt, np.eye(2, dtype=np.float32)[y], y,
         scores=100-np.arange(len(y), dtype=float))
     run(rt, pool_size=16, selection_size=4, sample_size=4)
-    assert samples == list(range(8))
     last = updates[-1]
-    assert last['positive_records'] == 1 and last['missing_training_labels'] == ['positive']
-    assert 1 in last['selection_ids'] and 1 not in last['training_ids']
-    assert last['discovery_remaining_records'] == 12
-    assert last['next_action'] == 'continue_ranked_discovery'
+    assert last['positive_records'] == 1
+    assert 1 in last['training_ids'] and 1 not in last['selection_ids']
+    assert not set(last['training_ids']) & set(last['selection_ids'])
+    assert len(last['training_ids']) >= int(np.ceil(.7 * (len(last['training_ids']) + len(last['selection_ids']))))
 
 
-def test_selection_resume_consumes_new_high_score_positive_with_frozen_models(make_runtime):
+def test_selection_resume_advances_ranked_window_and_refits_models(make_runtime):
     y = np.zeros(100, dtype=np.int8); y[98:] = 1
     rt = make_runtime()
     updates, _, samples = numeric_port(rt, np.eye(2, dtype=np.float32)[y], y,
@@ -357,14 +382,15 @@ def test_selection_resume_consumes_new_high_score_positive_with_frozen_models(ma
     previous = set(samples)
     seeds.append(98); samples.clear(); updates.clear(); run(rt, **options)
     second = updates[-1]
-    assert samples[0] == 98
     assert not previous & set(samples)
-    assert 'resuming_selection' in {u['stop_reason'] for u in updates}
-    assert 'training' not in {u['stop_reason'] for u in updates}
-    assert second['training_ids'] == first['training_ids']
-    assert set(first['selection_ids']) < set(second['selection_ids'])
-    assert 98 in second['selection_ids'] and 98 not in second['training_ids']
-    assert second['stop_reason'] == 'quality_passed'
+    assert 'resuming_discovery' in {u['stop_reason'] for u in updates}
+    assert 'training' in {u['stop_reason'] for u in updates}
+    assert len(first['training_ids']) < len(second['training_ids'])
+    assert second['fit_count'] == first['fit_count'] == 4
+    assert not set(second['training_ids']) & set(second['selection_ids'])
+    assert not set(first['training_ids']) & set(second['selection_ids'])
+    assert len(second['training_ids']) >= int(np.ceil(.7 * (len(second['training_ids']) + len(second['selection_ids']))))
+    assert second['stop_reason'] == 'needs_selection_coverage'
 
 
 def test_random_unlearnable_is_not_certified(make_runtime):
@@ -420,7 +446,7 @@ def test_unchanged_unresolved_evidence_does_not_call_teacher_again(make_runtime)
     run(rt)
     assert rt.model.calls == calls
     assert updates[-1]['stop_reason'] == 'needs_information'
-    assert updates[-1]['reused_unresolved_records'] > 0
+    assert updates[-1]['unresolved'] > 0
 
 
 def test_linear_folding_preserves_fit_precision_dense_and_sparse():

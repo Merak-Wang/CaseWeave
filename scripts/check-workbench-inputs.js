@@ -1,11 +1,11 @@
 async page => {
   const checks = [], assert = (ok, name) => { checks.push({name, passed:!!ok}); if (!ok) throw new Error(name) }
-  let received, attempts = [], lost = true; const timing = {}
+  let received, attempts = [], queryPayloads = [], lost = true; const timing = {}
   try {
     await page.setViewportSize({width:1440,height:900})
     await page.route('**/api/retrieval-agent/tasks', async route => {
       if (route.request().method() !== 'POST') return route.continue()
-      attempts.push(route.request().postDataJSON().operationId)
+      const payload = route.request().postDataJSON(); attempts.push(payload.operationId); queryPayloads.push(payload)
       const response = await route.fetch(); received = await response.json()
       if (lost) { lost = false; await route.abort('failed') } else await route.fulfill({response})
     })
@@ -15,6 +15,7 @@ async page => {
     await page.getByRole('button',{name:'重试提交'}).click()
     await page.locator('#question').waitFor()
     assert(attempts.length === 2 && attempts[0] === attempts[1], 'lost query receipt retries same operationId')
+    assert(queryPayloads.every(p => p.execution?.onlineLearning === true && p.execution?.semanticMethod === 'auto' && p.execution?.orchestration === 'fixed' && p.execution?.onlineFusion === 'selective' && p.execution?.onlineModels?.join(',') === 'dense_lr,dense_svm,dense_mlp,dense_hgb,feedback_margin,relation_logistic'), 'default query and its retry preserve explicit feedback-learning execution')
     const {base,id} = await page.evaluate(()=>({base:location.origin,id:new URL(location.href).searchParams.get('task')}))
     const get = async suffix => (await page.request.get(base+'/api/retrieval-agent/tasks/'+id+suffix)).json()
     assert(received.taskId === id && (await get('')).commands.length === 1, 'lost receipt creates one durable task and one command')

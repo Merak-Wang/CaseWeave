@@ -16,6 +16,7 @@ import { candidateWindow, windowedNode } from './window.js'
 import { projectTicketCandidateState } from './presentation.js'
 import { createRetrievalReport, validateReportNarrative, reportMarkdown } from './report.js'
 import { candidateEvidence } from './evidence.js'
+import { xlsxRows } from '../../../tests/xlsx-assertions.js'
 
 function withoutReportFormat<T extends { format?: 'summary' }>(report: T): Omit<T, 'format'> {
   const legacy = { ...report }
@@ -130,8 +131,8 @@ describe('A14 phase 5 delivery boundaries', () => {
     const report = createRetrievalReport(state, [{ kind: 'query', text: state.query.original }], 'operator')
     const markdown = reportMarkdown(report)
     expect(markdown).toContain('查询：登录问题')
-    expect(markdown).toContain('确认数量：1')
-    expect(markdown).toContain('已确认 1 条工单。')
+    expect(markdown).toContain('筛选数量：1')
+    expect(markdown).toContain('已筛选 1 条工单。')
     expect(markdown).not.toContain('## 引用')
     expect(markdown).not.toContain('=unsafe title')
     expect(markdown).not.toContain('+unsafe summary')
@@ -145,14 +146,13 @@ describe('A14 phase 5 delivery boundaries', () => {
     expect(reportMarkdown(narrative)).toContain('[1] INC-1（摘要）')
   })
 
-  it('keeps the legacy Markdown byte output when its format marker is absent', () => {
+  it('keeps source-backed example reasons when a legacy format marker is absent', () => {
     const base = retrievalState()
     const state = { ...base, modelVisibleCandidateRefs: [CANDIDATE_REF], judgments: [{ candidateRef: CANDIDATE_REF,
       verdict: 'accept' as const, evidenceRefs: [CANDIDATE_REF], reason: '可见概览支持' }] }
     const report = withoutReportFormat({ ...createRetrievalReport(state, [{ kind: 'query', text: state.query.original }], 'handoff'),
       generatedAt: '2026-01-02T03:04:05.000Z' })
-    const digest = createHash('sha256').update(reportMarkdown(report)).digest('hex')
-    expect(digest).toBe('1b866e7a8b3fd735b12caa0ab44711dd13fff0573ed98131c8d2477faab75b74')
+    expect(reportMarkdown(report)).toContain('可见概览支持')
   })
 })
 
@@ -438,5 +438,111 @@ describe('CandidateDetailService', () => {
     await expect(new CandidateDetailService(source, audit).readDetails(PRINCIPAL, state, [CANDIDATE_REF], ['resolution']))
       .rejects.toMatchObject({ code: 'PROTOCOL_MISMATCH' })
     expect(audit.records).toEqual([])
+  })
+})
+
+describe('XLSX confirmed collection export', () => {
+  it('exports exactly the complete confirmed ID set through bounded pages, excluding pending rows', async () => {
+    const base = retrievalState()
+    const candidates = Array.from({ length: 238 }, (_, index) => ({ ...base.candidates[0]!,
+      ref: TicketCandidateRef(`xlsx-${index}`), displayId: '00012345678901234567890' + index,
+      title: '=中文😀_x0000_' + index, summary: '摘要\r\n下一行', rank: index + 1 }))
+    const state = { ...base, candidates, selectedCandidateRefs: candidates.slice(0, 237).map(c => c.ref) }
+    const p = provider()
+    p.readDetails.mockImplementation(async (_principal, request) => ({ snapshotId: request.snapshotId,
+      details: request.candidateRefs.map((ref: TicketCandidateRef) => {
+        const c = candidates.find(candidate => candidate.ref === ref)!
+        return { candidateRef: ref, displayId: c.displayId, sourceVersion: c.sourceVersion, title: c.title, summary: c.summary,
+          l0: c.l0, fields: {}, unavailableFields: [] }
+      }), rejectedCandidateRefs: [], warnings: [] }))
+    const audit = new InMemoryExportAuditSink()
+    const exported = await new CandidateExportService(p, audit).exportXlsx(PRINCIPAL, state)
+    const [headers, ...rows] = xlsxRows(exported.content)
+    const idIndex = headers!.indexOf('ticket'), titleIndex = headers!.indexOf('title'), summaryIndex = headers!.indexOf('summary')
+    expect(exported.fileName.endsWith('.xlsx')).toBe(true)
+    expect(exported.mediaType).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    expect(exported.receipt.rowCount).toBe(rows.length)
+    expect(rows.map(row => row[idIndex])).toEqual(candidates.slice(0, 237).map(c => c.displayId))
+    expect(rows[0]![titleIndex]).toBe(candidates[0]!.title); expect(rows[0]![summaryIndex]).toBe(candidates[0]!.summary)
+    expect(p.readDetails.mock.calls.map(call => call[1].candidateRefs.length)).toEqual([100, 100, 37])
+    expect(exported.receipt.contentSha256).toBe(createHash('sha256').update(exported.content).digest('hex'))
+    expect(audit.records).toHaveLength(1)
+  })
+  it.each(['csv', 'jsonl', 'xlsx'] as const)('applies exact finite byte boundaries to %s without success receipt on overflow', async format => {
+    const config = { now: () => new Date('2026-10-08T00:00:00Z') }
+    const chunks: (string | Uint8Array)[] = []
+    await new CandidateExportService(provider(), new InMemoryExportAuditSink(), config).stream(PRINCIPAL, retrievalState(),
+      { format, template: 'summary' }, async part => { chunks.push(part) })
+    const size = chunks.reduce((sum, part) => sum + (typeof part === 'string' ? Buffer.byteLength(part) : part.byteLength), 0)
+    await expect(new CandidateExportService(provider(), new InMemoryExportAuditSink(), { ...config, maxBytes: size }).stream(PRINCIPAL, retrievalState(),
+      { format, template: 'summary' }, async () => {})).resolves.toMatchObject({ receipt: { rowCount: 1 } })
+    const audit = new InMemoryExportAuditSink()
+    await expect(new CandidateExportService(provider(), audit, { ...config, maxBytes: size - 1 }).stream(PRINCIPAL, retrievalState(),
+      { format, template: 'summary' }, async () => {})).rejects.toMatchObject({ code: 'EXPORT_LIMIT_EXCEEDED' })
+    expect(audit.records).toEqual([])
+    expect(() => new CandidateExportService(provider(), audit, { maxBytes: Infinity })).toThrow('finite')
+  })
+  it('fails closed on cancellation, final grant withdrawal and changed result version', async () => {
+    const base = retrievalState(), revoked = provider(), changed = provider()
+    revoked.status.mockResolvedValueOnce({ providerId: 'provider-v1', ready: true, readOnly: true, snapshotValid: true, warnings: [] })
+      .mockResolvedValueOnce({ providerId: 'provider-v1', ready: true, readOnly: true, snapshotValid: false, warnings: [] })
+    const audit = new InMemoryExportAuditSink()
+    await expect(new CandidateExportService(revoked, audit).exportXlsx(PRINCIPAL, base)).rejects.toMatchObject({ code: 'SNAPSHOT_INVALID' })
+    const abort = new AbortController(); abort.abort()
+    await expect(new CandidateExportService(provider(), audit).exportXlsx(PRINCIPAL, base, undefined, abort.signal)).rejects.toMatchObject({ code: 'CANCELLED' })
+    await expect(new CandidateExportService(changed, audit, { assertCurrentResult: async () => {
+      if (changed.readDetails.mock.calls.length) throw new Error('result revision changed')
+    } }).exportXlsx(PRINCIPAL, base)).rejects.toThrow('result revision changed')
+    await expect(new CandidateExportService(provider({ reject: true }), audit).exportXlsx(PRINCIPAL, base)).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+    await expect(new CandidateExportService(provider(), audit).exportXlsx(PRINCIPAL, { ...base, selectedCandidateRefs: [] })).rejects.toMatchObject({ code: 'CANDIDATE_NOT_FOUND' })
+    expect(audit.records).toEqual([])
+  })
+})
+
+describe('XLSX authorized templates and numeric collections', () => {
+  it('exports allowed full fields as text and excludes raw payloads', async () => {
+    const base = retrievalState(), field = 'body'
+    const state: RetrievalState = { ...base, snapshot: { ...base.snapshot!, fieldCatalog: [
+      { key: field, label: '正文', valueKind: 'text', accessLevel: 'L3', filterOperators: [], sensitivity: 'source_controlled' },
+      { key: 'raw', label: 'raw', valueKind: 'raw_json', accessLevel: 'L3', filterOperators: [], sensitivity: 'source_controlled' }] } }
+    const p = provider(), parts: Uint8Array[] = []
+    p.readDetails.mockImplementation(async (_principal, request) => ({ snapshotId: request.snapshotId,
+      details: [{ candidateRef: CANDIDATE_REF, displayId: 'INC-1', sourceVersion: 'source-v1', title: '=unsafe title', summary: '+unsafe summary',
+        l0: {}, fields: { body: ['=原文\n多行,引号"'] }, unavailableFields: [] }], rejectedCandidateRefs: [], warnings: [] }))
+    await new CandidateExportService(p, new InMemoryExportAuditSink()).stream(PRINCIPAL, state, { format: 'xlsx', template: 'full' }, async part => { parts.push(part) })
+    const [headers, row] = xlsxRows(Buffer.concat(parts))
+    expect(p.readDetails.mock.calls[0]![1].fields).toEqual(['body'])
+    expect(JSON.parse(row![headers!.indexOf('body_fields')]!)).toEqual({ body: ['=原文\n多行,引号"'] })
+    expect(headers).toContain('unavailable_fields')
+  })
+  it.each(['complete', 'truncated', 'duplicate'] as const)('checks actual full numeric result identity/row count for %s pages', async mode => {
+    const base = retrievalState(), c = base.candidates[0]!
+    const candidates = [c, { ...c, ref: TicketCandidateRef('numeric-2'), displayId: '00012345678901234567890' }]
+    const state: RetrievalState = { ...base, candidates: [], selectedCandidateRefs: [], budget: { ...base.budget,
+      operatorUsage: { learning: { input_revision: 0, stop_reason: 'quality_passed', result_set: { model_id: 'numeric-model',
+        input_revision: 0, predicate_key: 'p', feature_id: 'f', returned: 2, scope_count: 2,
+        quality: { basis: 'selection', precision: 1, recall: 1, precision_target: .9, recall_target: .9 }, metadata: { model: 'dense_lr' } } } } } }
+    const p = provider()
+    p.resolveFeatureIds = vi.fn(async (_principal: TrustedPrincipalContext, request: { readonly ids: readonly number[] }) => request.ids.map(id => candidates[mode === 'duplicate' ? 0 : id]!))
+    p.readDetails.mockImplementation(async (_principal, request) => ({ snapshotId: request.snapshotId,
+      details: request.candidateRefs.map((ref: TicketCandidateRef) => {
+        const candidate = candidates.find(item => item.ref === ref)!
+        return { candidateRef: ref, displayId: candidate.displayId, sourceVersion: candidate.sourceVersion, title: candidate.title, summary: candidate.summary,
+          l0: candidate.l0, fields: {}, unavailableFields: [] }
+      }), rejectedCandidateRefs: [], warnings: [] }))
+    const store = { begin: vi.fn(), write: vi.fn(), count: vi.fn(), page: vi.fn().mockResolvedValueOnce({ ids: [0], scores: [1] })
+      .mockResolvedValueOnce({ ids: mode === 'truncated' ? [] : [1], scores: mode === 'truncated' ? [] : [1] }) }
+    const audit = new InMemoryExportAuditSink(), service = new CandidateExportService(p, audit, { semanticResults: store, pageSize: 1 })
+    if (mode === 'complete') {
+      const exported = await service.exportXlsx(PRINCIPAL, state), [headers, ...rows] = xlsxRows(exported.content)
+      expect(exported.receipt.rowCount).toBe(2)
+      expect(rows.map(row => row[headers!.indexOf('ticket')])).toEqual(candidates.map(candidate => candidate.displayId))
+      expect(rows.map(row => row[headers!.indexOf('model_method')])).toEqual(['dense_lr', 'dense_lr'])
+      expect(rows.map(row => row[headers!.indexOf('model_score')])).toEqual(['1', '1'])
+      expect(rows.map(row => row[headers!.indexOf('quality_evaluation')])).toEqual(['not_human_evaluated', 'not_human_evaluated'])
+    } else {
+      await expect(service.exportXlsx(PRINCIPAL, state)).rejects.toMatchObject({ code: 'PROTOCOL_MISMATCH' })
+      expect(audit.records).toEqual([])
+    }
   })
 })

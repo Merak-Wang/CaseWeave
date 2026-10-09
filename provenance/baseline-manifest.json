@@ -1,8 +1,7 @@
 {
   "schemaVersion": 1,
   "dsh": {
-    "declaredVersion": "0.1.5-rc.2",
-    "officialTag": "dsh-v0.1.5-rc.2",
-    "officialCommit": "fb2c4b9e698e30edb738bca4cf0618587db7d203"
+    "declaredVersion": "0.2.0-rc.2",
+    "officialTag": "dsh-v0.2.0-rc.2"
   }
 }

@@ -1,16 +1,19 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import Loader, { Group } from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import AgentPresets from '@deepseek-ai/dsh-agent-presets'
+import AgentPresets from '@deepseek-ai/dsh-agent-preset-registry'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { InMemoryDetailReadAuditSink, InMemoryExportAuditSink } from '@retrieval-agent/product-api'
 import { callReportModel } from '@retrieval-agent/agent-plugin'
 import { RetrievalId, TicketCandidateRef } from '@retrieval-agent/contracts'
+import { createHash } from 'node:crypto'
+import { xlsxRows } from '../../../tests/xlsx-assertions.js'
+import { predictionFixture } from '../../../tests/prediction-fixture.js'
 import { describe, expect, it, vi } from 'vitest'
 import {
   apply as applyProductHost,
@@ -144,12 +147,12 @@ async function isolatedPresetHarness(): Promise<{
   await ctx.plugin(Loader)
   await ctx.plugin(SessionProjection)
   ctx.loader.builtins.group = Group
-  await ctx.plugin(AgentPresets, {
-    default: 'isolated-export',
-    roots: [{ path: root, trust: 'user' }],
-    includeUserRoot: false,
-    includeShippedRoot: false,
-  })
+  await ctx.plugin(AgentPresets, { default: 'isolated-export' })
+  await ctx.agentPresets.register({ id: 'isolated-export', plugins: [{
+    id: 'isolated-export-services', name: 'cordis:group', group: true,
+    isolate: { retrievalAgent: true, ticketRetrievalProvider: true },
+    config: [{ id: 'fixture-services', name: fixturePath }],
+  }] })
   const joined = createScope(ctx, { productHostTest: 'joined' })
   const unjoined = createScope(ctx, { productHostTest: 'unjoined' })
   await ctx.agentPresets.mount(joined.ctx, 'isolated-export')
@@ -187,6 +190,37 @@ describe('DSH product Host adapter', () => {
     } finally { await ctx.fiber.dispose() }
   })
 
+  it('refuses prediction downloads without a trusted durable task identity', async () => {
+    const harness = await isolatedPresetHarness()
+    try {
+      const service = harness.ctx.agentPresets.serviceFor(harness.agent, 'retrievalAgent')!, current = service.currentOrUndefined(harness.agent)!
+      const state = predictionFixture(current)
+      vi.spyOn(service, 'currentOrUndefined').mockReturnValue(state)
+      await harness.ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+      harness.ctx.effect(() => harness.ctx.reflect.provide('agents', { get: () => harness.agent }), 'Candidate HTTP test Agent lookup')
+      await applyProductHost(harness.ctx)
+      const url = `http://127.0.0.1:${harness.ctx.webServer.port}/api/retrieval-agent/export`
+      const post = (body: unknown) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const identity = { sessionId: 'session-isolated-1', retrievalId: state.retrievalId, resultRevision: state.stateId }
+      const defaults = await post({ ...identity, format: 'xlsx' })
+      expect(defaults.status).toBe(400); expect(await defaults.json()).toMatchObject({ code: 'CANDIDATE_NOT_FOUND' })
+      const response = await post({ ...identity, format: 'xlsx', collection: 'predictions' })
+      const diagnostic = await response.clone().json()
+      expect(response.status, JSON.stringify(diagnostic)).toBe(503)
+      expect(diagnostic).toMatchObject({ code: 'PROVIDER_UNAVAILABLE' })
+      expect(diagnostic).not.toHaveProperty('contentBase64')
+      expect(state.selectedCandidateRefs).toEqual([])
+      const csv = await post({ ...identity, collection: 'predictions' })
+      expect(csv.status).toBe(503)
+      expect(await csv.json()).not.toHaveProperty('contentUtf8')
+      expect((await post({ ...identity, format: 'xlsx', collection: 'predictions', resultRevision: 'obsolete' })).status).toBe(409)
+      expect((await post({ ...identity, format: 'xlsx', collection: 'predictions', candidateRefs: [state.candidates[1]!.ref] })).status).toBe(503)
+    } finally {
+      await harness.ctx.fiber.dispose()
+      if (!resolve(harness.root).startsWith(resolve(tmpdir()) + sep)) throw new Error('Fixture cleanup escaped temporary directory')
+      await rm(harness.root, { recursive: true, force: true })
+    }
+  })
   it('serves confirmed-only downloads through the actual registered HTTP route', async () => {
     const harness = await isolatedPresetHarness()
     try {
@@ -206,12 +240,22 @@ describe('DSH product Host adapter', () => {
       expect(exported.receipt).toMatchObject({ rowCount: 1, resultRevision: current.stateId })
       expect(exported.contentUtf8).toContain('TKT-ISO-1')
       expect(exported.contentUtf8).not.toContain('PENDING-HTTP')
-      const forged = await post({ ...payload, candidateRefs: [pending.ref] })
-      expect(forged.status).toBe(400)
-      expect(await forged.json()).toMatchObject({ code: 'CANDIDATE_NOT_FOUND' })
-      const stale = await post({ ...payload, resultRevision: 'old-result' })
-      expect(stale.status).toBe(409)
-      expect(await stale.json()).toMatchObject({ code: 'INVALID_TRANSITION' })
+      const xlsxResponse = await post({ ...payload, format: 'xlsx' })
+      expect(xlsxResponse.status).toBe(200)
+      const xlsx = await xlsxResponse.json() as { mediaType: string; contentBase64: string; receipt: { rowCount: number; resultRevision: string; contentSha256: string } }
+      const workbook = Buffer.from(xlsx.contentBase64, 'base64'), [header, ...rows] = xlsxRows(workbook)
+      expect(xlsx.mediaType).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      expect(rows.map(row => row[header!.indexOf('ticket')])).toEqual(['TKT-ISO-1'])
+      expect(xlsx.receipt.rowCount).toBe(rows.length)
+      expect(xlsx.receipt.contentSha256).toBe(createHash('sha256').update(workbook).digest('hex'))
+      for (const format of ['csv', 'xlsx']) {
+        const forged = await post({ ...payload, format, candidateRefs: [pending.ref] })
+        expect(forged.status).toBe(400)
+        expect(await forged.json()).toMatchObject({ code: 'CANDIDATE_NOT_FOUND' })
+        const stale = await post({ ...payload, format, resultRevision: 'old-result' })
+        expect(stale.status).toBe(409)
+        expect(await stale.json()).toMatchObject({ code: 'INVALID_TRANSITION' })
+      }
       // Follow the fields advertised to the UI, rather than supplying a hand-picked L2 field.
       const identity = { sessionId: payload.sessionId, retrievalId: payload.retrievalId }
       const request = (endpoint: string, body: unknown) => fetch(url.replace('/export', endpoint), {
@@ -249,6 +293,12 @@ describe('DSH product Host adapter', () => {
     expect(() => parseExportCandidatesParams({
       sessionId: 'session-1', retrievalId: 'retrieval-1', candidateRefs: ['candidate-1'],
     })).toThrow(/引用无效/u)
+  })
+
+  it('accepts explicit XLSX and rejects unknown export formats', () => {
+    const base = { sessionId: 'session-1', retrievalId: 'retrieval-1', resultRevision: 'result-1' }
+    expect(parseExportCandidatesParams({ ...base, format: 'xlsx' })).toMatchObject({ format: 'xlsx' })
+    expect(() => parseExportCandidatesParams({ ...base, format: 'zip' })).toThrow('格式')
   })
 
   it('accepts only one opaque candidate per explicit detail wire request', () => {

@@ -1,6 +1,25 @@
 import { RetrievalError } from './errors.js'
+import { ONLINE_MODEL_NAMES } from './types.js'
 import { validateQueryExpression } from './query-plan.js'
 import type { TicketFilter, TicketRetrievalRequest, TrustedPrincipalContext } from './types.js'
+
+export function assertSemanticExecutionOptions(value: unknown): asserts value is import('./types.js').SemanticExecutionOptions {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RetrievalError('INVALID_REQUEST', '语义执行设置必须是对象。')
+  const v = value as Record<string, unknown>
+  if (Object.keys(v).some(key => !['onlineLearning', 'semanticMethod', 'orchestration', 'onlineFusion', 'onlineModels', 'judgeMode', 'judgePrior'].includes(key))
+    || v.judgeMode !== undefined && !['compact_binary', 'anyjev_l0'].includes(String(v.judgeMode))
+    || v.judgePrior !== undefined && !['none', 'batch', 'content_free'].includes(String(v.judgePrior))
+    || typeof v.onlineLearning !== 'boolean' || !['auto', 'direct', 'direct_teacher', 'dual_description_margin', 'name_gmm', 'kmeans'].includes(String(v.semanticMethod))
+    || v.orchestration !== undefined && !['fixed', 'agent'].includes(String(v.orchestration))
+    || v.onlineLearning === true && ['dual_description_margin', 'name_gmm', 'kmeans'].includes(String(v.semanticMethod))
+    || v.onlineFusion !== undefined && !['single', 'selective'].includes(String(v.onlineFusion))
+    || v.onlineModels !== undefined && (!Array.isArray(v.onlineModels) || v.onlineModels.length < 1 || v.onlineModels.length > ONLINE_MODEL_NAMES.length
+      || new Set(v.onlineModels).size !== v.onlineModels.length
+      || v.onlineModels.some(name => !(ONLINE_MODEL_NAMES as readonly unknown[]).includes(name)))
+    || (v.onlineFusion !== undefined || v.onlineModels !== undefined) && (v.onlineLearning !== true || v.semanticMethod !== 'auto')) {
+    throw new RetrievalError('INVALID_REQUEST', '语义执行模式无效。')
+  }
+}
 
 const RESERVED_FILTER_FIELDS = new Set([
   'tenantId', 'subjectId', 'allowedSubjectIds', 'requiredAttributes', 'piiRedactionStatus',
@@ -81,6 +100,7 @@ export function assertTicketRetrievalRequest(request: TicketRetrievalRequest): v
   for (const filter of request.filters ?? []) assertTicketFilter(filter)
   const contract = request.queryContract
   if (contract !== undefined) {
+    if (contract.semanticExecution !== undefined) assertSemanticExecutionOptions(contract.semanticExecution)
     const plan = contract.queryPlan
     if (plan !== undefined) {
       if (plan.schemaVersion !== 1 || plan.original !== request.query || plan.vector.text !== request.query

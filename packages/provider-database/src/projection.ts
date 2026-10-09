@@ -18,7 +18,10 @@ export function fieldCapabilities(records: readonly NormalizedTicketRecord[]): Q
 }
 
 export interface TicketChunk { id: string; ticketId: string; sourceVersion: string; contentHash: string; field: string; part: number; start: number; end: number; text: string; textHash: string }
-export function ticketChunks(record: NormalizedTicketRecord, maxChars = 360): TicketChunk[] {
+export function ticketChunks(record: NormalizedTicketRecord, maxChars = 360, projection: 'ticket-search-projection-v1' | 'canonical-title-abstract-v1' = 'ticket-search-projection-v1'): TicketChunk[] {
+  if(!Number.isSafeInteger(maxChars) || maxChars<1) throw new TypeError('chunkChars must be positive')
+  const title=record.title.replace(/\r\n?/gu,'\n').trim(), summary=record.summary.replace(/\r\n?/gu,'\n').trim()
+  if(projection==='canonical-title-abstract-v1' && (!title || !summary)) throw new TypeError('Canonical title and abstract must both contain text')
   const doc = queryDocument(record)
   const rawDialogue = record.rawSource?.payload.raw_dialogue
   const dialogue = Array.isArray(rawDialogue) ? rawDialogue.flatMap(turn => {
@@ -27,7 +30,7 @@ export function ticketChunks(record: NormalizedTicketRecord, maxChars = 360): Ti
   }) : []
   // ESFT problem_description is derived from customer turns already present in raw_dialogue.
   // Index summary + complete source dialogue once; SQL continues to search every original field.
-  const views = dialogue.length ? { summary: [record.summary], 'source.raw_dialogue': [dialogue.join('\n')] } : doc.texts
+  const views = projection==='canonical-title-abstract-v1' ? {'canonical.title-abstract':[`【标题】${title}\n【摘要】${summary}`]} : dialogue.length ? { summary: [record.summary], 'source.raw_dialogue': [dialogue.join('\n')] } : doc.texts
   const seen = new Set<string>(); const chunks: TicketChunk[] = []
   for (const [field, sourceValues] of Object.entries(views)) {
     if (field.startsWith('metadata.') || field === 'title') continue
@@ -41,7 +44,7 @@ export function ticketChunks(record: NormalizedTicketRecord, maxChars = 360): Ti
       const points = Array.from(text); let start = 0
       for (let i = 0; i < points.length; i += maxChars) {
         const content = points.slice(i, i + maxChars).join(''); const end = start + content.length
-        chunks.push({ id: sha256(JSON.stringify([record.ticketId, record.contentHash, field, part, start, end])), ticketId: record.ticketId,
+        chunks.push({ id: sha256(JSON.stringify([record.ticketId, record.contentHash, field, part, start, end, ...(projection==='canonical-title-abstract-v1' ? [projection,sha256(content)] : [])])), ticketId: record.ticketId,
           sourceVersion: record.sourceVersion, contentHash: record.contentHash, field, part, start, end, text: content, textHash: sha256(content) })
         start = end
       }

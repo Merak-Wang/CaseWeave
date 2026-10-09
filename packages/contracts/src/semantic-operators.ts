@@ -3,6 +3,9 @@ export interface SemanticQueryPlan {
   readonly schemaVersion: 1
   readonly original: string
   readonly instruction: string
+  /** Explicit user requests that the declared document projection cannot establish. */
+  readonly unsupported_constraints?: readonly { readonly field: string; readonly source_text: string; readonly provenance: 'host-explicit-raw-request-v1' }[]
+  readonly structured_conditions?: readonly (import('./types.js').TicketFilter & { readonly source_text: string })[]
   readonly keywords: readonly string[]
   readonly retrieval_expressions: readonly string[]
   readonly knowledge_routes?: readonly { readonly entry_id: string; readonly reason: string; readonly title?: string }[]
@@ -32,10 +35,13 @@ export interface OperatorDecision {
   readonly citations: readonly OperatorCitation[]; readonly knowledge_ids: readonly string[]
   readonly basis: 'model' | 'reused_model' | 'proxy' | 'unresolved'; readonly reason: string
   readonly manifest_id: string | null
+  /** 模型对所选类别的自报置信度，不作为证据或准入阈值。 */
+  readonly confidence?: number | null
   readonly inference?: { readonly algorithm: string; readonly proposal: string; readonly phase: string;
     readonly model_id?: string; readonly predicate_key?: string; readonly input_revision?: number; readonly feature_id?: string;
     readonly training_records?: number; readonly fit_count?: number; readonly score?: number;
-    readonly source_version?: string; readonly content_hash?: string;
+    readonly source_version?: string; readonly content_hash?: string; readonly record_identity?: string;
+    readonly proposed_label?: 'accept' | 'exclude' | 'undetermined'; readonly quality?: 'unmeasured';
     readonly checks?: readonly { readonly region: string; readonly population: number; readonly sampled: number;
       readonly errors: number; readonly error_upper: number; readonly alpha: number; readonly tolerance: number; readonly passed: boolean }[];
     readonly proposed: number; readonly inferred: boolean;
@@ -55,9 +61,11 @@ export interface LearnedResult {
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 /** 新集合只报告选择集经验指标；旧抽验口径仅供已有任务重放。 */
-export type LearnedQuality = { readonly precision_target: number; readonly recall_target: number; readonly [key: string]: unknown } & (
-  { readonly basis: 'selection'; readonly precision: number; readonly recall: number;
+export type LearnedQuality = { readonly precision_target?: number; readonly recall_target?: number; readonly [key: string]: unknown } & (
+  { readonly basis: 'selection' | 'training_group_crossfit'; readonly reference_basis?: 'teacher'; readonly precision: number; readonly recall: number;
     readonly acceptance?: 'target' | 'fallback' | 'unknown'; readonly minimum_precision?: number }
+  | { readonly basis: 'unmeasured'; readonly business_accuracy: 'not_measured' }
+  | { readonly basis: 'teacher_single_class'; readonly reference_basis: 'teacher'; readonly precision: number; readonly recall: number }
   | { readonly basis?: 'independent_audit'; readonly precision_lower: number | null; readonly recall_lower: number | null }
 )
 export interface NumericPredictionBlock {

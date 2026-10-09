@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { IconChevronDownOutline14, IconChevronUpOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutlineMedium, IconChevronUpOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   TicketCandidate,
@@ -287,7 +287,7 @@ export function AuthorizedCandidatePanel({ node, sessionId, accessPending = fals
             <span className={terminal ? css.statusFinal : css.status}>{statusLabel}</span>
             {data.candidates.length === 0
               ? null
-              : collectionExpanded ? <IconChevronUpOutline14 /> : <IconChevronDownOutline14 />}
+              : collectionExpanded ? <IconChevronUpOutlineMedium /> : <IconChevronDownOutlineMedium />}
           </span>
         </div>
         <p className={css.query}><span>原始查询</span>{data.querySummary || '—'}</p>
@@ -364,7 +364,7 @@ export function AuthorizedCandidatePanel({ node, sessionId, accessPending = fals
                     </span>
                   ))}
                 </span>
-                <span className={css.rowChevron}>{isExpanded ? <IconChevronUpOutline14 /> : <IconChevronDownOutline14 />}</span>
+                <span className={css.rowChevron}>{isExpanded ? <IconChevronUpOutlineMedium /> : <IconChevronDownOutlineMedium />}</span>
               </button>
               {!isExpanded ? null : <div id={detailId} className={css.details}>
                 <DetailBody

@@ -37,6 +37,8 @@
         maxPageSize: 100
         snapshotTtlMs: 900000
         retrievalMode: hybrid
+        documentProjection: !!js process.env.RETRIEVAL_AGENT_DOCUMENT_PROJECTION ?? 'ticket-search-projection-v1'
+        lexicalRanking: bm25f
         modelServiceBaseUrl: !!js process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012'
         embeddingModel: Qwen/Qwen3-Embedding-0.6B
         embeddingRevision: 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
@@ -56,7 +58,7 @@
       config:
         # 跨动作总页上限覆盖关键词全集与 Dense Top-15 的融合候选；单动作仍至多推进一页，且它不是最终结果条数上限。
         # 模型步数与墙钟时间只观测记录，不再终止任务。
-        taskPersistence: !!js "process.env.RETRIEVAL_AGENT_STORAGE === 'mysql_milvus' ? 'mysql' : 'session'"
+        taskPersistence: !!js "process.env.RETRIEVAL_AGENT_TASK_PERSISTENCE ?? (process.env.RETRIEVAL_AGENT_STORAGE === 'mysql_milvus' ? 'mysql' : 'session')"
         searchTopK: 20
         reviewBatchSize: !!js Number(process.env.RETRIEVAL_AGENT_REVIEW_BATCH_SIZE ?? 8)
         semanticFilter: !!js JSON.parse(process.env.RETRIEVAL_AGENT_FILTER_CONFIG ?? '{}')

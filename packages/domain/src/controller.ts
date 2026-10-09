@@ -593,7 +593,15 @@ export class RetrievalController {
     signal?.throwIfAborted()
     try {
       if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '没有可重新授权的历史快照。')
-      const status = await this.#provider.status(principal, state.snapshot.snapshotId)
+      let status = await this.#provider.status(principal, state.snapshot.snapshotId)
+      // Process-local Providers lose their snapshot registry on restart. Rehydrate
+      // only an invalid/missing registration, then keep every current access check.
+      // A healthy live registration keeps its ranking and recall-scope caches.
+      if (status.ready && status.snapshotValid === false && this.#provider.restoreSnapshot !== undefined) {
+        await this.#provider.restoreSnapshot(principal, state.snapshot, signal === undefined ? undefined : { signal })
+        signal?.throwIfAborted()
+        status = await this.#provider.status(principal, state.snapshot.snapshotId)
+      }
       if (status.snapshotValid !== true || (status.sourceVersion !== undefined && status.sourceVersion !== state.snapshot.sourceVersion)) {
         throw new RetrievalError('SNAPSHOT_INVALID', '历史快照或来源版本已失效，必须重新检索。')
       }
@@ -607,6 +615,12 @@ export class RetrievalController {
           throw new RetrievalError('PROTOCOL_MISMATCH', '重新授权返回了不一致的快照或候选集合。')
         }
         if (result.rejectedCandidateRefs.length > 0) throw new RetrievalError('UNAUTHORIZED', '历史候选的当前访问授权已撤销。')
+      }
+      const learning = state.budget.operatorUsage?.learning as { input_revision?: number; stop_reason?: string; result_set?: { returned: number } } | undefined
+      // 同源重新授权成功后恢复已计算完成的集合；不重标、不改变模型结果。
+      if (state.termination === 'snapshot_invalid' && ['complete', 'quality_passed', 'quality_fallback'].includes(learning?.stop_reason ?? '')
+        && learning?.input_revision === (state.inputGeneration ?? 0) && learning.result_set) {
+        return this.#record(state, { accessValidation: 'current', termination: learning.result_set.returned ? 'top_k_accepted' : 'no_result', stopExplanation: '模型已完成召回并集筛选。' })
       }
       return state.accessValidation === 'required' ? this.#record(state, { accessValidation: 'current' }) : state
     } catch (error) {

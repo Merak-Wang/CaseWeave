@@ -2,6 +2,7 @@ import { performance } from 'node:perf_hooks'
 import {
   RetrievalError,
   evaluateQuery,
+  normalizeLiteral,
   TicketCandidateRef,
   TicketSnapshotId,
   assertTicketRetrievalRequest,
@@ -26,11 +27,14 @@ import {
 } from '@retrieval-agent/contracts'
 import {
   HybridRankingEngine,
+  fuseRankingHits, rankSourceHits,
+  type DocumentProjection,
   RankingError,
   type RankingResult,
   type RetrievalRanker,
 } from '@retrieval-agent/model-service-client/ranking'
 import { sha256, shortOpaque, stableJson } from './hash.js'
+import { ticketGroupHashes } from './grouping.js'
 import { canRead, principalBinding } from './authorization.js'
 import { LEGACY_FIELD_CATALOG } from './fields.js'
 import { candidateL0, matchFragment, matchesFilter, rankingDocuments, queryDocument } from './search-projection.js'
@@ -45,6 +49,7 @@ export interface LocalTicketProviderConfig {
   readonly snapshotTtlMs?: number
   readonly now?: () => Date
   readonly ranker?: RetrievalRanker
+  readonly documentProjection?: DocumentProjection
   readonly defaultMode?: 'keyword' | 'dense' | 'hybrid'
 }
 
@@ -73,13 +78,16 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
   readonly #fieldCatalog: readonly TicketFieldDescriptor[]
   readonly #filterFields: ReadonlyMap<string, TicketFieldDescriptor>
   readonly #ranker: RetrievalRanker
+  readonly #documentProjection: DocumentProjection
   readonly #defaultMode: 'keyword' | 'dense' | 'hybrid'
   readonly #snapshots = new Map<string, SnapshotEntry>()
+  readonly #rankingVectors = new Map<string, Promise<readonly number[]>>()
 
   constructor(records: readonly NormalizedTicketRecord[], config: LocalTicketProviderConfig = {}) {
     this.providerId = config.providerId ?? 'local-fixture-v1'
     this.#records = [...records]
-    this.#ranker = config.ranker ?? new HybridRankingEngine()
+    this.#ranker = config.ranker ?? new HybridRankingEngine(config.documentProjection === undefined ? {} : {documentProjection:config.documentProjection})
+    this.#documentProjection = config.documentProjection ?? this.#ranker.documentProjection ?? 'ticket-search-projection-v1'
     this.#defaultMode = config.defaultMode ?? 'keyword'
     const sourceIndexVersion = config.indexVersion ?? sha256(records.map(record => `${record.ticketId}:${record.contentHash}`).sort().join('\n'))
     this.#indexVersion = sha256(`${sourceIndexVersion}:${this.#ranker.profileVersion}`)
@@ -95,7 +103,10 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       }
       catalog.set(descriptor.key, { ...descriptor, filterOperators: [...descriptor.filterOperators] })
     }
-    this.#fieldCatalog = [...catalog.values()].sort((left, right) => left.key.localeCompare(right.key))
+    this.#fieldCatalog = [...catalog.values()].map(field => this.#documentProjection === 'canonical-title-abstract-v1'
+      && ['L2', 'L3'].includes(field.accessLevel) ? { ...field, capability: { key: field.key, searchable: false,
+        operations: [] as const, availability: 'unavailable' as const, origin: 'source' as const,
+        source: 'canonical-title-abstract-v1' } } : field).sort((left, right) => left.key.localeCompare(right.key))
     this.#filterFields = new Map(this.#fieldCatalog.filter(field => field.filterOperators.length > 0).map(field => [field.key, field]))
     if (!Number.isSafeInteger(this.#maxPageSize) || this.#maxPageSize < 1) throw new TypeError('maxPageSize must be positive')
     if (!Number.isSafeInteger(this.#snapshotTtlMs) || this.#snapshotTtlMs < 1) throw new TypeError('snapshotTtlMs must be positive')
@@ -155,6 +166,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       principalBindingHash: bindingHash,
       queryPolicyVersion: this.#queryPolicyVersion,
       fieldCatalog: this.#fieldCatalog,
+      documentProjection: this.#documentProjection,
       capabilities: {
         exhaustive: true,
         pagination: true,
@@ -181,10 +193,12 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     const records = this.#records.filter(record => canRead(record, principal))
     const sourceVersion = sha256(records.map(record => `${record.sourceVersion}:${record.contentHash}`).sort().join('\n'))
     if (snapshot.providerId !== this.providerId || snapshot.sourceVersion !== sourceVersion
-      || snapshot.indexVersion !== this.#indexVersion || (snapshot.expiresAt !== undefined && Date.parse(snapshot.expiresAt) <= this.#now().getTime())) {
-      throw new RetrievalError('SNAPSHOT_INVALID', '历史来源、索引或快照期限已失效。')
+      || snapshot.indexVersion !== this.#indexVersion) {
+      throw new RetrievalError('SNAPSHOT_INVALID', '历史来源或索引已失效。')
     }
-    this.#snapshots.set(snapshot.snapshotId, { snapshot, bindingHash, records, rankings: new Map(),
+    // 来源、索引和授权仍相同时续期快照，保留结果身份以支持刷新和重启。
+    const restored = { ...snapshot, expiresAt: new Date(this.#now().getTime() + this.#snapshotTtlMs).toISOString() }
+    this.#snapshots.set(snapshot.snapshotId, { snapshot: restored, bindingHash, records, rankings: new Map(),
       candidateRefs: new Map(records.map(record => [shortOpaque('cand', snapshot.snapshotId, record.ticketId), record])) })
   }
 
@@ -206,7 +220,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     this.#decodeCursor(options.cursor, snapshotId, queryFingerprint)
     const filtered = entry.records.filter(record => query.filters.every(filter => matchesFilter(record, filter)))
     const eligible = query.queryPlan === undefined ? filtered : filtered.filter(record => evaluateQuery(query.queryPlan!.hard, queryDocument(record)) === true)
-    const documents = rankingDocuments(eligible)
+    const documents = rankingDocuments(eligible, this.#documentProjection)
     const fastKeyword = query.fastQuery?.keyword
     const isUnmodifiedKeyword = fastKeyword === undefined
       ? query.keywordQuery === undefined
@@ -220,20 +234,20 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
     try {
       if (ranked === undefined) {
         const astKeyword = query.queryPlan !== undefined && isUnmodifiedKeyword
+          && query.queryPlan.requirements.some(requirement => requirement.kind === 'keyword')
         const literalKeyword = astKeyword || Boolean(query.keywordQuery?.terms.length)
         const normalize = (s: string) => s.normalize('NFKC').toLowerCase()
-        const keywordRecords = astKeyword ? eligible.filter(record => evaluateQuery(query.queryPlan!.keyword, queryDocument(record)) === true)
+        const keywordDocument = (record: NormalizedTicketRecord) => this.#documentProjection === 'canonical-title-abstract-v1'
+          ? {fields:{},texts:{title:[record.title],summary:[record.summary]}} : queryDocument(record)
+        const keywordRecords = astKeyword ? eligible.filter(record => evaluateQuery(query.queryPlan!.keyword, keywordDocument(record)) === true)
           : literalKeyword ? eligible.filter(record => {
-            const doc = queryDocument(record)
+            const doc = keywordDocument(record)
             const values = [...Object.values(doc.texts), ...Object.values(doc.fields)].flatMap(value => Array.isArray(value) ? value : [value]).filter(v => typeof v === 'string').map(v => normalize(v as string))
             const hits = query.keywordQuery!.terms.map(term => values.some(value => value.includes(normalize(term))))
             return (query.keywordQuery!.operator === 'and' ? hits.every(Boolean) : hits.some(Boolean))
               && !query.excludedTerms.some(term => values.some(value => value.includes(normalize(term))))
           }) : []
-        ranked = literalKeyword && query.mode === 'keyword' ? {
-          hits: [], execution: { requestedMode: 'keyword', executedMode: 'keyword', strategyVersion: 'literal-ast-v1', channels: [] },
-          scanned: eligible.length, keywordEligible: 0, rankedHits: 0, warnings: [],
-        } : await this.#ranker.rank(documents, {
+        ranked = await this.#ranker.rank(documents, {
           text: query.normalizedQuery,
           fastPath: options.stage !== 'repair_search' && isUnmodifiedFastQuery,
           ...(query.semanticQuery === undefined ? {} : { semanticText: query.semanticQuery }),
@@ -241,20 +255,26 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
           semanticHints: query.semanticHints,
           excludedTerms: query.excludedTerms,
           ...(query.requiredConcepts === undefined ? {} : { requiredConcepts: query.requiredConcepts }),
-          mode: literalKeyword ? 'dense' : query.mode,
+          mode: query.mode,
         }, { maxScan: options.maxScan, ...(options.signal === undefined ? {} : { signal: options.signal }) })
         if (literalKeyword && query.mode !== 'dense') {
-          const merged = new Map(ranked.hits.map(hit => [hit.documentId, hit]))
-          keywordRecords.forEach((record, i) => {
-            const old = merged.get(record.ticketId)
-            const channels = [...old?.channels ?? [], { channel: 'keyword' as const, rank: i + 1, score: 1 }]
-            merged.set(record.ticketId, { documentId: record.ticketId, rank: i + 1, score: channels.reduce((sum, c) => sum + 1 / (60 + c.rank), 0), channels })
-          })
-          const hits = [...merged.values()].sort((a, b) => b.score - a.score || a.documentId.localeCompare(b.documentId)).map((hit, i) => ({ ...hit, rank: i + 1 }))
-          ranked = { ...ranked, hits, keywordEligible: keywordRecords.length, rankedHits: hits.length,
-            execution: { ...ranked.execution, requestedMode: query.mode, executedMode: query.mode, channels: [
-              { channel: 'keyword', implementation: 'file-literal-ast', version: 'nfkc-lower-v1', resultCount: keywordRecords.length, elapsedMs: 0, querySource: 'direct_user_keywords' }, ...ranked.execution.channels,
-            ] } }
+          const members = new Set(keywordRecords.map(record => record.ticketId as string))
+          const lexical = ranked.hits.flatMap(hit => hit.channels.filter(c => c.channel === 'keyword' && members.has(hit.documentId)).map(c => ({documentId:hit.documentId,score:c.score})))
+          const seen = new Set(lexical.map(hit => hit.documentId))
+          for (const record of keywordRecords) if (!seen.has(record.ticketId)) lexical.push({documentId:record.ticketId,score:0})
+          const dense = ranked.hits.flatMap(hit => hit.channels.filter(c => c.channel === 'vector').map(c => ({documentId:hit.documentId,score:c.score})))
+          const fusion=this.#ranker.fusionOptions??{rankConstant:60,keywordWeight:.55,vectorWeight:.45}
+          let hits = query.mode === 'keyword'
+            ? rankSourceHits(lexical).map((hit,index) => ({...hit,rank:index+1,lexical_raw:hit.score,channels:[{channel:'keyword' as const,rank:hit.rank,score:hit.score}]}))
+            : fuseRankingHits(lexical,dense,fusion)
+          if(ranked.execution.reranker){
+            const reranks=new Map(ranked.hits.flatMap(hit=>hit.channels.filter(c=>c.channel==='reranker').map(c=>[hit.documentId,c] as const)))
+            hits=hits.map(hit=>({...hit,channels:[...hit.channels,...(reranks.has(hit.documentId)?[reranks.get(hit.documentId)!]:[])]})).sort((a,b)=>(reranks.get(a.documentId)?.rank??hits.length+a.rank)-(reranks.get(b.documentId)?.rank??hits.length+b.rank)).map((hit,index)=>({...hit,rank:index+1}))
+          }
+          ranked = {...ranked,hits,keywordEligible:keywordRecords.length,rankedHits:hits.length,
+            execution:{...ranked.execution,requestedMode:query.mode,executedMode:query.mode,
+              ...(query.mode === 'hybrid' ? {fusion:{method:'weighted_rrf' as const,version:'weighted-rrf-v1',...fusion}} : {})}}
+
         }
         entry.rankings.set(queryFingerprint, ranked)
       }
@@ -320,7 +340,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
         rank: offset + index + 1,
         title: record.title,
         summary: record.summary,
-        l0: candidateL0(record),
+        l0: candidateL0(record), groupHashes: ticketGroupHashes(record),
         matchFragments: [
           ...(titleFragment === undefined ? [] : [{ field: 'title' as const, ...titleFragment }]),
           ...(summaryFragment === undefined ? [] : [{ field: 'summary' as const, ...summaryFragment }]),
@@ -400,6 +420,36 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       content_hash: r.contentHash, embedding_id: '', vectors: [] }), total: entry.records.length,
       ...(offset + records.length < entry.records.length ? { nextCursor: String(offset + records.length) } : {}) }
   }
+  async #featureScores(entry: SnapshotEntry, ids: readonly number[], dense: string, dimensions: number,
+    query: string | undefined, signal?: AbortSignal): Promise<number[] | undefined> {
+    if (!query || !ids.length) return undefined
+    if (!this.#ranker.queryAnchors) throw new RetrievalError('PROVIDER_UNAVAILABLE', '相关度选样需要同索引查询向量。')
+    let pending = this.#rankingVectors.get(query)
+    if (!pending) {
+      pending = this.#ranker.queryAnchors([query], signal).then(anchors => anchors.vectors[0]!)
+      this.#rankingVectors.set(query, pending)
+    }
+    const vector = await pending, queryNorm = Math.hypot(...vector)
+    const normalized = normalizeLiteral(query), points = Array.from(normalized)
+    const grams = [...new Set(points.slice(0, -1).map((point, i) => point + points[i + 1]!))]
+    if (!grams.length && normalized) grams.push(normalized)
+    const bytes = Buffer.from(dense, 'base64')
+    // 每块复用原句向量；字面覆盖只读同一投影的字段，不把正文混进标题摘要试用。
+    return ids.map((id, index) => {
+      const record = entry.records[id]!
+      const fields = (this.#documentProjection === 'canonical-title-abstract-v1'
+        ? [record.title, record.summary] : Object.values(queryDocument(record).texts).flat()).map(normalizeLiteral)
+      const coverage = grams.length ? grams.filter(gram => fields.some(text => text.includes(gram))).length / grams.length : 0
+      let dot = 0, norm = 0
+      for (let j = 0; j < dimensions; j++) {
+        const value = bytes.readFloatLE((index * dimensions + j) * 4)
+        dot += value * vector[j]!; norm += value * value
+      }
+      const cosine = norm && queryNorm ? Math.max(0, Math.min(1, dot / Math.sqrt(norm) / queryNorm)) : 0
+      return (coverage + cosine) / 2
+    })
+  }
+
   async featureBlock(principal: TrustedPrincipalContext,
     request: Parameters<NonNullable<TicketRetrievalProvider['featureBlock']>>[1], options?: ProviderCallOptions) {
     const entry = this.#authorizeSnapshot(principal, request.snapshotId)
@@ -439,9 +489,11 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       else if (!requestedRefs) next_cursor = String(next)
     }
     if (this.#ranker.readFeatureBlock) {
-      const block = await this.#ranker.readFeatureBlock(ids.map(i => ({ id: entry.records[i]!.ticketId, contentHash: entry.records[i]!.contentHash })), options?.signal)
+      const block = await this.#ranker.readFeatureBlock(rankingDocuments(ids.map(i=>entry.records[i]!),this.#documentProjection), options?.signal)
       this.#authorizeSnapshot(principal, request.snapshotId)
-      return { ids, dense: block.dense, dimensions: block.dimensions, available: block.available,
+      const scores = await this.#featureScores(entry, ids, block.dense, block.dimensions, request.rankingQuery, options?.signal)
+      return { ids, row_groups: ids.map(i => ticketGroupHashes(entry.records[i]!)), dense: block.dense, dimensions: block.dimensions, available: block.available,
+        ...(scores ? { scores } : {}),
         feature_id: request.recallScope !== undefined ? sha256(stableJson({ index: block.embedding_id, recallScope: request.recallScope })) : block.embedding_id, next_cursor }
     }
     const refs = ids.map(i => {
@@ -458,9 +510,22 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       available[i] = 1
       vector.forEach((v, j) => dense.writeFloatLE(v, (i * dimensions + j) * 4))
     })
-    return { ids, dense: dense.toString('base64'), available: available.toString('base64'), dimensions,
+    const scores = await this.#featureScores(entry, ids, dense.toString('base64'), dimensions, request.rankingQuery, options?.signal)
+    return { ids, row_groups: ids.map(i => ticketGroupHashes(entry.records[i]!)), dense: dense.toString('base64'), available: available.toString('base64'), dimensions,
+      ...(scores ? { scores } : {}),
       feature_id: request.recallScope !== undefined ? sha256(stableJson({ index: entry.snapshot.indexVersion, recallScope: request.recallScope })) : entry.snapshot.indexVersion,
       next_cursor }
+  }
+  async featureAnchors(principal:TrustedPrincipalContext,request:Parameters<NonNullable<TicketRetrievalProvider['featureAnchors']>>[1],options?:ProviderCallOptions) {
+    const block=await this.featureBlock(principal,{snapshotId:request.snapshotId,recallScope:request.recallScope,ids:[],limit:1},options)
+    if(block.feature_id!==request.featureId) throw new RetrievalError('INVALID_REQUEST','Anchor feature identity differs from the actual completed recall scope')
+    if(!this.#ranker.queryAnchors) throw new RetrievalError('PROVIDER_UNAVAILABLE','Pinned query anchors are unavailable')
+    const anchors=await this.#ranker.queryAnchors(request.texts,options?.signal)
+    this.#authorizeSnapshot(principal,request.snapshotId)
+    const actual=sha256(stableJson({index:anchors.embedding_id,recallScope:request.recallScope}))
+    if(actual!==block.feature_id || anchors.dimensions!==block.dimensions) throw new RetrievalError('PROVIDER_UNAVAILABLE','Anchor and feature block identities differ')
+    return {...anchors,feature_id:block.feature_id,embedding_id:block.feature_id,
+      profileIdentity:{...anchors.profileIdentity,base_embedding_id:anchors.embedding_id,recallScope:request.recallScope}}
   }
   async resolveFeatureIds(principal: TrustedPrincipalContext,
     request: Parameters<NonNullable<TicketRetrievalProvider['resolveFeatureIds']>>[1], options?: ProviderCallOptions) {
@@ -482,7 +547,7 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       return { ref, displayId: r.displayId, sourceVersion: r.sourceVersion, contentHash: r.contentHash,
         snapshotId: request.snapshotId, evidenceLevel: 'L1', projectionVersion: 2, rank: 0,
         title: r.title, summary: r.summary, summaryOrigin: overviewOrigin(r, 'summary'), titleOrigin: overviewOrigin(r, 'title'),
-        l0: candidateL0(r), matchFragments: [], matchSignals: { channels: [], keywordTerms: [] } }
+        l0: candidateL0(r), groupHashes: ticketGroupHashes(r), matchFragments: [], matchSignals: { channels: [], keywordTerms: [] } }
     })
   }
   async readDetails(principal: TrustedPrincipalContext, request: DetailReadRequest, options?: ProviderCallOptions): Promise<TicketDetailResult> {

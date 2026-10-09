@@ -9,7 +9,7 @@ export interface ReportCitation {
 export interface ReportNarrative { paragraphs: { text: string; citations: string[] }[] }
 export interface RetrievalReport {
   format?: 'summary'
-  learning?: { modelId: string; featureId: string; quality: import('@retrieval-agent/contracts').LearnedResult['quality']; hashBasis: string }
+  learning?: { modelId: string; method?: string; featureId: string; quality: import('@retrieval-agent/contracts').LearnedResult['quality']; hashBasis: string; statistics?: Readonly<Record<string, unknown>> }
   schemaVersion: 1; taskId: string; resultRevision: string; generatedAt: string; audience: 'operator' | 'handoff';
   confirmedCount: number; confirmedSetSha256: string; conclusion: string;
   scope: { originalQuery: string; inputs: readonly { kind: string; text?: string }[]; conditions: unknown;
@@ -26,6 +26,7 @@ export interface RetrievalReport {
 /** Report facts and examples originate only in this version's confirmed result. */
 export function createRetrievalReport(state: RetrievalState, inputs: RetrievalReport['scope']['inputs'], audience: RetrievalReport['audience'] = 'operator'): RetrievalReport {
   const result = createTicketResultCollection(state)
+  const learning = (state.budget.operatorUsage?.learning ?? {}) as Readonly<Record<string, unknown>>
   if (['snapshot_invalid', 'permission_blocked'].includes(state.termination)) throw new RetrievalError('SNAPSHOT_INVALID', '结果访问资格失效，请重新复核。')
   const citations: ReportCitation[] = []
   const examples = result.tickets.slice(0, 5).map(c => {
@@ -48,11 +49,15 @@ export function createRetrievalReport(state: RetrievalState, inputs: RetrievalRe
   const s = state.snapshot
   return { format: 'summary', schemaVersion: 1, taskId: state.retrievalId, resultRevision: result.resultRevision,
     ...(learnedResult(state) ? { learning: { modelId: learnedResult(state)!.model_id, featureId: learnedResult(state)!.feature_id,
+      method: String(learnedResult(state)!.metadata.model ?? learnedResult(state)!.metadata.algorithm ?? 'online_model'),
+      statistics: { scope: learnedResult(state)!.scope_count, sampled: learning.teacher_unique_records,
+        training: learning.training_records, fitSeconds: learning.fit_seconds,
+        scanSeconds: learning.scan_seconds, predictSeconds: learning.predict_seconds },
       quality: learnedResult(state)!.quality, hashBasis: String(learnedResult(state)!.metadata.hash_basis) } } : {}),
     generatedAt: new Date().toISOString(), audience, confirmedCount: confirmedCount(state),
     confirmedSetSha256: learnedResult(state) ? String(learnedResult(state)!.metadata.result_set_sha256)
       : createHash('sha256').update(JSON.stringify(result.tickets.map(c => [c.ref, c.displayId, c.sourceVersion, c.contentHash]))).digest('hex'),
-    conclusion: result.explanation ?? (result.tickets.length ? '本轮已确认以下工单。' : '本次尚无可确认结果。'),
+    conclusion: result.explanation ?? (result.tickets.length ? '本轮模型筛选得到以下工单。' : '本次没有筛选为相关的工单。'),
     scope: { originalQuery: state.query.original, inputs: inputs.map(i => ({ kind: i.kind, ...(i.text === undefined ? {} : { text: i.text }) })), conditions: state.query.confirmedConstraints, unresolved: state.query.unresolvedConstraints,
       snapshot: s ? { shortId: s.shortId, providerId: s.providerId, sourceVersion: s.sourceVersion, indexVersion: s.indexVersion, createdAt: s.createdAt } : null,
       fields: s?.fieldCatalog.filter(isReadableTicketField).map(f => ({ key: f.key, label: f.label, accessLevel: f.accessLevel })) ?? [],
@@ -100,11 +105,11 @@ function legacyReportMarkdown(r: RetrievalReport): string {
     ...r.scope.inputs.filter(i => i.kind !== 'query').map(i => `- ${{ supplement: '用户补充', answer: '用户答复', feedback: '相关性反馈', cancel: '取消' }[i.kind] ?? md(i.kind)}：${md(i.text)}`),
     `明确条件：${md(conditions || '无额外结构化条件')}`, `待核实要求：${md(r.scope.unresolved.join('；') || '无')}`,
     '', '## 覆盖与停止', '',
-    `停止性质：${{ satisfied: 'Agent 判定本轮要求已满足', no_result: '本轮无可确认结果', incomplete: '本轮未完成' }[r.coverage.semanticStatus]}；当前表达式取完：${r.coverage.resultPagesExhausted ? '是' : '否'}。`,
+    `停止性质：${{ satisfied: 'Agent 判定本轮要求已满足', no_result: '本轮没有相关结果', incomplete: '本轮未完成' }[r.coverage.semanticStatus]}；当前表达式取完：${r.coverage.resultPagesExhausted ? '是' : '否'}。`,
     r.coverage.semanticRecallKnown ? '已记录语义覆盖判断。' : '未建立全库语义召回率；不能据此宣称找全。',
     ...(r.learning ? [`模型集合：${md(r.learning.modelId)}；特征代次：${md(r.learning.featureId)}。`,
       r.learning.quality.basis === 'selection'
-        ? `模型选择集指标：Precision=${r.learning.quality.precision}，Recall=${r.learning.quality.recall}。${r.learning.quality.acceptance === 'fallback' ? '未达原目标，采用最佳模型预测，选择集查准率达到 60% 门槛' : '模型达标后直接预测'}；未进行独立抽验，指标不代表全库质量或单条置信度。`
+        ? `模型选择集指标：Precision=${r.learning.quality.precision}，Recall=${r.learning.quality.recall}。${r.learning.quality.acceptance === 'fallback' ? '采用本次训练选择的模型预测' : '使用本次模型完成预测'}；未进行独立抽验，指标不代表全库质量或单条置信度。`
         : `历史抽验下界：Precision=${r.learning.quality.precision_lower}，Recall=${r.learning.quality.recall_lower}。这是旧版抽验记录，依赖参考标签可靠性，不是实际召回率。`,
       `集合指纹口径：${md(r.learning.hashBasis)}。`] : []),
     ...(r.coverage.assessment ? [`已核查：${md(r.coverage.assessment.checked.join('；'))}`, `剩余范围：${md(r.coverage.assessment.remaining.join('；') || '无另列范围')}`,
@@ -130,11 +135,15 @@ function summaryReportMarkdown(r: RetrievalReport): string {
   const citationNumbers = new Map(citations.map((citation, index) => [citation.id, index + 1]))
   const summary = r.narrative.status === 'model'
     ? r.narrative.paragraphs.map(p => `${md(p.text)} ${p.citations.map(id => `[${citationNumbers.get(id)}](#ref-${citationNumbers.get(id)})`).join(' ')}`)
-    : [`已确认 ${r.confirmedCount} 条工单。`]
+    : [`已筛选 ${r.confirmedCount} 条工单。`]
   return [
     `# 工单检索${r.audience === 'handoff' ? '交接' : '复核'}报告`, '',
-    `查询：${md(r.scope.originalQuery)}`, `确认数量：${r.confirmedCount}`, '',
+    `查询：${md(r.scope.originalQuery)}`, `筛选数量：${r.confirmedCount}`, '',
     '## 总结', '', ...summary, '',
+    ...(r.learning ? [`判别方法：${md(r.learning.method ?? r.learning.modelId)}。质量未人工评测；模型分数和教师一致率不是业务准确率。`,
+      ...['scope', 'sampled', 'training', 'fitSeconds', 'scanSeconds', 'predictSeconds'].map(key => [key, r.learning?.statistics?.[key]] as const).filter(([, value]) => typeof value === 'number').map(([key, value]) =>
+        `${({ scope: '召回并集条数', sampled: '教师样本条数', training: '训练有效标签条数', fitSeconds: '拟合秒数', scanSeconds: '特征读取秒数', predictSeconds: '预测秒数' } as Record<string, string>)[key] ?? key}：${value}`),
+      r.learning.quality.basis === 'training_group_crossfit' ? `训练组交叉拟合教师一致率：P=${r.learning.quality.precision}，R=${r.learning.quality.recall}。` : r.learning.quality.basis === 'teacher_single_class' ? '教师样本只有单一类别；训练一致率不代表已学会业务边界。' : '没有独立人工质量评测。', ''] : []),
     ...(citations.length ? ['## 引用', '', ...citations.flatMap((entry, index) => [
       `<a id="ref-${index + 1}"></a>`, `[${index + 1}] ${md(entry.value.displayId)}（${md(fieldLabel(entry.value.field))}）`,
     ])] : []), '',

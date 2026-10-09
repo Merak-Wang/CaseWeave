@@ -36,6 +36,8 @@ export interface Config {
   readonly maxPageSize?: number
   readonly snapshotTtlMs?: number
   readonly retrievalMode?: 'keyword' | 'dense' | 'hybrid'
+  readonly documentProjection?: 'ticket-search-projection-v1' | 'canonical-title-abstract-v1'
+  readonly lexicalRanking?: 'literal_set' | 'bm25f'
   readonly modelServiceBaseUrl?: string
   readonly embeddingModel?: string
   readonly embeddingRevision?: string
@@ -64,6 +66,8 @@ export const Config: z<Config> = z.object({
   maxPageSize: z.number().step(1).min(1),
   snapshotTtlMs: z.number().step(1).min(1).default(900_000),
   retrievalMode: z.union(['keyword', 'dense', 'hybrid'] as const).default('hybrid'),
+  documentProjection:z.union(['ticket-search-projection-v1','canonical-title-abstract-v1'] as const).default('ticket-search-projection-v1'),
+  lexicalRanking:z.union(['literal_set','bm25f'] as const).default('literal_set'),
   modelServiceBaseUrl: z.string().default('http://127.0.0.1:8012'),
   embeddingModel: z.string().default('Qwen/Qwen3-Embedding-0.6B'),
   embeddingRevision: z.string(),
@@ -86,12 +90,14 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
+    const documentProjection=config.documentProjection??'ticket-search-projection-v1'
     if (config.storageBackend === 'mysql_milvus') {
+      const lexicalRanker=config.lexicalRanking==='bm25f' ? config.ranker??new HybridRankingEngine({baseUrl:config.modelServiceBaseUrl??'http://127.0.0.1:8012',documentProjection}) : undefined
       const database = new TicketDatabase(config.mysqlUrl ?? process.env.RETRIEVAL_AGENT_MYSQL_URL)
       const model = new ModelServiceClient({ baseUrl: config.modelServiceBaseUrl ?? 'http://127.0.0.1:8012',
         embeddingModel: config.embeddingModel ?? 'Qwen/Qwen3-Embedding-0.6B', embeddingDimensions: config.embeddingDimensions ?? 1024,
         ...(config.embeddingRevision ? { embeddingRevision: config.embeddingRevision } : {}), defaultDeadlineMs: config.modelDeadlineMs ?? 120_000 })
-      this.provider = new DatabaseTicketProvider(database, new MilvusClient(config.milvusUrl ?? process.env.RETRIEVAL_AGENT_MILVUS_URL, process.env.RETRIEVAL_AGENT_MILVUS_TOKEN), model, config.datasetId, config.denseTopK)
+      this.provider = new DatabaseTicketProvider(database, new MilvusClient(config.milvusUrl ?? process.env.RETRIEVAL_AGENT_MILVUS_URL, process.env.RETRIEVAL_AGENT_MILVUS_TOKEN), model, config.datasetId, config.denseTopK, {documentProjection,...(lexicalRanker ? {lexicalRanker} : {})})
       this.preparation = database.migrate().then(() => database.publication(config.datasetId ?? 'esft-development')).then(() => undefined, error => { this.preparationError = error })
       ctx.effect(() => () => database.close())
       return
@@ -114,6 +120,7 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
       throw new TypeError('enabled reranking requires a pinned rerankerRevision')
     }
     const ranker = config.ranker ?? new HybridRankingEngine({
+      documentProjection,
       baseUrl: config.modelServiceBaseUrl ?? 'http://127.0.0.1:8012',
       ...(mode === 'keyword' ? {} : {
         embeddingIdentity: { model: embeddingModel, revision: embeddingRevision!, dimensions: embeddingDimensions },
@@ -131,12 +138,13 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
       ...(config.providerId === undefined ? {} : { providerId: config.providerId }),
       ...((config.maxPageSize ?? config.maxRequestedCount) === undefined ? {} : { maxPageSize: config.maxPageSize ?? config.maxRequestedCount }),
       ...(config.snapshotTtlMs === undefined ? {} : { snapshotTtlMs: config.snapshotTtlMs }),
+      documentProjection,
       defaultMode: mode,
       ranker,
     })
     this.preparation = (mode === 'keyword' || ranker.prepare === undefined
       ? Promise.resolve(undefined)
-      : ranker.prepare(rankingDocuments(records)))
+      : ranker.prepare(rankingDocuments(records,documentProjection)))
       .then(() => undefined, error => { this.preparationError = error })
   }
 
@@ -160,9 +168,19 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
     await this.ensurePrepared()
     return await this.provider.search(principal, snapshotId, spec, options)
   }
+  override restoreSnapshot: NonNullable<TicketRetrievalProvider['restoreSnapshot']> = async (principal, snapshot, options) => {
+    options?.signal?.throwIfAborted()
+    await this.ensurePrepared()
+    options?.signal?.throwIfAborted()
+    await this.provider.restoreSnapshot?.(principal, snapshot, options)
+  }
   readEvidence(principal: TrustedPrincipalContext, request: EvidenceReadRequest, options?: ProviderCallOptions): Promise<TicketEvidenceResult> { return this.provider.readEvidence(principal, request, options) }
   readDetails(principal: TrustedPrincipalContext, request: DetailReadRequest, options?: ProviderCallOptions): Promise<TicketDetailResult> { return this.provider.readDetails(principal, request, options) }
   override readFeatures: NonNullable<import('@retrieval-agent/contracts').TicketRetrievalProvider['readFeatures']> = (...args) => this.provider.readFeatures?.(...args) ?? Promise.resolve([])
+  override featureAnchors:NonNullable<TicketRetrievalProvider['featureAnchors']>=(...args)=>{
+    if(!this.provider.featureAnchors) throw new Error('Provider does not support pinned query anchors')
+    return this.provider.featureAnchors(...args)
+  }
   override featureBlock: NonNullable<TicketRetrievalProvider['featureBlock']> = (...args) => {
     if (!this.provider.featureBlock) throw new Error('Provider does not support numeric blocks')
     return this.provider.featureBlock(...args)

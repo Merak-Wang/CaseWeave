@@ -3,7 +3,7 @@ import type { PoolConnection } from 'mysql2/promise'
 import { RetrievalError } from '@retrieval-agent/contracts'
 import { MySqlTaskStore, type TaskRecord } from './task-store.js'
 
-export interface DeliverySpec { kind: 'csv' | 'jsonl' | 'report'; template: 'summary' | 'full'; audience: 'operator' | 'handoff'; resultRevision: string }
+export interface DeliverySpec { kind: 'csv' | 'jsonl' | 'xlsx' | 'report'; template: 'summary' | 'full'; audience: 'operator' | 'handoff'; resultRevision: string; collection?: 'confirmed' | 'predictions'; predictionSelection?: 'accept' | 'all' }
 export interface DeliveryRecord {
   id: string; task_id: string; operation_id: string; request_hash: string; spec_json: DeliverySpec;
   status: 'queued' | 'running' | 'ready' | 'failed'; fence: number; owner: string; attempts: number;

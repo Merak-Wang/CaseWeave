@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url'
 
 const args=Object.fromEntries(process.argv.slice(2).map(value=>{const at=value.indexOf('=');if(at<0)throw new Error('Use --name=value');return [value.slice(2,at),value.slice(at+1)]}))
 const session=args.session??'workbench', scenario=args.scenario??'delivery', out=resolve(args.out??'output/phase8')
-const files={inputs:'check-workbench-inputs.js',delivery:'check-workbench-browser.js',boundaries:'check-workbench-boundaries.js',scale:'check-workbench-scale.js',files:'check-workbench-files.js','report-layout':'check-workbench-report-layout.js',deployment:'check-workbench-installed.js'}
+const files={execution:'check-workbench-execution.js',inputs:'check-workbench-inputs.js',delivery:'check-workbench-browser.js',boundaries:'check-workbench-boundaries.js',scale:'check-workbench-scale.js',files:'check-workbench-files.js','report-layout':'check-workbench-report-layout.js',deployment:'check-workbench-installed.js'}
 if(!/^[a-zA-Z0-9_-]+$/.test(session)||!Object.hasOwn(files,scenario))throw new Error('Invalid session or scenario')
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..')
 let output=''

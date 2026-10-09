@@ -1,6 +1,6 @@
 import { createServer, type IncomingHttpHeaders } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it, vi } from 'vitest'
 import * as compatibility from './opencode-pi-ai.js'
@@ -22,8 +22,10 @@ describe('pinned pi-ai OpenCode session routing', () => {
   })
   it('sends distinct stable conversation UUIDs on the actual HTTP wire, including prepared calls and compaction', async () => {
     const headers: IncomingHttpHeaders[] = []
+    const bodies: Record<string, unknown>[] = []
     const server = createServer((req, res) => {
-      req.resume(); req.once('end', () => {
+      let body = ''; req.on('data', chunk => body += chunk); req.once('end', () => {
+        bodies.push(JSON.parse(body))
         headers.push(req.headers)
         res.writeHead(200, { 'content-type': 'text/event-stream' })
         res.end(['{"choices":[{"delta":{"role":"assistant","content":"ok"},"index":0,"finish_reason":null}]}',
@@ -38,7 +40,7 @@ describe('pinned pi-ai OpenCode session routing', () => {
       await ctx.plugin(compatibility, { providers: {
         'opencode-fixture': { api: 'openai-completions', baseURL, apiKeyEnv: 'OPENCODE_HEADER_TEST_KEY',
           headers: { 'X-OpenCode-Session': 'shared-invalid-id', 'x-deployment': 'kept' },
-          models: [{ id: 'fixture', contextWindow: 4096, maxTokens: 64 }] },
+          models: [{ id: 'fixture', contextWindow: 4096, maxTokens: 64 }, { id: 'deepseek-v4.1-flash', contextWindow: 4096, maxTokens: 64, reasoningEfforts: { off: null, high: 'high' } }] },
         'unrelated-fixture': { api: 'openai-completions', baseURL, apiKeyEnv: 'OPENCODE_HEADER_TEST_KEY',
           models: [{ id: 'fixture', contextWindow: 4096, maxTokens: 64 }] },
       } })
@@ -58,6 +60,11 @@ describe('pinned pi-ai OpenCode session routing', () => {
         type: 'finish', reason: { kind: 'error', failure: { code: 'INVALID_REQUEST', message: 'OpenCode inference requires a conversation sessionId.' } },
       })
       expect(headers).toHaveLength(sent)
+      const off = await drain(ctx.llm.stream({ ...request(second), model: 'deepseek-v4.1-flash', reasoningEffort: ReasoningEffortId('off'), maxTokens: 64 }))
+      expect(off.at(-1), JSON.stringify(off)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+      expect(bodies.at(-1)).toMatchObject({ thinking: { type: 'disabled' } })
+      await drain(ctx.llm.stream({ ...request(second), model: 'deepseek-v4.1-flash', reasoningEffort: ReasoningEffortId('high') }))
+      expect(bodies.at(-1)?.thinking).not.toEqual({ type: 'disabled' })
       await drain(ctx.llm.stream({ ...request(second), provider: 'unrelated-fixture' }))
       expect(headers.at(-1)?.['x-opencode-session']).toBeUndefined()
       await ctx.fiber.dispose(); ctx = await mount()

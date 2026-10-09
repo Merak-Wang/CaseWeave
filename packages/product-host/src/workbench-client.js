@@ -16,14 +16,26 @@ const saved = (key, fallback = []) => { try { return JSON.parse(localStorage.get
 function writeSaved(key, value) { localStorage.setItem(key, JSON.stringify(value)) }
 function text(tag, value, cls) { const e = document.createElement(tag); e.textContent = value ?? ''; if (cls) e.className = cls; return e }
 function button(label, action, cls = 'secondary') { const b = text('button', label, cls); b.type = 'button'; b.onclick = () => void action(); return b }
-const verdict = v => ({ accept: '已确认', exclude: '已排除', undetermined: '核查中' }[v] || '核查中')
+const verdict = v => ({ accept: '相关（模型判断）', exclude: '不相关', undetermined: '执行失败／待重试' }[v] || '核查中')
 const motion = () => matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'
 const audit = (label, value) => { const d = text('details', '', 'report-audit'); d.append(text('summary', label), text('small', value)); return d }
 const origin = o => o?.verification === 'conflicting' ? '摘要与原文冲突' : o?.verification === 'unverified' ? '来源摘要' : o?.kind === 'generated' ? '生成摘要' : o?.kind === 'source' ? '来源原文' : '摘要'
 const fieldLabel = f => ({ problemDescription: '问题描述', resolutionSteps: '处理记录', rootCause: '原因记录', answer: '答复', conversationOrUpdates: '对话与更新' }[f.key] || f.label)
 const totals = () => snapshot?.node?.collectionWindow
+const customFlow = () => snapshot?.orchestration?.retrieval?.execution?.orchestration === 'fixed'
 const valid = (gen, id = taskId) => gen === generation && id === taskId
-const actualView = () => view === 'results' ? 'confirmed' : $('candidate-view').value
+const actualView = () => view === 'results' ? $('results-collection').value : $('candidate-view').value
+const predictionView = value => ['predictions', 'predictions_all'].includes(value)
+const exportCollection = () => predictionView($('export-collection').value) ? { collection: 'predictions', predictionSelection: $('export-collection').value === 'predictions_all' ? 'all' : 'accept' } : {}
+const exportAllowed = () => deliveryReady() && ($('export-collection').value === 'confirmed' ? snapshot.node.exportEnabled : snapshot.node.predictionExportEnabled)
+function updateExportControls() {
+  const total = totals()?.predictionTotal ?? 0, positive = totals()?.predictions ?? 0
+  for (const option of $('export-collection').options) if (predictionView(option.value)) option.disabled = true
+  if ($('export-collection').selectedOptions[0]?.disabled) $('export-collection').value = 'confirmed'
+  $('download-xlsx').disabled = $('download').disabled = $('download-jsonl').disabled = !exportAllowed()
+  const selected = $('export-collection').value
+  $('delivery-note').textContent = !deliveryReady() ? '当前结果尚未就绪或来源已失效。' : selected === 'confirmed' ? '包含全部 ' + (totals()?.confirmed ?? 0) + ' 条符合条件工单。' : '包含 ' + (selected === 'predictions_all' ? total : positive) + ' 条未校准模型候选；预测类别与分数不是业务确认或已测准确率。'
+}
 const hasAccess = () => snapshot?.node && !['snapshot_invalid', 'permission_blocked'].includes(snapshot.node.status)
 const deliveryReady = () => hasAccess() && Boolean(snapshot.node.result) && !snapshot.failure
 const orchestrationUI = createOrchestrationUI({ api, endpoint, getSnapshot: () => snapshot, getTaskId: () => taskId, getReportStatus: () => reportStatus, showView: setView, expertDetail, openCandidate: c => detail(c) })
@@ -130,9 +142,9 @@ function acceptReceipt(r, kind = 'revise') {
   }
   invalidateViews(); snapshot = undefined
   $('confirmed-count').textContent = '0'; $('counts').textContent = '已保存新输入，正在重新核查'; $('early-progress').hidden = false
-  $('early-progress').replaceChildren(text('h3', '正在按新要求查找'), text('p', '结果会在确认后出现在这里。'))
+  $('early-progress').replaceChildren(text('h3', '正在按新要求查找'), text('p', '模型筛选结果会出现在这里。'))
   $('status').textContent = '正在更新结果'
-  $('download').disabled = $('download-jsonl').disabled = $('save-report').disabled = true
+  $('download-xlsx').disabled = $('download').disabled = $('download-jsonl').disabled = $('save-report').disabled = true
   $('delivery-note').textContent = '结果正在修订，上一版本的报告和文件已停止交付。'
   $('receipt').textContent = '已收到，正在更新结果'
 }
@@ -146,18 +158,21 @@ async function refresh() {
   try {
     const next = await api(endpoint + '/' + id)
     if (id !== taskId || gen !== generation || next.inputRevision < minimumInput || (snapshot && next.eventSeq < snapshot.eventSeq)) return
+    const finalized = !snapshot?.orchestration?.terminal && next.orchestration?.terminal
     if (snapshot && snapshot.inputRevision !== next.inputRevision) invalidateViews()
     if (snapshot?.node?.result?.resultRevision !== next.node?.result?.resultRevision) invalidateDelivery()
     if (snapshot && evidenceScopeChanged(snapshot, next) && !$('evidence-panel').hidden) closeDetail()
     snapshot = next; currentListVersion = next.node?.collectionWindow?.version; minimumInput = next.inputRevision
     lastSeq = Math.max(lastSeq, next.eventSeq); clearError('refresh'); render()
     if (hasAccess() && view !== 'report' && (view === 'results' || $('candidate-disclosure').open)) {
-      if (!page || (!page.items.length && (view !== 'results' || (totals()?.confirmed ?? 0) > 0))) void loadPage()
+      // 最终集合发布后读取同一权威版本，避免页头和分页仍停留在采样结果。
+      if (finalized && page?.currentVersion !== currentListVersion) void loadPage(undefined, true)
+      else if (!page || (!page.items.length && (view !== 'results' || (totals()?.confirmed ?? 0) > 0))) void loadPage()
       else if (page.currentVersion !== currentListVersion) $('new-results').hidden = false
     }
   } catch (e) {
     if (!valid(gen, id)) return
-    if (e.code && !e.retryable && e.code !== 'PROVIDER_UNAVAILABLE') { invalidateViews(false); snapshot = undefined; $('confirmed-count').textContent = '0'; $('download').disabled = $('download-jsonl').disabled = $('save-report').disabled = true; $('delivery-note').textContent = '访问资格或来源已失效，请重新检索。' }
+    if (e.code && !e.retryable && e.code !== 'PROVIDER_UNAVAILABLE') { invalidateViews(false); snapshot = undefined; $('confirmed-count').textContent = '0'; $('download-xlsx').disabled = $('download').disabled = $('download-jsonl').disabled = $('save-report').disabled = true; $('delivery-note').textContent = '访问资格或来源已失效，请重新检索。' }
     else scheduleRefresh(2000)
     error(e, 'refresh')
   } finally { refreshing = false; if (again) { again = false; scheduleRefresh() } }
@@ -187,6 +202,8 @@ function setView(next, focus = false) {
 function render() {
   orchestrationUI.update(snapshot, disconnected)
   renderRetrieval(snapshot, { openKnowledge: id => orchestrationUI.openKnowledge(id), showKnowledge: () => setView('collaboration', true) })
+  $('tab-collaboration').hidden = customFlow()
+  $('plan-knowledge').parentElement.hidden = customFlow()
   const n = snapshot.node, count = totals()?.confirmed ?? 0, result = n?.result
   $('task').dataset.inputRevision = String(snapshot.inputRevision)
   $('home').hidden = true; $('task').hidden = false; $('query-title').textContent = snapshot.query
@@ -198,6 +215,13 @@ function render() {
   $('status').className = failed ? 'error' : ''; $('status').parentElement.dataset.state = failed ? 'error' : result ? 'done' : 'running'
   if (snapshot.orchestration?.outcome === 'cancelled') { $('status').textContent = '已停止，结果与轨迹已保留'; $('status').parentElement.dataset.state = 'done' }
   $('counts').textContent = result ? '' : (totals()?.current ?? 0) + ' 条线索'; $('confirmed-count').textContent = String(count)
+  const predictionTotal = totals()?.predictionTotal ?? 0
+  $('results-collection-control').hidden = !predictionTotal
+  if (!predictionTotal) $('results-collection').value = 'confirmed'
+  const selectedView = $('results-collection').value, showingPredictions = predictionView(selectedView)
+  $('result-title').textContent = showingPredictions ? '候选预测（未校准）' : '符合条件工单'
+  $('confirmed-count').hidden = showingPredictions; $('prediction-count').hidden = !showingPredictions
+  $('prediction-count').textContent = String(selectedView === 'predictions_all' ? predictionTotal : totals()?.predictions ?? 0)
   if (snapshot.receipt) $('receipt').textContent = snapshot.commands.at(-1)?.kind === 'query' || result ? '' : snapshot.commands.at(-1)?.kind === 'resume' ? '已恢复检索' : '补充已收到'
   for (const item of document.querySelectorAll('a[aria-current="page"] small')) item.textContent = taskStatus(snapshot)
   $('channels').textContent = (n?.searchProgress?.channels || []).map(c => (c.channel === 'keyword' ? '关键词' : '向量') + '：' + ({ running: '检索中', completed: '已返回', failed: '失败', skipped: '未使用' }[c.status] || c.status) + ' ' + c.count + ' 条').join(' · ')
@@ -224,16 +248,17 @@ function render() {
   const pendingFeedback = snapshot.orchestration?.terminal ? '反馈已保存，本轮结束前尚未完成复核。' : '反馈已收到，正在核实'
   if (snapshot.commands.at(-1)?.kind === 'feedback' && latestFeedback) $('receipt').textContent = latestFeedback.status === 'reviewed' ? '反馈已处理 · ' + verdict(latestFeedback.verdict) : pendingFeedback
   $('feedback-history').replaceChildren(...feedbacks.map(f => { const row = text('div', '', 'card'); row.append(text('p', '你的意见：' + f.text), text('p', f.status === 'reviewed' ? 'Agent 已处理 · ' + verdict(f.verdict) + '：' + f.reason : pendingFeedback, f.status === 'reviewed' ? '' : 'notice')); return row }))
-  $('early-progress').hidden = count > 0
-  if (!count) {
+  $('early-progress').hidden = count > 0 || predictionView($('results-collection').value)
+  if (!count && !predictionView($('results-collection').value)) {
     const incomplete = result && !['top_k_accepted', 'no_result'].includes(result.stoppingReason)
-    const box = $('early-progress'); box.replaceChildren(text('h3', incomplete || snapshot.failure ? '本次检索未完成' : result ? '暂未找到符合要求的工单' : (totals()?.current ?? 0) ? '找到一些线索，正在核实' : '正在查找相关工单'), text('p', incomplete ? '本轮尚未完成核查，当前没有确认结果。' : result || snapshot.failure ? status : '确认后的工单会出现在这里。'))
+    const box = $('early-progress'); box.replaceChildren(text('h3', incomplete || snapshot.failure ? '本次检索未完成' : result ? '暂未找到符合要求的工单' : (totals()?.current ?? 0) ? '找到一些线索，正在核实' : '正在查找相关工单'), text('p', incomplete ? '本轮模型计算尚未完成，当前没有相关结果。' : result || snapshot.failure ? status : '模型判定为相关的工单会出现在这里。'))
     for (const c of (n?.candidates ?? []).slice(0, 3)) { const clue = text('div', '', 'clue'); clue.append(text('small', '检索线索 · ' + c.displayId), button(c.title, () => detail(c), 'link'), text('p', c.summary.slice(0, 180), 'muted')); box.append(clue) }
+    if (predictionTotal) box.append(button('查看候选预测', () => { $('results-collection').value = (totals()?.predictions ?? 0) ? 'predictions' : 'predictions_all'; $('results-collection').onchange() }))
     box.append(button('查看检索过程', () => setView('process', true)))
   }
-  const ready = deliveryReady(); $('download').disabled = $('download-jsonl').disabled = !ready || !n.exportEnabled; $('save-report').disabled = !ready || generatingReport
+  const ready = deliveryReady(); updateExportControls(); $('save-report').disabled = !ready || generatingReport
   $('delivery-state').textContent = ready ? '' : '检索结束后可下载'
-  $('delivery-note').textContent = ready ? '包含全部 ' + count + ' 条已确认工单。' : hasAccess() ? '正在整理结果，请稍后再来。' : '当前来源尚未就绪或已失效，暂不能交付。'
+  if (!ready) $('delivery-note').textContent = hasAccess() ? '正在整理结果，请稍后再来。' : '当前来源尚未就绪或已失效，暂不能交付。'
   if (ready) void loadArtifacts()
   if (view === 'report' && (!report || report.resultRevision !== result?.resultRevision)) void loadReport()
   $('connection').textContent = disconnected ? connectionNotice() : ''
@@ -256,13 +281,15 @@ async function loadPage(cursor, reset = false) {
   } finally { if (request === pageRequest) { pageLoading = false; $('cards').setAttribute('aria-busy', 'false') } }
 }
 function renderPage() {
-  const judgments = new Map(page.judgments.map(j => [j.candidateRef, j])), history = page.view === 'history', readable = new Set(page.readableCandidateRefs)
-  $('candidate-note').textContent = history ? '历史线索可回看原文，是否纳入以当前确认结果为准。' : page.view === 'confirmed' ? ''
+  const judgments = new Map(page.judgments.map(j => [j.candidateRef, j])), history = page.view === 'history', predicted = predictionView(page.view), readable = new Set(page.readableCandidateRefs)
+  $('candidate-note').textContent = predicted ? '未校准模型候选；预测类别和分数不等于业务确认，最终下载仅包含符合条件工单。' : history ? '历史线索可回看原文，是否纳入以当前确认结果为准。' : page.view === 'confirmed' ? ''
     : snapshot?.orchestration?.terminal ? '本轮已结束。未确认线索未纳入报告和下载。' : '线索仍在核实，确认后会加入结果。'
   $('cards').replaceChildren(...page.items.map((c, index) => {
     const j = judgments.get(c.ref), card = text('article', '', 'card ticket-card'), meta = text('div', '', 'ticket-meta'); card.dataset.ref = c.ref
     meta.append(text('span', String(page.offset + index + 1).padStart(2, '0'), 'ticket-index'), text('span', c.displayId, 'ticket-id'))
-    if (j?.basis === 'proxy') meta.append(text('span', '模型预测', 'badge'))
+    if (predicted) meta.append(text('span', '候选 · 未校准模型预测', 'badge'), text('span', ({ accept: '是（模型预测）', exclude: '否（模型预测）', undetermined: '执行失败／待重试' }[j?.operatorInference?.proposed_label] || '待判定候选') + ' · ' + (j?.operatorInference?.algorithm ?? '') + (typeof j?.operatorInference?.score === 'number' ? ' · 分数 ' + j.operatorInference.score.toPrecision(4) : ''), 'muted'))
+    if (j?.basis === 'proxy') meta.append(text('span', '模型筛选', 'badge'), text('span', (j.operatorInference?.algorithm ?? '') + (typeof j.operatorInference?.score === 'number' ? ' · 模型分数 ' + j.operatorInference.score.toPrecision(4) : '') + ' · 未人工评测', 'muted'))
+    if (typeof j?.confidence === 'number') meta.append(text('span', '判断置信度 ' + (j.confidence * 100).toFixed(1) + '%', 'muted'))
     if (page.view !== 'confirmed') { const badge = text('span', history ? '历史线索' : snapshot?.orchestration?.terminal && (!j || j.verdict === 'undetermined') ? '未确认' : verdict(j?.verdict), 'badge'); badge.dataset.verdict = j?.verdict || ''; meta.append(badge) }
     card.append(meta, text('h3', ''))
     card.querySelector('h3').append(readable.has(c.ref) ? button(c.title, () => detail(c), 'link ticket-title') : text('span', c.title, 'ticket-title'))
@@ -273,7 +300,7 @@ function renderPage() {
     if (readable.has(c.ref)) footer.append(button(j ? '查看依据 ↗' : '查看原文 ↗', () => detail(c), 'link'))
     card.append(footer); return card
   }))
-  $('cards').scrollTop = 0; $('page-status').textContent = page.total ? (page.offset + 1) + '–' + (page.offset + page.items.length) + ' / ' + page.total : page.view === 'confirmed' ? '暂无确认工单' : '暂无工单'
+  $('cards').scrollTop = 0; $('page-status').textContent = page.total ? (page.offset + 1) + '–' + (page.offset + page.items.length) + ' / ' + page.total : page.view === 'confirmed' ? '暂无相关工单' : '暂无工单'
   $('prev-page').disabled = !previousCursors.length; $('next-page').disabled = !page.nextCursor
   $('prev-page').parentElement.hidden = page.total <= page.limit && !previousCursors.length && !page.nextCursor
 }
@@ -317,7 +344,7 @@ async function detail(candidate, citation) {
     }
     if (d.unavailableFields.length) box.append(text('h3', '未知或缺失字段'), text('p', '本工单未提供：' + d.unavailableFields.map(f => labels.get(f) || f).join('、'), 'muted'))
     box.append(audit('来源信息', '来源版本 ' + d.sourceVersion))
-    if (e.current !== false) { const feedback = text('div', '', 'feedback-entry'); feedback.append(button('反馈问题', () => openFeedback({ ...candidate, displayId: d.displayId }))); box.append(feedback) }
+    if (e.current !== false && !customFlow()) { const feedback = text('div', '', 'feedback-entry'); feedback.append(button('反馈问题', () => openFeedback({ ...candidate, displayId: d.displayId }))); box.append(feedback) }
     if (citation) [...box.querySelectorAll('[data-citation]')].find(q => q.dataset.citation === citation.id)?.scrollIntoView({ block: 'nearest' })
   } catch (e) { if (!valid(gen, id) || request !== detailRequest) return; $('detail').replaceChildren(text('p', e.code ? detailFailureMessage(e) : e.message, 'notice error'), button('重试读取', () => detail(candidate, citation))) }
 }
@@ -357,7 +384,7 @@ async function loadReport() {
   } catch (e) { if (valid(gen, id) && request === reportRequest) $('report-content').replaceChildren(text('p', e.message, 'notice error'), button('重试报告', () => loadReport())) }
 }
 function renderReport() {
-  const r = report, box = $('report-content'); box.replaceChildren(text('span', '已确认 ' + r.confirmedCount + ' 条工单', 'badge'))
+  const r = report, box = $('report-content'); box.replaceChildren(text('span', '已筛选 ' + r.confirmedCount + ' 条工单', 'badge'))
   const citedIds = [...new Set(r.narrative.paragraphs.flatMap(p => p.citations))]
   if (r.narrative.status === 'model') for (const p of r.narrative.paragraphs) {
     const paragraph = text('p', '', 'report-summary'), copy = text('span', '')
@@ -370,20 +397,20 @@ function renderReport() {
       link.setAttribute('aria-label', '查看引用 ' + number + ' · ' + c.displayId); link.title = c.displayId; paragraph.append(link)
     }
     box.append(paragraph)
-  } else if (!generatingReport) box.append(text('p', '本次检索确认 ' + r.confirmedCount + ' 条工单。', 'report-summary'))
+  } else if (!generatingReport) box.append(text('p', '本次模型筛选得到 ' + r.confirmedCount + ' 条工单。', 'report-summary'))
   animateNextReport = false
 }
 async function createArtifact(kind) {
   const revision = snapshot?.node?.result?.resultRevision; if (!revision || !deliveryReady()) return
-  const gen = generation, id = taskId, control = $(kind === 'report' ? 'save-report' : kind === 'csv' ? 'download' : 'download-jsonl'); control.disabled = true
+  const gen = generation, id = taskId, control = $(kind === 'report' ? 'save-report' : kind === 'xlsx' ? 'download-xlsx' : kind === 'csv' ? 'download' : 'download-jsonl'); control.disabled = true
   try {
-    await command(endpoint + '/' + id + '/artifacts', { kind, resultRevision: revision, template: kind === 'report' ? 'summary' : $('template').value, audience: reportAudience })
+    await command(endpoint + '/' + id + '/artifacts', { kind, ...(kind === 'report' ? {} : exportCollection()), resultRevision: revision, template: kind === 'report' ? 'summary' : $('template').value, audience: reportAudience })
     if (!valid(gen, id) || snapshot.node?.result?.resultRevision !== revision) return
     $('download-receipt').textContent = '正在生成文件…'; artifactsKey = ''
     if (kind === 'report') { generatingReport = true; animateNextReport = true; $('report-error').hidden = true; $('report-generating').hidden = false; setView('report') }
     else openDelivery()
     void loadArtifacts()
-  } catch (e) { if (valid(gen, id)) error(e) } finally { if (valid(gen, id)) control.disabled = !deliveryReady() || (kind === 'report' ? generatingReport : !snapshot.node.exportEnabled) }
+  } catch (e) { if (valid(gen, id)) error(e) } finally { if (valid(gen, id)) control.disabled = !deliveryReady() || (kind === 'report' ? generatingReport : !exportAllowed()) }
 }
 async function loadArtifacts() {
   clearTimeout(artifactTimer); if (!deliveryReady()) return
@@ -409,9 +436,9 @@ async function loadArtifacts() {
     if (key !== artifactsKey) {
       $('artifacts').replaceChildren(...current.map(d => {
         const row = text('div', '', 'card'), name = d.kind === 'report' ? (d.audience === 'handoff' ? '领导交接报告' : '工作人员报告') : d.kind.toUpperCase()
-        row.append(text('strong', name + (d.kind === 'report' ? '' : d.template === 'full' ? ' · 完整正文' : ' · 概览') + ' · ' + ({ queued: '已排队', running: '生成中', ready: '可保存', failed: '生成失败', expired: '已到期' }[d.status])), text('p', d.rowCount + ' 条 · ' + d.byteCount + ' 字节' + (d.error ? ' · ' + d.error : '')))
+        row.append(text('strong', name + (d.collection === 'predictions' ? ' · 未校准候选' : '') + (d.kind === 'report' ? '' : d.template === 'full' ? ' · 完整正文' : ' · 概览') + ' · ' + ({ queued: '已排队', running: '生成中', ready: '可保存', failed: '生成失败', expired: '已到期' }[d.status])), text('p', d.rowCount + ' 条 · ' + d.byteCount + ' 字节' + (d.error ? ' · ' + d.error : '')))
         if (d.status === 'ready') { row.append(button('保存 ' + name, () => downloadArtifact(d)), button('保存范围说明', () => downloadManifest(d))); if (d.kind === 'report') row.append(button('阅读报告', () => { $('delivery').close(); reportAudience = d.audience; report = undefined; void loadArtifacts(); setView('report', true) })) }
-        if (d.status === 'failed') row.append(button('重试生成', async () => { try { await api(endpoint + '/' + id + '/artifacts', { operationId: d.operationId, kind: d.kind, template: d.template, audience: d.audience, resultRevision: d.resultRevision, retry: true }); if (valid(gen, id)) { artifactsKey = ''; void loadArtifacts() } } catch (e) { if (valid(gen, id)) error(e) } }))
+        if (d.status === 'failed') row.append(button('重试生成', async () => { try { await api(endpoint + '/' + id + '/artifacts', { operationId: d.operationId, kind: d.kind, ...(d.collection ? { collection: d.collection, ...(d.collection === 'predictions' ? { predictionSelection: d.predictionSelection ?? 'accept' } : {}) } : {}), template: d.template, audience: d.audience, resultRevision: d.resultRevision, retry: true }); if (valid(gen, id)) { artifactsKey = ''; void loadArtifacts() } } catch (e) { if (valid(gen, id)) error(e) } }))
         if (d.status === 'expired') row.append(text('p', '文件已到期，可按当前有效结果重新生成。'))
         if (d.contentSha256) row.append(audit('文件详情', 'SHA-256 ' + d.contentSha256 + ' · 到期 ' + new Date(d.expiresAt).toLocaleString())); return row
       })); artifactsKey = key
@@ -422,7 +449,7 @@ async function loadArtifacts() {
 function saveBlob(blob, name) { const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000) }
 async function assertDownloadCurrent(d, gen, id) {
   const current = await api(endpoint + '/' + id)
-  if (!valid(gen, id) || current.inputRevision !== snapshot?.inputRevision || current.node?.result?.resultRevision !== d.resultRevision || (d.kind !== 'report' && current.node?.collectionWindow?.confirmed !== d.rowCount)) throw new Error('结果版本或确认数量已变化，文件未保存，请读取当前结果。')
+  if (!valid(gen, id) || current.inputRevision !== snapshot?.inputRevision || current.node?.result?.resultRevision !== d.resultRevision || (d.kind !== 'report' && (d.collection === 'predictions' ? d.predictionSelection === 'all' ? current.node?.collectionWindow?.predictionTotal : current.node?.collectionWindow?.predictions : current.node?.collectionWindow?.confirmed) !== d.rowCount)) throw new Error('结果版本或所选集合数量已变化，文件未保存，请读取当前结果。')
 }
 async function downloadArtifact(d) {
   clearError(); const gen = generation, id = taskId
@@ -441,15 +468,46 @@ async function downloadManifest(d) {
   try { const manifest = await api(endpoint + '/' + id + '/artifacts/' + d.id + '/manifest'); await assertDownloadCurrent(d, gen, id); if (manifest.resultRevision !== d.resultRevision || manifest.contentSha256 !== d.contentSha256) throw new Error('范围说明与当前文件不一致。'); saveBlob(new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' }), 'manifest-' + d.id + '.json') }
   catch (e) { if (valid(gen, id)) error(e) }
 }
+function updateExecutionControls() {
+  const online = $('online-learning').checked
+  $('semantic-method-control').hidden = $('semantic-method-note').hidden = online
+  $('semantic-method').disabled = online || $('start').disabled
+  $('online-model-controls').hidden = !online
+  $('online-fusion').disabled = !online || $('start').disabled
+  $('judge-mode').disabled = $('start').disabled
+  $('judge-mode-note').textContent = $('judge-mode').value === 'anyjev_l0'
+    ? '读取真实 token 概率；固定最多 128 条教师样本，每条 2 次请求。若服务不支持，页面会说明实际降级方式。'
+    : '简洁判断默认每批 8 条；固定判断排序前最多 128 条工单，自动重试另计。'
+  for (const checkbox of $('online-models').querySelectorAll('input')) checkbox.disabled = !online || $('start').disabled
+  const modelCount = $('online-models').querySelectorAll('input:checked').length
+  $('online-model-count').textContent = '候选模型（' + modelCount + ' 种）'
+  $('online-fusion-note').textContent = $('online-fusion').value === 'single'
+    ? '根据训练组交叉拟合的教师一致率选择一个候选模型。'
+    : '比较候选模型与融合方案，根据训练组交叉拟合的教师一致率选择。'
+  $('semantic-method-note').textContent = $('semantic-method').value === 'direct_teacher'
+    ? '按固定判据逐条判断；仍需要模型调用。'
+    : '该方式不调用教师学习，直接输出模型判断为相关的工单，可下载 XLSX；质量未人工评测。'
+}
+$('online-learning').onchange = updateExecutionControls
+$('semantic-method').onchange = updateExecutionControls
+$('online-fusion').onchange = updateExecutionControls
+$('judge-mode').onchange = updateExecutionControls
+$('online-models').onchange = updateExecutionControls
+updateExecutionControls()
 $('query-form').onsubmit = async event => {
-  event.preventDefault(); if ($('start').disabled) return; $('start').disabled = true
-  try { const r = await command(endpoint, { kind: 'query', text: $('query').value.trim() }); await enterTask(r.taskId) }
-  catch (e) { error(e) } finally { $('start').disabled = false }
+  event.preventDefault(); if ($('start').disabled) return
+  const online = $('online-learning').checked, models = [...$('online-models').querySelectorAll('input:checked')].map(input => input.value)
+  if (online && models.length === 0) { error(new Error('请至少选择一种在线候选模型。')); return }
+  const execution = { onlineLearning: online, semanticMethod: online ? 'auto' : $('semantic-method').value, orchestration: 'fixed', judgeMode: $('judge-mode').value,
+    ...(online ? { onlineFusion: $('online-fusion').value, onlineModels: models } : {}) }
+  $('start').disabled = true; $('online-learning').disabled = true; updateExecutionControls()
+  try { const r = await command(endpoint, { kind: 'query', text: $('query').value.trim(), execution }); await enterTask(r.taskId) }
+  catch (e) { error(e) } finally { $('start').disabled = false; $('online-learning').disabled = false; updateExecutionControls() }
 }
 $('examples').onclick = event => { const b = event.target.closest('button'); if (b) { $('query').value = b.dataset.query; resizeInput($('query')); $('query').focus() } }
 $('supplement-form').onsubmit = e => { e.preventDefault(); void supplement() }
-function canStop() { return Boolean(snapshot && snapshot.commands.at(-1)?.kind !== 'cancel' && !snapshot.orchestration?.terminal && !snapshot.node?.result) }
-function canResume() { return Boolean(snapshot?.node?.snapshotShortId && snapshot.orchestration?.terminal && ['cancelled', 'partial', 'backend_error', 'budget_exhausted', 'capacity_exceeded'].includes(snapshot.orchestration.outcome)) }
+function canStop() { return Boolean(snapshot && !snapshot.failure && snapshot.orchestration?.retrieval?.filterActivity !== 'failed' && snapshot.commands.at(-1)?.kind !== 'cancel' && !snapshot.orchestration?.terminal && !snapshot.node?.result) }
+function canResume() { return Boolean(snapshot?.node?.snapshotShortId && (snapshot.failure || snapshot.orchestration?.terminal && ['cancelled', 'partial', 'backend_error', 'budget_exhausted', 'capacity_exceeded'].includes(snapshot.orchestration.outcome))) }
 function updateComposerAction() {
   const stop = canStop() && !$('supplement').value.trim(), button = $('send-supplement')
   button.dataset.mode = stop ? 'stop' : 'send'; button.type = stop ? 'button' : 'submit'
@@ -494,6 +552,8 @@ for (const name of ['results', 'process', 'collaboration', 'report']) $('tab-' +
 document.querySelector('[role="tablist"]').onkeydown = e => { const names = ['results', 'process', 'collaboration', 'report']; let i = names.indexOf(view); if (e.key === 'ArrowRight') i = (i + 1) % names.length; else if (e.key === 'ArrowLeft') i = (i + names.length - 1) % names.length; else if (e.key === 'Home') i = 0; else if (e.key === 'End') i = names.length - 1; else return; e.preventDefault(); setView(names[i], true) }
 $('candidate-disclosure').ontoggle = () => { if (view === 'process') { $('list-region').hidden = !$('candidate-disclosure').open; if ($('candidate-disclosure').open) void loadPage(undefined, true) } }
 $('candidate-view').onchange = () => { page = undefined; void loadPage(undefined, true) }
+$('results-collection').onchange = () => { $('export-collection').value = $('results-collection').value; page = undefined; render(); void loadPage(undefined, true) }
+$('export-collection').onchange = updateExportControls
 $('new-results').onclick = () => { clearError(); void loadPage(undefined, true) }
 $('next-page').onclick = () => { if (page?.nextCursor && !pageLoading) { previousCursors.push(pageCursor); void loadPage(page.nextCursor) } }
 $('prev-page').onclick = () => { if (previousCursors.length && !pageLoading) void loadPage(previousCursors.pop()) }
@@ -522,7 +582,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Tab') { const controls = [...$('sidebar').querySelectorAll('a,button')], first = controls[0], last = controls.at(-1); if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() } }
 })
 matchMedia('(min-width:821px)').addEventListener('change', e => { if (e.matches && document.body.dataset.nav === 'open') setNavigation(false) })
-$('download').onclick = () => void createArtifact('csv'); $('download-jsonl').onclick = () => void createArtifact('jsonl')
+$('download-xlsx').onclick = () => void createArtifact('xlsx'); $('download').onclick = () => void createArtifact('csv'); $('download-jsonl').onclick = () => void createArtifact('jsonl')
 $('save-report').onclick = () => void createArtifact('report')
 window.addEventListener('offline', () => { disconnected = true; $('connection').textContent = connectionNotice(); if (snapshot) orchestrationUI.update(snapshot, true) })
 window.addEventListener('online', () => { void retrySaved(); void refresh(); subscribe() })

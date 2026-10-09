@@ -20,6 +20,7 @@ htmlcov/
 # Keep the public configuration template tracked.
 .env
 .env.*
+local.env.trial
 !.env.example
 .credentials.yaml
 .credentials.yml
@@ -80,6 +81,7 @@ wiki/.staging/
 /docs/CODEX_INSTRUCTIONS.md
 /docs/DSH_CHANGE_CLASSIFICATION.md
 /docs/PROJECT_REVIEW.md
+/docs/LOCAL_EXPERIMENT_*.md
 
 # Editor and operating-system files.
 .vscode/

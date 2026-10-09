@@ -139,9 +139,15 @@ export function finishReason(state: RetrievalState, action: Extract<RetrievalDec
   }
   const accepted = confirmedCount(state)
   const pending = state.candidates.filter(candidate => !selected.has(candidate.ref) && !excluded.has(candidate.ref)).length
-  const learning = state.budget.operatorUsage?.learning as { input_revision?: number; task_semantics?: string; unresolved?: number; complete_feature_coverage?: boolean; complete_scope_coverage?: boolean; stop_reason?: string } | undefined
+  const learning = state.budget.operatorUsage?.learning as { input_revision?: number; task_semantics?: string; unresolved?: number; complete_feature_coverage?: boolean; complete_scope_coverage?: boolean; stop_reason?: string; regime?: string; online_feedback_training?: boolean; fit_count?: number; scope_records?: number } | undefined
   const currentLearning = learning?.input_revision === (state.inputGeneration ?? 0) ? learning : undefined
-  const learnedScope = Boolean(learnedResult(state)) || (currentLearning?.complete_feature_coverage || currentLearning?.complete_scope_coverage) && currentLearning.unresolved === 0
+  const frozenJudged = new Set((state.judgments ?? []).filter(j => j.basis !== 'proxy'
+    && j.verdict !== 'undetermined').map(j => j.candidateRef)).size
+  const frozenScope = currentLearning?.stop_reason === 'frozen_completed' && currentLearning.regime === 'frozen_teacher'
+    && currentLearning.online_feedback_training === false && currentLearning.fit_count === 0
+    && currentLearning.complete_scope_coverage === true && currentLearning.unresolved === 0
+    && Number.isSafeInteger(currentLearning.scope_records) && currentLearning.scope_records === frozenJudged
+  const learnedScope = frozenScope || Boolean(learnedResult(state)) || (currentLearning?.complete_feature_coverage || currentLearning?.complete_scope_coverage) && currentLearning.unresolved === 0
     && ['checked_predictions', 'all_observed'].includes(currentLearning.stop_reason ?? '')
   const exhausted = learnedScope || (state.lastPage?.boundary.resultPagesExhausted ?? false)
   const blocking = [

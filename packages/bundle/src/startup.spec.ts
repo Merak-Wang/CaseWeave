@@ -51,6 +51,39 @@ async function esftDataRoot(root: string): Promise<string> {
 }
 
 describe('installLocalProductAssets', () => {
+  it('installs database presets and workspace without touching unavailable JSONL data', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'retrieval-agent-db-assets-'))
+    temporaryRoots.push(root)
+    const unavailableSource = join(root, 'must-not-read-source')
+    const receipt = await installLocalProductAssets(root, false, unavailableSource,
+      { skipData: true, profileScope: 'mysql_milvus' })
+    expect(receipt).toMatchObject({ profileScope: 'mysql_milvus', dataInstalled: false })
+    await expect(readFile(join(receipt.presetRoot, 'retrieval-agent', 'agent.cordis.yml'), 'utf8')).resolves.toContain('@retrieval-agent/bundle/agent')
+    await expect(access(receipt.workspacePath)).resolves.toBeUndefined()
+    await expect(access(receipt.dataRoot)).rejects.toBeDefined()
+    await expect(access(unavailableSource)).rejects.toBeDefined()
+  })
+
+  it('rejects a mismatched data scope before creating profile assets', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'retrieval-agent-scope-assets-'))
+    temporaryRoots.push(root)
+    await expect(installLocalProductAssets(root, false, undefined,
+      { skipData: true, profileScope: 'jsonl' })).rejects.toThrow(/scope/u)
+    await expect(installLocalProductAssets(root, false, undefined,
+      { profileScope: 'mysql_milvus' })).rejects.toThrow(/skipData/u)
+    await expect(access(join(root, '.agent-presets'))).rejects.toBeDefined()
+  })
+
+  it('does not overwrite an existing local JSONL when switching to database assets', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'retrieval-agent-switch-assets-'))
+    temporaryRoots.push(root)
+    const receipt = await installLocalProductAssets(root, false, await esftDataRoot(root))
+    await writeFile(receipt.dataPath, 'synthetic-local-data-preserved', 'utf8')
+    await installLocalProductAssets(root, true, join(root, 'unavailable-source'),
+      { skipData: true, profileScope: 'mysql_milvus' })
+    await expect(readFile(receipt.dataPath, 'utf8')).resolves.toBe('synthetic-local-data-preserved')
+  })
+
   it('installs the fixed preset and fixture without import-time side effects', async () => {
     const root = await mkdtemp(join(tmpdir(), 'retrieval-agent-assets-'))
     temporaryRoots.push(root)

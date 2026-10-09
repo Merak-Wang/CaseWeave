@@ -13,9 +13,15 @@ const requestedDataRoot = dataRootIndex >= 0 ? args[dataRootIndex + 1] : undefin
 if (dataRootIndex >= 0 && (requestedDataRoot === undefined || requestedDataRoot.trim().length === 0)) {
   throw new Error('Pass a path after --data-root')
 }
+const scopeIndex = args.indexOf('--profile-scope')
+const profileScope = scopeIndex >= 0 ? args[scopeIndex + 1] : 'jsonl'
+if (profileScope !== 'jsonl' && profileScope !== 'mysql_milvus') {
+  throw new Error('Pass jsonl or mysql_milvus after --profile-scope')
+}
 const receipt = await installLocalProductAssets(
   resolve(requestedHome),
   args.includes('--force'),
   requestedDataRoot === undefined ? undefined : resolve(requestedDataRoot),
+  { skipData: args.includes('--skip-data'), profileScope },
 )
 process.stdout.write(`${JSON.stringify(receipt)}\n`)

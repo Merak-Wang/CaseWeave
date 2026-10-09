@@ -61,7 +61,7 @@ describe('context recovery through the actual DSH request loop', () => {
       expect(handle.agent.session.surface.nodes).toEqual(before)
       expect(contextCompactions(handle.agent)).toBe(0)
       const source = '工单来源：副卡在异地办理时需要核对归属。'.repeat(12000)
-      handle.agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
+      handle.agent.session.append('user/message', createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot',
         sections: [{ name: 'retrieval-agent:state', text: source }] }, content: [{ type: 'text', text: source }] }), { surfaceOp: 'append' })
       const fullWindow = [...handle.agent.session.surface.nodes]
       compactRetrievalSurface(handle.agent, { contextWindow: 1000000 })

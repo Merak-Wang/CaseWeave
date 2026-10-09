@@ -30,7 +30,9 @@ export function workbenchGateway(upstreamPort) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const upstreamPort = 3081, server = workbenchGateway(upstreamPort)
-  const child = spawn(process.execPath, ['scripts/database-web.mjs', '--host', '127.0.0.1', '--port', String(upstreamPort), '--no-open'],
+  const entrypoint = process.env.RETRIEVAL_AGENT_STORAGE === 'jsonl' ? 'scripts/retrieval-agent.mjs' : 'scripts/database-web.mjs'
+  const args = [...(entrypoint === 'scripts/retrieval-agent.mjs' ? ['web'] : []), '--host', '127.0.0.1', '--port', String(upstreamPort), '--no-open']
+  const child = spawn(process.execPath, [entrypoint, ...args],
     { stdio: 'inherit', env: process.env, windowsHide: true })
   server.on('error', error => { console.error(error.message); child.kill('SIGTERM'); process.exitCode = 1 })
   server.listen(3080, '0.0.0.0')

@@ -2,6 +2,17 @@ import { projectUsage, projectContext, type TaskRuntimeMetrics } from './orchest
 import type { LearnedResult, RetrievalState } from '@retrieval-agent/contracts'
 import { confirmedCount, learnedResult } from '@retrieval-agent/domain/result'
 
+function teacherMetricSummary(value: unknown, baseline = false) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  return Object.fromEntries([
+    ...(baseline && typeof record.name === 'string' ? [['name', record.name]] : []),
+    ...['threshold', 'precision', 'recall', 'f1', 'coverage', 'agreement', 'reference_records', 'reference_unknown', 'prediction_unknown']
+      .filter(key => typeof record[key] === 'number' && Number.isFinite(record[key])).map(key => [key, record[key]]),
+    ...['reference_basis', 'used_for_selection', 'raw_before_label_override'].filter(key => record[key] !== undefined).map(key => [key, record[key]]),
+  ])
+}
+
 /** A public view of committed work. No prompts, private reasoning, raw tool arguments or invented percent. */
 export function projectOrchestration(state: RetrievalState, runtime?: TaskRuntimeMetrics) {
   const generation = state.inputGeneration ?? 0
@@ -30,6 +41,14 @@ export function projectOrchestration(state: RetrievalState, runtime?: TaskRuntim
   const learning = operatorUsage?.learning as Record<string, unknown> | undefined
   // 检索视图只取本轮判据与集合计数，不复制训练 ID 和逐条分数。
   const currentLearning = learning?.input_revision === generation ? learning : undefined
+  const execution = state.query?.contract?.semanticExecution
+  const onlineLearning = execution?.onlineLearning ?? true
+  const selectedMethod = execution?.semanticMethod ?? 'auto'
+  const semanticMethod = selectedMethod === 'direct' || !onlineLearning && selectedMethod === 'auto' ? 'direct_teacher' : selectedMethod
+  const onlineFeedbackTraining = onlineLearning && semanticMethod === 'auto'
+  const regime = semanticMethod === 'dual_description_margin' ? 'frozen_score'
+    : ['name_gmm', 'kmeans'].includes(semanticMethod) ? 'unlabeled_fit_once'
+      : onlineFeedbackTraining ? 'teacher_weak_supervision' : 'frozen_teacher'
   const sampleRequests = manifests.filter(m => m.operator?.operation === 'sem_filter')
   const sampleKnowledge = new Set(sampleRequests.flatMap(m => m.operator!.knowledgeIds ?? []))
   const knowledgeRequests = sampleRequests.filter(m => m.operator!.knowledgeIds?.length)
@@ -69,6 +88,11 @@ export function projectOrchestration(state: RetrievalState, runtime?: TaskRuntim
       requests: samplingRequests,
     },
     retrieval: {
+      ...(execution ? { execution: { onlineLearning, semanticMethod, onlineFeedbackTraining, regime,
+        orchestration: execution.orchestration ?? 'agent',
+        judgeMode: execution.judgeMode ?? 'compact_binary',
+        ...(execution.onlineFusion ? { onlineFusion: execution.onlineFusion } : {}),
+        ...(execution.onlineModels ? { onlineModels: execution.onlineModels } : {}) } } : {}),
       filterActivity: activity?.operation === 'sem_filter' ? activity.status : undefined,
       plan: plan?.inputGeneration === generation ? { instruction: plan.instruction, keywords: plan.keywords,
         expressions: plan.retrieval_expressions, goal: plan.goal, knowledgeRoutes: plan.knowledge_routes } : undefined,
@@ -76,13 +100,34 @@ export function projectOrchestration(state: RetrievalState, runtime?: TaskRuntim
         scopeCount: currentLearning.corpus_records || currentLearning.scanned_records, sampledCount: currentLearning.teacher_unique_records,
         trainingCount: currentLearning.training_records, auditCount: currentLearning.audit_records,
         qualityBasis: currentLearning.quality_basis,
-        samplingRequests: currentLearning.sampling_requests, samplingRequestLimit: currentLearning.sampling_request_limit,
+        regime: currentLearning.regime, onlineFeedbackTraining: currentLearning.online_feedback_training,
+        scopeRecords: currentLearning.scope_records, completionBasis: currentLearning.completion_basis,
+        samplingRequests: currentLearning.sampling_requests,
+        samplingRequestLimit: currentLearning.sampling_request_limit,
+        judgeMode: currentLearning.judge_mode,
+        judgeMetrics: currentLearning.judge_readout,
         message: currentLearning.message,
         reusedTrainingCount: currentLearning.reused_training_records, reusedLabelCount: currentLearning.reused_label_records,
         reusedUnresolvedCount: currentLearning.reused_unresolved_records,
         samplingMethod: currentLearning.sampling_method, samplingPhase: currentLearning.sampling_phase,
         candidateModels: currentLearning.candidate_models, models: currentLearning.models,
         selectedModel: currentLearning.selected_model, threshold: currentLearning.threshold,
+        fusion: currentLearning.fusion, selectedMembers: currentLearning.selected_members,
+        selectedEnsemble: currentLearning.selected_ensemble, selectionReason: currentLearning.selection_reason,
+        singleBaseline: teacherMetricSummary(currentLearning.single_baseline, true),
+        crossfitFolds: currentLearning.crossfit_folds, groupProjection: currentLearning.group_projection,
+        finalHoldoutCount: currentLearning.final_holdout_records,
+        finalTeacherAgreement: teacherMetricSummary(currentLearning.final_teacher_agreement),
+        fitPool: currentLearning.manifest ? { scope: currentLearning.task_semantics,
+          records: (currentLearning.manifest as Record<string, unknown>).pool_records,
+          usableVectors: (currentLearning.manifest as Record<string, unknown>).usable_vectors,
+          unknownPredictions: (currentLearning.manifest as Record<string, unknown>).unknown_records,
+          seed: (currentLearning.manifest as Record<string, unknown>).seed,
+          scoreKind: (currentLearning.manifest as Record<string, unknown>).score_kind,
+          embeddingId: (currentLearning.manifest as Record<string, unknown>).embedding_id,
+          modelConfig: (currentLearning.manifest as Record<string, unknown>).config,
+          poolSha256: (currentLearning.manifest as Record<string, unknown>).pool_key,
+          numericPoolSha256: currentLearning.numeric_pool_sha256 } : undefined,
         fitCount: currentLearning.fit_count, predictedCount: currentLearning.predicted_records,
         positiveCount: currentLearning.positive_records, negativeCount: currentLearning.negative_records,
         unresolvedCount: currentLearning.undetermined_records, batchSize: currentLearning.batch_size,

@@ -111,17 +111,19 @@ class ScriptedExperts extends LlmAdapter {
 }
 
 describe('A3/A4/A6/A9 installed DSH expert execution', () => {
-  it.each([8, 16])('delivers and navigates all 20 expert candidates with review batch %i through actual DSH requests', async reviewBatchSize => {
+  it.each([{reviewBatchSize:8, lexicalChannels:true}, {reviewBatchSize:16, lexicalChannels:true},
+    {reviewBatchSize:8, lexicalChannels:false}, {reviewBatchSize:16, lexicalChannels:false}])('delivers and navigates all 20 expert candidates with review batch $reviewBatchSize and lexical channels $lexicalChannels through actual DSH requests', async ({reviewBatchSize, lexicalChannels}) => {
     const ctx = new Context(); let dispose: (() => Promise<void>) | undefined
     const failures: unknown[] = [], expertWindows: string[][] = [], seen = new Set<string>()
     const aliases = Array.from({ length: 20 }, (_, i) => `c${i + 1}`)
-    let expertCalls = 0, mainCalls = 0, historyReloaded = false
+    let expertCalls = 0, mainCalls = 0, historyReloaded = false, nextWindows = 0, expectFreshWindow = false
     class BatchAdapter extends LlmAdapter {
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
         const text = options.messages.flatMap(m => strings(m.content)).join('\n')
         const latest = text.slice(text.lastIndexOf('<ticket_knowledge_context>'))
         const header = JSON.parse(/<ticket_knowledge_context>(.*?)<\/ticket_knowledge_context>/u.exec(latest)![1]!).knowledgeState
-        const visible = [...latest.matchAll(/<untrusted_ticket_candidate>(.*?)<\/untrusted_ticket_candidate>/gu)].map(m => JSON.parse(m[1]!).alias as string)
+        const candidates = [...latest.matchAll(/<untrusted_ticket_candidate>(.*?)<\/untrusted_ticket_candidate>/gu)].map(m => JSON.parse(m[1]!))
+        const visible = candidates.map(candidate => candidate.alias as string)
         const expert = options.tools?.some(t => t.name === 'ticket_expert')
         expect(header.evidenceState.reviewBatchSize).toBe(reviewBatchSize)
         expect(visible.length).toBeLessThanOrEqual(reviewBatchSize)
@@ -129,15 +131,25 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
         if (expert) {
           if (++expertCalls > 6) throw new Error('expert review fixture loop')
           expertWindows.push(visible)
+          if (expectFreshWindow) expect(visible.some(alias => !seen.has(alias)), 'next_window must deliver a new actual source summary').toBe(true)
+          expectFreshWindow = false
+          // The initial expert request is actual evidence too. A repair search
+          // may reorder hits; forgetting that first receipt invents a gap.
+          for (const candidate of candidates) {
+            const ordinal = Number(String(candidate.alias).slice(1)) - 1
+            expect(aliases).toContain(candidate.alias)
+            expect(candidate.title).toBe(`副卡业务 ${ordinal}`)
+            expect(candidate.summary).toBe('来源描述副卡业务。')
+            seen.add(candidate.alias)
+          }
           if (expertCalls === 1) {
             expect(visible).toEqual(aliases.slice(0, reviewBatchSize))
             args = { action: 'search', query: '副卡', mode: 'keyword' }
           } else {
-            visible.forEach(alias => seen.add(alias))
-            if (seen.size < 20) args = { action: 'inspect', next_window: true }
+            if (seen.size < 20) { nextWindows++; expectFreshWindow = true; args = { action: 'inspect', next_window: true } }
             else if (!historyReloaded) { historyReloaded = true; args = { action: 'inspect', candidate_aliases: aliases.slice(0, reviewBatchSize), fields: [] } }
             else {
-              expect(visible).toEqual(aliases.slice(0, reviewBatchSize))
+              expect(new Set(visible)).toEqual(new Set(aliases.slice(0, reviewBatchSize)))
               args = { action: 'report', judgments: aliases.map(alias => ({ candidate_alias: alias, verdict: 'accept', evidence_aliases: [alias], reason: '固定测试摘要明确包含副卡业务。' })), semantic_gaps: [], next_action: '已逐条核查分配范围，交主 Agent 综合。' }
             }
           }
@@ -159,7 +171,10 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
         conversationOrUpdates: [], resolutionSteps: [], errorCodes: [], piiRedactionStatus: 'not_applicable' }))
       new Provider(ctx, new LocalTicketProvider(records, { defaultMode: 'keyword', ranker: {
         profileVersion: 'batch-fixture', capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
-        rank: async (documents, query) => ({ hits: documents.map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1, channels: [] })),
+        rank: async (documents, query) => ({ hits: documents.map((d, i) => ({ documentId: d.id, rank: i + 1, score: 1,
+          // Empty channels deliberately exercise literal-membership fallback
+          // with lexical ID ties; scored channels preserve the stable fixture.
+          channels: lexicalChannels ? [{channel:'keyword' as const, rank:i+1, score:documents.length-i}] : [] })),
           execution: { requestedMode: query.mode, executedMode: query.mode, strategyVersion: 'batch-fixture', channels: [] },
           scanned: documents.length, keywordEligible: documents.length, rankedHits: documents.length, warnings: [] }) } }))
       const application = new RetrievalAgentService(ctx, { reviewBatchSize, maxContextTokens: 32000 })
@@ -173,11 +188,19 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
       handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '继续核对副卡工单。' }] }))
       await handle.agent.whenIdle()
       const state = application.current(handle.agent)
-      expect(failures).toEqual([])
+      expect(failures, JSON.stringify({windows: expertWindows, seen: [...seen],
+        manifests: state.contextManifests?.filter(m => m.roleId !== 'main' && m.measurement === 'dsh_request').map(m => ({
+          candidates: m.candidateRefs.map(ref => `c${state.candidateHistory.findIndex(c => c.ref === ref)+1}`), evidence: m.evidenceIds.length,
+        })), tasks: state.expertTasks?.map(t => ({status:t.status, context:t.context?.candidateRefs.length}))})).toEqual([])
       expect(state.termination, JSON.stringify({ stop: state.stopExplanation, windows: expertWindows })).toBe('top_k_accepted')
       expect(state.expertTasks?.[0]?.finding?.judgments).toHaveLength(20)
-      expect(expertCalls).toBe(reviewBatchSize === 8 ? 5 : 4)
-      expect([...seen]).toEqual(aliases)
+      expect(expertCalls).toBe(3 + nextWindows) // search, history reload, report; no failed/empty navigation
+      expect(nextWindows).toBeGreaterThanOrEqual(1)
+      expect(nextWindows).toBeLessThanOrEqual(Math.ceil((20-reviewBatchSize)/reviewBatchSize))
+      expect(new Set(seen)).toEqual(new Set(aliases))
+      const received = state.contextManifests?.filter(m => m.roleId === state.expertTasks?.[0]?.id && m.measurement === 'dsh_request')
+        .flatMap(m => m.candidateRefs) ?? []
+      expect(new Set(received)).toEqual(new Set(state.expertTasks![0]!.candidateRefs))
       expect(state.expertTasks?.[0]?.context?.candidateRefs).toHaveLength(reviewBatchSize)
       expect(foldRetrievalEvents(readRetrievalSessionEvents(handle.agent.session))).toEqual(state)
     } finally { await dispose?.(); await ctx.fiber.dispose() }

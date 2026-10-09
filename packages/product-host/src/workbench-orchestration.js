@@ -131,7 +131,7 @@ export function createOrchestrationUI({ api, endpoint, getSnapshot, getTaskId, g
       : !o?.terminal && o?.operation === 'sem_filter' ? '正在按当前业务判据筛选工单集合' : !o?.terminal && o?.operation === 'sem_extract' ? '正在从工单证据中提取所需事实' : !o?.terminal && o?.operation === 'sem_agg' ? '正在整理证据与引用' : !o?.terminal && o?.operation === 'sem_search' ? '正在执行本轮检索计划，补充候选' : titles[o?.stage] ?? '正在准备检索'
     revealText($('live-title'), title, wasInitialized)
     const learning = o?.retrieval?.learning
-    $('live-metrics').replaceChildren(...(o ? [['已召回线索', o.counts.candidates], ...(typeof learning?.scopeCount === 'number' ? [['筛选范围', learning.scopeCount]] : [['已读原文', o.counts.inspected]]), ['已确认', o.counts.confirmed]].map(([label, count]) => { const e = make('span'); e.append(make('strong', Number(count).toLocaleString()), make('small', label)); return e }) : []))
+    $('live-metrics').replaceChildren(...(o ? [['已召回线索', o.counts.candidates], ...(typeof learning?.scopeCount === 'number' ? [['筛选范围', learning.scopeCount]] : [['已读原文', o.counts.inspected]]), [o.retrieval?.execution?.orchestration === 'fixed' ? '模型筛选' : '已确认', o.counts.confirmed]].map(([label, count]) => { const e = make('span'); e.append(make('strong', Number(count).toLocaleString()), make('small', label)); return e }) : []))
     const steps = workflowSteps(s, reportStatus), railKey = JSON.stringify([steps, disconnected])
     if ($('stage-rail').dataset.key !== railKey) {
       $('stage-rail').dataset.key = railKey

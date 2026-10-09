@@ -29,7 +29,7 @@ export function renderJudgment(o, library, { openKnowledge, openCandidate, showP
     }
     group.append(links); card.append(group)
   }
-  if (learning) card.append(make('p', `已确定：相关 ${learning.positiveCount ?? 0} 条、不相关 ${learning.negativeCount ?? 0} 条；未决 ${learning.unresolvedCount ?? 0} 条。`, 'judgment-outcome'))
+  if (learning) card.append(make('p', `已确定：相关 ${learning.positiveCount ?? 0} 条、不相关 ${learning.negativeCount ?? 0} 条；执行未完成／待重试 ${learning.unresolvedCount ?? 0} 条。`, 'judgment-outcome'))
   const actions = make('div', '', 'row'); actions.append(action('查看抽样与选模过程 ↗', showProcess)); card.append(actions)
   const requests = usage.requests ?? []
   if (requests.length) {

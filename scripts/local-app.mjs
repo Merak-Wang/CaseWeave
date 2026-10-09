@@ -266,42 +266,55 @@ async function filesUnder(directory) {
   return paths
 }
 
-async function assetFingerprint(paths) {
-  const dataManifestPath = join(paths.root, 'data', 'manifest.json')
-  const dataManifest = await readJson(dataManifestPath)
-  const profile = dataManifest.ticketProfiles?.[dataManifest.defaultTicketProfile]
-  if (profile === undefined || !Array.isArray(profile.paths) || profile.paths.length === 0) {
-    throw new Error(`default ticket profile ${String(dataManifest.defaultTicketProfile)} is invalid`)
+export function assetProfileScope(environment = process.env) {
+  const storage = environment.RETRIEVAL_AGENT_STORAGE ?? 'jsonl'
+  if (!['jsonl', 'mysql_milvus'].includes(storage)) throw new Error('STORAGE must be jsonl or mysql_milvus')
+  // 外部工单只读挂载；这里只安装 Agent 预设，不复制示例数据。
+  return storage === 'jsonl' && environment.RETRIEVAL_AGENT_DATA_PATH ? 'mysql_milvus' : storage
+}
+
+export async function assetFingerprint(paths, environment = process.env, readAsset = readFile) {
+  const profileScope = assetProfileScope(environment)
+  const files = [...await filesUnder(join(paths.bundleRoot, 'presets'))]
+  if (profileScope === 'jsonl') {
+    const dataManifestPath = join(paths.root, 'data', 'manifest.json')
+    const dataManifest = JSON.parse(await readAsset(dataManifestPath, 'utf8'))
+    const profile = dataManifest.ticketProfiles?.[dataManifest.defaultTicketProfile]
+    if (profile === undefined || !Array.isArray(profile.paths) || profile.paths.length === 0) {
+      throw new Error(`default ticket profile ${String(dataManifest.defaultTicketProfile)} is invalid`)
+    }
+    files.push(dataManifestPath, ...profile.paths.map(path => join(paths.root, 'data', path)))
   }
-  const files = [
-    ...await filesUnder(join(paths.bundleRoot, 'presets')),
-    dataManifestPath,
-    ...profile.paths.map(path => join(paths.root, 'data', path)),
-  ].sort()
   const hash = createHash('sha256')
-  for (const path of files) {
+  hash.update(`local-source-assets-v2\0${profileScope}\0`)
+  for (const path of files.sort()) {
     hash.update(relative(paths.root, path).replaceAll('\\', '/'))
     hash.update('\0')
-    hash.update(await readFile(path))
+    hash.update(await readAsset(path))
     hash.update('\0')
   }
   return hash.digest('hex')
 }
 
-async function ensureAssets(paths) {
-  const fingerprint = await assetFingerprint(paths)
-  const receiptPath = join(paths.dshHome, 'retrieval-agent', 'local-source-install.json')
+export async function ensureAssets(paths, environment = process.env, install = run) {
+  const profileScope = assetProfileScope(environment)
+  const fingerprint = await assetFingerprint(paths, environment)
+  const receiptPath = join(paths.dshHome, 'retrieval-agent', `local-source-install.${profileScope}.json`)
   const installedPreset = join(paths.dshHome, '.agent-presets', 'retrieval-agent', 'agent.cordis.yml')
   const installedManifest = join(paths.dshHome, 'retrieval-agent', 'data', 'manifest.json')
-  if (existsSync(receiptPath) && existsSync(installedPreset) && existsSync(installedManifest)) {
+  const installedWorkspace = join(paths.dshHome, 'retrieval-agent', 'workspace')
+  if (existsSync(receiptPath) && existsSync(installedPreset) && existsSync(installedWorkspace)
+      && (profileScope === 'mysql_milvus' || existsSync(installedManifest))) {
     const receipt = await readJson(receiptPath)
-    if (receipt.schemaVersion === 1 && receipt.assetFingerprint === fingerprint) return false
+    if (receipt.schemaVersion === 2 && receipt.profileScope === profileScope && receipt.assetFingerprint === fingerprint) return false
   }
   const installer = join(paths.bundleRoot, 'lib', 'install-cli.js')
-  run(process.execPath, [installer, '--home', paths.dshHome, '--force'], { cwd: paths.root })
+  await install(process.execPath, [installer, '--home', paths.dshHome, '--force', '--profile-scope', profileScope,
+    ...(profileScope === 'mysql_milvus' ? ['--skip-data'] : [])], { cwd: paths.root })
   await mkdir(dirname(receiptPath), { recursive: true })
   await writeFile(receiptPath, `${JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
+    profileScope,
     assetFingerprint: fingerprint,
     installedAt: new Date().toISOString(),
     sourceRoot: paths.root,
@@ -323,7 +336,7 @@ export async function setupLocalApp(options = {}) {
   const profile = await ensureProfile(paths, runtime.dshBin, environment)
   progress?.complete('[startup 3/8] DSH profile', profile.linked ? 'bundle linked' : 'profile reused')
   progress?.stage('[startup 4/8] Product assets', 'checking data, preset and model settings')
-  const assetsUpdated = await ensureAssets(paths)
+  const assetsUpdated = await ensureAssets(paths, environment)
   const settingsUpdated = await seedModelSettings(paths, environment)
   progress?.complete(
     '[startup 4/8] Product assets',
@@ -510,14 +523,85 @@ async function prepareIndex(paths, environment, progress, model) {
   progress?.complete('[startup 7/8] Vector index', `${prepared.documentCount} documents ready in ${Math.round(prepared.elapsedMs)} ms`)
 }
 
+export function createStartupStageClock({ now = () => performance.now(), onMeasurement = event => console.log(`[startup timing] ${JSON.stringify(event)}`) } = {}) {
+  const started = now()
+  return {
+    async measure(stage, action) {
+      const phaseStarted = now()
+      let status = 'failed'
+      try {
+        const result = await action()
+        status = 'completed'
+        return result
+      } finally {
+        const finished = now()
+        onMeasurement({ schemaVersion: 1, stage, status,
+          elapsedMs: Math.round(Math.max(0, finished - phaseStarted) * 1000) / 1000,
+          totalElapsedMs: Math.round(Math.max(0, finished - started) * 1000) / 1000 })
+      }
+    },
+  }
+}
+
+export function resolveWebReadinessTarget(args = []) {
+  let port = '3080'
+  let host = '127.0.0.1'
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]
+    if (argument === '--port' || argument === '--host') {
+      const value = args[++index]
+      if (value === undefined || value.startsWith('--')) throw new Error(`${argument} requires a value`)
+      if (argument === '--port') port = value
+      else host = value
+    } else if (argument.startsWith('--port=')) port = argument.slice('--port='.length)
+    else if (argument.startsWith('--host=')) host = argument.slice('--host='.length)
+  }
+  if (!/^\d+$/u.test(port) || Number(port) < 1 || Number(port) > 65535) throw new Error('--port must be between 1 and 65535')
+  if (host === '0.0.0.0') host = '127.0.0.1'
+  if (['::', '[::]'].includes(host)) host = '[::1]'
+  if (host.includes(':') && !host.startsWith('[')) host = `[${host}]`
+  let target
+  try { target = new URL(`http://${host}:${port}/retrieval`) }
+  catch { throw new Error('--host is invalid') }
+  if (target.username || target.password || target.pathname !== '/retrieval') throw new Error('--host is invalid')
+  return target
+}
+
+async function webResponseReady(target, fetcher = fetch) {
+  try {
+    const response = await fetcher(target, { signal: AbortSignal.timeout(2_000), redirect: 'error' })
+    const ready = response.ok
+    await response.body?.cancel()
+    return ready
+  } catch { return false }
+}
+
+export async function waitForWebReadiness(target, child, {
+  timeoutMs = 120_000, now = () => performance.now(), fetcher = fetch, pause = wait,
+} = {}) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error('Web startup timeout must be a positive integer')
+  const deadline = now() + timeoutMs
+  while (now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error('Web process exited before HTTP readiness')
+    if (await webResponseReady(target, fetcher)) {
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error('Web process exited before HTTP readiness')
+      return
+    }
+    await pause(Math.min(250, Math.max(0, deadline - now())))
+  }
+  throw new Error('Web startup timed out before HTTP readiness')
+}
+
 export async function runLocalWeb(forwardedArgs = [], options = {}) {
   const environment = options.environment ?? process.env
   const progress = options.progress ?? createStartupProgressReporter(options.progressStream ?? process.stderr)
-  const setup = await setupLocalApp({ environment, projectRoot: options.projectRoot ?? root, progress })
+  const clock = options.startupClock ?? createStartupStageClock()
+  const readinessTarget = resolveWebReadinessTarget(forwardedArgs)
+  const setup = await clock.measure('setup', () => setupLocalApp({ environment, projectRoot: options.projectRoot ?? root, progress }))
   const { paths } = setup
-  const model = await ensureModelService(paths, environment, progress)
+  const model = await clock.measure('model', () => ensureModelService(paths, environment, progress))
   try {
-    await prepareIndex(paths, environment, progress, model)
+    await clock.measure('index', () => prepareIndex(paths, environment, progress, model))
   } catch (error) {
     progress.fail('[startup 7/8] Vector index', error)
     if (model.owned) await stopChild(model.child)
@@ -534,17 +618,11 @@ export async function runLocalWeb(forwardedArgs = [], options = {}) {
     RETRIEVAL_AGENT_RERANKER_ENABLED: normalizedRerankerFlag(environment.RETRIEVAL_AGENT_RERANKER_ENABLED),
   }
   progress.stage('[startup 8/8] CaseWeave Web', `starting with state in ${relative(paths.root, paths.dshHome)}`)
-  const dsh = spawn(process.execPath, [setup.runtime.dshBin, 'web', ...forwardedArgs], {
-    cwd: paths.root,
-    env: childEnvironment,
-    stdio: 'inherit',
-    windowsHide: true,
-  })
-  progress.complete('[startup 8/8] CaseWeave Web', 'process started')
+  let dsh
   let stopping = false
   const stop = () => {
     stopping = true
-    if (dsh.exitCode === null) dsh.kill('SIGTERM')
+    if (dsh?.exitCode === null) dsh.kill('SIGTERM')
     if (model.owned && model.child?.exitCode === null) {
       model.child.stdin?.end()
       model.child.kill('SIGTERM')
@@ -553,6 +631,21 @@ export async function runLocalWeb(forwardedArgs = [], options = {}) {
   process.once('SIGINT', stop)
   process.once('SIGTERM', stop)
   try {
+    await clock.measure('listen_ready', async () => {
+      if (stopping) throw new Error('Web startup cancelled')
+      if (await webResponseReady(readinessTarget)) throw new Error('Web target already serves the product; refusing to report another process as ready')
+      if (stopping) throw new Error('Web startup cancelled')
+      dsh = spawn(process.execPath, [setup.runtime.dshBin, 'web', ...forwardedArgs], {
+        cwd: paths.root, env: childEnvironment, stdio: 'inherit', windowsHide: true,
+      })
+      const exited = childExit(dsh, 'dsh').then(() => { throw new Error('Web process exited before HTTP readiness') })
+      const waits = [waitForWebReadiness(readinessTarget, dsh, {
+        timeoutMs: Number(environment.RETRIEVAL_AGENT_WEB_START_TIMEOUT_MS ?? '120000'),
+      }), exited]
+      if (model.owned) waits.push(childExit(model.child, 'model').then(() => { throw new Error('Managed model exited before Web readiness') }))
+      await Promise.race(waits)
+    })
+    progress.complete('[startup 8/8] CaseWeave Web', 'HTTP endpoint ready')
     const dshExit = childExit(dsh, 'dsh')
     const first = model.owned
       ? await Promise.race([dshExit, childExit(model.child, 'model')])
@@ -564,12 +657,14 @@ export async function runLocalWeb(forwardedArgs = [], options = {}) {
     if (first.kind === 'dsh' && first.code !== 0 && !stopping) {
       throw new Error(`DSH Web exited with code ${String(first.code)} and signal ${String(first.signal)}`)
     }
+  } catch (error) {
+    if (!stopping) throw error
   } finally {
     progress.close()
     process.off('SIGINT', stop)
     process.off('SIGTERM', stop)
     if (model.owned) await stopChild(model.child)
-    if (dsh.exitCode === null) await stopChild(dsh)
+    if (dsh?.exitCode === null) await stopChild(dsh)
   }
 }
 
@@ -582,7 +677,8 @@ export async function runCli(argv, options = {}) {
   if (parsed.command === 'setup') {
     if (parsed.forwardedArgs.length > 0) throw new Error('setup does not accept positional arguments')
     const progress = options.progress ?? createStartupProgressReporter(options.progressStream ?? process.stderr)
-    const result = await setupLocalApp({ ...options, progress })
+    const clock = options.startupClock ?? createStartupStageClock()
+    const result = await clock.measure('setup', () => setupLocalApp({ ...options, progress }))
     progress.close()
     console.log(`CaseWeave local profile ready: ${result.paths.dshHome}`)
     return

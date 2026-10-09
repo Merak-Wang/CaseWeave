@@ -19,9 +19,11 @@ export async function learnedResultWindow(state: RetrievalState, provider: Ticke
   const items = await provider.resolveFeatureIds(principal, { snapshotId: state.snapshot!.snapshotId, ids: block.ids })
   if (items.length !== block.ids.length) throw new RetrievalError('SNAPSHOT_INVALID', '集合来源已变化。')
   return { view: 'confirmed', version: result.model_id, offset, total: result.returned, limit, items,
-    readableCandidateRefs: items.map(c => c.ref), judgments: items.map(c =>
+    readableCandidateRefs: items.map(c => c.ref), judgments: items.map((c, index) =>
       state.judgments?.find(j => j.candidateRef === c.ref && j.verdict === 'accept') ?? {
-        candidateRef: c.ref, verdict: 'accept', reason: '学习模型集合预测；本条未逐条交 LLM 判断。', basis: 'proxy', evidenceRefs: [] }),
+        candidateRef: c.ref, verdict: 'accept', reason: '模型按本次查询筛选为相关；未人工评测。', basis: 'proxy', evidenceRefs: [],
+        operatorInference: { algorithm: String(result.metadata.model ?? result.metadata.algorithm ?? 'learned'), proposal: 'yes', phase: 'prediction',
+          model_id: result.model_id, ...(block.scores[index] === undefined ? {} : { score: block.scores[index] }), proposed: 1, inferred: true } }),
     ...(offset + items.length < result.returned && block.ids.length ? { nextCursor: Buffer.from(JSON.stringify({ version: result.model_id,
       after: block.ids.at(-1), offset: offset + items.length })).toString('base64url') } : {}) }
 }
@@ -30,8 +32,7 @@ export async function materializeLearnedRefs(state: RetrievalState, provider: Ti
   principal: TrustedPrincipalContext, store: SemanticResultStore, refs: readonly TicketCandidateRef[]): Promise<RetrievalState> {
   const result = learnedResult(state)
   if (!result || !provider.featureBlock || !provider.resolveFeatureIds) return state
-  const block = await provider.featureBlock(principal, { snapshotId: state.snapshot!.snapshotId, refs, limit: refs.length,
-    ...(typeof result.metadata.recall_scope_key === 'string' ? { recallScope: result.metadata.recall_scope_key } : {}) })
+  const block = await provider.featureBlock(principal, { snapshotId: state.snapshot!.snapshotId, refs, limit: refs.length })
   const ids: number[] = []
   for (const id of block.ids) if ((await store.page(state.retrievalId, result.model_id, id-1, 1)).ids[0] === id) ids.push(id)
   const rows = await provider.resolveFeatureIds(principal, { snapshotId: state.snapshot!.snapshotId, ids })

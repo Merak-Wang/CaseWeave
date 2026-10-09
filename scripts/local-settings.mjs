@@ -16,6 +16,8 @@ export async function seedModelSettings(paths, environment) {
   const api = environment.RETRIEVAL_AGENT_BROWSER_LLM_API?.trim()
   const contextWindow = Number(environment.RETRIEVAL_AGENT_BROWSER_LLM_CONTEXT_WINDOW) || undefined
   const maxTokens = Number(environment.RETRIEVAL_AGENT_BROWSER_LLM_MAX_TOKENS) || undefined
+  const deepseekOpenCode = Boolean(provider && model && baseURL && model.toLowerCase().startsWith('deepseek')
+    && (provider.toLowerCase().startsWith('opencode') || new URL(baseURL).hostname === 'opencode.ai'))
   if ([provider, model, baseURL, apiKeyEnv].every(value => !value)) return false
   if ([provider, model, baseURL, apiKeyEnv].some(value => value === undefined || value.length === 0)) {
     throw new Error('browser Agent LLM setup requires provider, model, base URL, and API-key environment name together')
@@ -24,6 +26,7 @@ export async function seedModelSettings(paths, environment) {
   const settingsPath = join(paths.dshHome, 'settings.yaml')
   const seedPath = join(paths.dshHome, 'retrieval-model-seed.sha256')
   const seed = createHash('sha256').update(JSON.stringify({ provider, model, baseURL, apiKeyEnv, api, contextWindow, maxTokens,
+    namespace: 'retrieval-llm-pi-ai', reasoningProfile: deepseekOpenCode ? 'deepseek-off-v1' : undefined,
     reasoning: environment.RETRIEVAL_AGENT_BROWSER_LLM_REASONING ?? 'off', name: environment.RETRIEVAL_AGENT_BROWSER_LLM_DISPLAY_NAME })).digest('hex')
   let existing = {}
   if (existsSync(settingsPath)) {
@@ -38,7 +41,7 @@ export async function seedModelSettings(paths, environment) {
       throw new Error(`refusing to overwrite invalid DSH settings at ${settingsPath}; repair the local YAML/JSON configuration before retrying`)
     }
   }
-  const existingAdapter = record(existing['llm-pi-ai'])
+  const existingAdapter = record(existing['retrieval-llm-pi-ai'] ?? existing['llm-pi-ai'])
   if (existsSync(seedPath) && (await readFile(seedPath, 'utf8')).trim() === seed && existing['agent-default-model']) return false
   const existingProviders = record(existingAdapter.providers)
   const existingProvider = record(existingProviders[provider])
@@ -52,7 +55,7 @@ export async function seedModelSettings(paths, environment) {
       model,
       reasoningEffort: environment.RETRIEVAL_AGENT_BROWSER_LLM_REASONING?.trim() || 'off',
     },
-    'llm-pi-ai': {
+    'retrieval-llm-pi-ai': {
       ...existingAdapter,
       providers: {
         ...existingProviders,
@@ -62,7 +65,9 @@ export async function seedModelSettings(paths, environment) {
           apiKeyEnv,
           baseURL,
           ...(api ? { api } : {}),
+          // 目录声明 off，供应商真实的禁用思考参数由兼容适配器发送。
           models: [...models.filter(entry => record(entry).id !== model), { ...previousModel, id: model,
+            ...(deepseekOpenCode ? { reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'xhigh' } } : {}),
             ...(contextWindow ? { contextWindow } : {}), ...(maxTokens ? { maxTokens } : {}) }],
         },
       },

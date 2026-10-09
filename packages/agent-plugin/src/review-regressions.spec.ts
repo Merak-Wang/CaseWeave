@@ -90,7 +90,7 @@ async function fixture(options: { derived?: 'sem_agg' | 'sem_extract'; sourceReq
         const revised = (app.currentOrUndefined(agent)?.inputGeneration ?? 0) > 0
         payload = { rows: data.records.map((r: any) => ({ ref: r.ref, label: r.passages.find((p: any) => p.id === 'summary').text.includes(revised ? '副卡' : '宽带') ? 'accept' : 'exclude',
           citations: [{ ref: r.ref, passage_id: (r.passages.find((p: any) => options.readSource && p.field === 'conversationOrUpdates') ?? r.passages.find((p: any) => p.id === 'summary')).id,
-            quote: (r.passages.find((p: any) => options.readSource && p.field === 'conversationOrUpdates') ?? r.passages.find((p: any) => p.id === 'summary')).text }], knowledge_ids: [], reason: '测试模型依据送达场景判断。' })) }
+            quote: (r.passages.find((p: any) => options.readSource && p.field === 'conversationOrUpdates') ?? r.passages.find((p: any) => p.id === 'summary')).text }], knowledge_ids: [], confidence: .9, reason: '测试模型依据送达场景判断。' })) }
       } else {
         const s = app.current(agent)
         if (options.readSource && !s.promotedEvidence.length) {

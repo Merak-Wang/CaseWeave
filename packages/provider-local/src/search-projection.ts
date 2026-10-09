@@ -4,8 +4,15 @@ import type { RankingDocument } from '@retrieval-agent/model-service-client/rank
 import { LEGACY_FIELD_CATALOG, evidenceFieldValues } from './fields.js'
 
 /** Versioned local-provider projection shared by online ranking and the development index builder. */
-export function rankingDocuments(records: readonly NormalizedTicketRecord[]): RankingDocument[] {
-  return records.map(record => ({
+export function rankingDocuments(records: readonly NormalizedTicketRecord[], projection: 'ticket-search-projection-v1' | 'canonical-title-abstract-v1' = 'ticket-search-projection-v1'): RankingDocument[] {
+  // 标题摘要索引不拼接原文；正文仍由 Provider 按工单身份读取。
+  if (projection === 'canonical-title-abstract-v1') return records.map(record => {
+    const title = record.title.replace(/\r\n?/gu, '\n').trim()
+    const summary = record.summary.replace(/\r\n?/gu, '\n').trim()
+    if (!title || !summary) throw new TypeError('Canonical title and abstract must both contain text')
+    return { id: record.ticketId, contentHash: record.contentHash, title, summary, body: '', metadata: '' }
+  })
+  const documents = records.map(record => ({
     id: record.ticketId,
     contentHash: record.contentHash,
     title: record.title,
@@ -24,6 +31,7 @@ export function rankingDocuments(records: readonly NormalizedTicketRecord[]): Ra
       ...record.additionalFields?.map(field => field.value) ?? [],
     ].filter((value): value is string => value !== undefined).join(' '),
   }))
+  return documents
 }
 
 export function candidateL0(record: NormalizedTicketRecord): TicketL0 {

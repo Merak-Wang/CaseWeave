@@ -19,7 +19,7 @@ describe('HybridRankingEngine FastAPI adapter', () => {
       fusion: { rankConstant: 60, keywordWeight: 0.55, vectorWeight: 0.45 },
       rerankerEnabled: false, rerankTopN: 20, allowKeywordFallback: false,
     })
-    expect(engine.profileVersion).toBe('quick-hybrid-v2:42c14be3ea9515ba')
+    expect(engine.profileVersion).toBe('quick-hybrid-v2:4c6c282cb764497c')
   })
 
   it('accepts a versioned admitted ranking response', async () => {

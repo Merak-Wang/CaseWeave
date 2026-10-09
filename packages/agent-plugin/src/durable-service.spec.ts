@@ -55,6 +55,7 @@ class Provider extends TicketRetrievalProviderService {
   get providerId() { return this.p.providerId }
   resolve: TicketRetrievalProvider['resolve'] = request => this.p.resolve(request)
   openSnapshot: TicketRetrievalProvider['openSnapshot'] = (...a) => this.p.openSnapshot(...a)
+  override restoreSnapshot: NonNullable<TicketRetrievalProvider['restoreSnapshot']> = (...a) => this.p.restoreSnapshot?.(...a)
   search: TicketRetrievalProvider['search'] = (...a) => this.p.search(...a)
   readEvidence: TicketRetrievalProvider['readEvidence'] = (...a) => this.p.readEvidence(...a)
   readDetails: TicketRetrievalProvider['readDetails'] = (...a) => this.p.readDetails(...a)
@@ -1630,7 +1631,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
         execution: { requestedMode: query.mode, executedMode: query.mode, strategyVersion: 'fixture', channels: [{ channel: 'keyword', implementation: 'fixture', version: '1', resultCount: documents.length, elapsedMs: 0 }, { channel: 'vector', implementation: 'fixture', version: '1', resultCount: documents.length, elapsedMs: 0 }] }, scanned: documents.length, keywordEligible: documents.length, rankedHits: documents.length, warnings: [] }
     } }
     await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime); await ctx.plugin(ToolRuntime)
-    if (liveConfig) await ctx.plugin(piAi, liveConfig)
+    if (liveConfig) await ctx.plugin(piAi, liveConfig as unknown as Parameters<typeof ctx.plugin<typeof piAi>>[1])
     await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)
     if (experts || learning) { await ctx.plugin(Subagents); await ctx.plugin(Spawn, { providerName: 'spawn' }); await ctx.plugin(Skills) }
     const scaleRecords = Array.from({ length: Math.max(0, deliveryScale - 2) }, (_, i) => normalizeFixtureTicket({ ...records[0]!, ticketId: `scale-${i}`, displayId: `S-${i}`, title: `副卡解绑 ${i}`, summary: `副卡解绑后仍共享流量 ${i}` }))
@@ -1693,7 +1694,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
             steps: [{ id: 'filter', op: 'sem_filter', inputs: ['$source'], instruction: '核对工单', params: {} }],
           } : { rows: data.records.map((r: any, i: number) => ({ ref: r.ref,
             label: options.system?.includes('只查询上海工单') ? JSON.stringify(r).includes('上海') ? 'accept' : 'exclude' : i === 0 ? 'accept' : 'exclude',
-            reason: '受控接线验收判断', knowledge_ids: [],
+            reason: '受控接线验收判断', knowledge_ids: [], confidence: .9,
             citations: [{ ref: r.ref, passage_id: 'summary', quote: r.passages.find((p: any) => p.id === 'summary').text }] })) }
           if (omitRequiredFilterField && typeof payload === 'object' && payload !== null && 'rows' in payload) {
             delete (payload as { rows: { knowledge_ids?: string[] }[] }).rows[0]!.knowledge_ids
@@ -1716,8 +1717,6 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     const agents = new Map<string, Promise<Agent>>(); const disposers: (() => Promise<void>)[] = []
     const agentFor = (id: string): Promise<Agent> => {
       if (!agents.has(id)) agents.set(id, (async () => {
-        const saved = await store.forSession(id)
-        if (saved?.state_json?.snapshot) provider.restoreSnapshot(principal(), saved.state_json.snapshot)
         const handle = await ctx.agents.create({ sessionId: SessionId(id), agentOptions: liveSelection ?? { provider: 'phase2-fixture', model: 'scripted-acceptance' } })
         disposers.push(handle.dispose); return handle.agent
       })())

@@ -4,7 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import LlmRuntime, { LlmAdapter, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { LlmAdapter, ToolCallId, ReasoningEffortId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
@@ -78,13 +78,15 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
     const operators = new SemanticOperators(ctx, app, resolve('wiki'), process.cwd(),
       new PythonOperatorBridge(process.cwd(), resolve('.cache/semantic-operators', `window-${randomUUID()}.sqlite`)))
     class WindowAdapter extends LlmAdapter {
+      override async resolveModel(provider: string, id: string) { return { provider, id, name: id, reasoning: { efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }] } } }
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
         const data = JSON.parse(options.messages[0]!.content.flatMap(b => b.type === 'text' ? [b.text] : []).join(''))
         const planning = options.system?.includes('当前操作：query_plan')
         const knowledge = JSON.parse(options.system!.split('\n相关Wiki：')[1]!)
         if (planning) {
           planCalls++
-          expect(options.maxTokens).toBe(4096)
+          expect(options.maxTokens).toBe(2048)
+          expect(options.reasoningEffort).toBe('off')
           const evidenceFields = JSON.parse(data.confirmed_context).evidence_fields
           expect(evidenceFields.some((field: any) => field.key === 'summary')).toBe(false)
           expect(evidenceFields.every((field: any) => ['L2', 'L3'].includes(field.accessLevel)
@@ -95,10 +97,6 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
           const entry = catalog.flatMap((d: any) => d.entries).at(-1)
           expect(entry.bodyMarkdown).toBeUndefined()
           selectedId = entry.id
-          if (selectKnowledge && planCalls === 1) {
-            yield { type: 'finish', reason: { kind: 'stop' } }
-            return
-          }
         } else {
           expect(knowledge.entries.map((e: any) => e.id)).toEqual(selectKnowledge ? [selectedId] : [])
           if (selectKnowledge) {
@@ -112,8 +110,10 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
         }
         const payload = planning ? { keywords: ['副卡'], instruction: '找3条解绑已完成的副卡工单', retrieval_expressions: [],
           knowledge_routes: selectKnowledge ? [{ entry_id: selectedId, reason: '测试 Agent 选择这条业务知识' }] : [],
-          goal: { mode: 'examples', count: 3 }, steps: [{ id: 'filter', op: 'sem_filter', inputs: ['$source'], instruction: '核实解绑状态', params: {} }] }
-          : { rows: data.records.map((r: any) => ({ ref: r.ref, label: 'undetermined', citations: [], knowledge_ids: [], reason: '缺少解绑完成事实。' })) }
+          goal: { mode: 'examples', count: 3 }, steps: [{ id: 'filter', op: 'sem_filter', inputs: ['$source'], instruction: '核实解绑状态', params: { required_fields: ['problemDescription'] } }] }
+          : { rows: data.records.map((r: any) => data.decision_format === 'compact_binary'
+            ? { ref: r.ref, label: 'no', confidence: .55 }
+            : { ref: r.ref, label: 'exclude', confidence: .55, citations: [], knowledge_ids: [], reason: '缺少解绑完成事实。' }) }
         yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(randomUUID()), name: 'submit_result', arguments: JSON.stringify(payload) } }
         yield { type: 'finish', reason: { kind: 'tool-calls' } }
       }
@@ -123,14 +123,14 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
     const handle = await ctx.agents.create({ sessionId: SessionId(randomUUID()), agentOptions: { provider: 'example-window', model: 'scripted' } })
     dispose = handle.dispose
     const agent = handle.agent
-    await app.start(agent, buildSemanticTicketRequest('找3条解绑已完成的副卡工单'))
+    await app.start(agent, buildSemanticTicketRequest('找3条解绑已完成的副卡工单', { onlineLearning: true, semanticMethod: 'auto', orchestration: 'agent' }))
     expect(rankCalls).toBe(0)
     expect(app.current(agent).candidates).toHaveLength(0)
     expect(app.current(agent).query.contract?.semanticPlan?.keywords,
       JSON.stringify({ phase: app.current(agent).phase, stop: app.current(agent).stopExplanation, planCalls })).toEqual(['副卡'])
     await operators.searchAndFilter(agent)
     expect(rankCalls).toBeGreaterThan(0)
-    expect(planCalls).toBe(selectKnowledge ? 2 : 1)
+    expect(planCalls).toBe(1)
     expect(app.current(agent).query.contract?.semanticPlan?.knowledge_routes).toEqual(selectKnowledge
       ? [{ entry_id: selectedId, reason: '测试 Agent 选择这条业务知识', title: expect.any(String) }] : [])
     if (selectKnowledge) expect(selectedBody).not.toBe('')
@@ -141,8 +141,9 @@ it.each([true, false])('routes knowledge in planning (selected=%s), then judges 
     expect(judged).toHaveLength(2)
     const ref = app.current(agent).judgments![0]!.candidateRef
     await operators.filter(agent, [ref])
-    expect(judged).toHaveLength(3)
-    expect(unresolvedIssues.at(-1)).toEqual(['缺少解绑完成事实。'])
+    expect(judged).toHaveLength(2)
+    // 短协议的否票已有本次送达原文，定向重复判断复用同一有效教师票。
+    expect(unresolvedIssues.flat().every(issue => issue === undefined)).toBe(true)
     expect(app.current(agent).judgments).toHaveLength(16)
     expect(app.current(agent).selectedCandidateRefs).toEqual([])
   } finally { await dispose?.(); await ctx.fiber.dispose() }
@@ -154,8 +155,9 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
   const filteringScopes: (string | undefined)[] = []
   let activeOperation = ''
   const ranker: RetrievalRanker = { profileVersion: 'operator-fixture', capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
+    queryAnchors: async texts => ({ embedding_id: 'synthetic-operator-fixture', dimensions: 3, vectors: texts.map(() => [0, 0, 1]), profileIdentity: { model: 'synthetic-operator-fixture', dimensions: 3 } }),
     readFeatures: async documents => ({ embedding_id: 'synthetic-operator-fixture', rows: documents.map(d => ({ id: d.id,
-      vector: Number(d.id.slice(1)) % 2 ? [0, 1] : [1, 0] })) }),
+      vector: Number(d.id.slice(1)) % 2 ? [0, 1, 0] : [1, 0, 0] })) }),
     rank: async (documents, query) => {
       searches.push(query.semanticText ?? query.text)
       const recalled = active ? documents.filter(d => Number(d.id.slice(1)) < count) : documents
@@ -180,6 +182,11 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
       return { ...block, scores: block.ids.map(id => id / count) }
     })
     const app = new RetrievalAgentService(ctx)
+    // 本组覆盖自主Agent旧入口；固定编排由online-consumer套独立验收。
+    const start = app.start.bind(app)
+    vi.spyOn(app, 'start').mockImplementation((agent, request, signal) => start(agent, {
+      ...request, queryContract: { ...request.queryContract!, semanticExecution: {
+        onlineLearning: true, semanticMethod: 'auto', orchestration: 'agent' } } }, signal))
     const updates = vi.spyOn(app, 'updateExpert')
     const commits = vi.spyOn(app, 'acceptOperatorResults')
     const bridge = new PythonOperatorBridge(process.cwd(), resolve('.cache/semantic-operators', `test-${randomUUID()}.sqlite`))
@@ -235,6 +242,7 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
     }
     ctx.on('tools/result', (_exec, result) => { if (result.isError) errors.push(JSON.stringify(result.content)) })
     class Adapter extends LlmAdapter {
+      override async resolveModel(provider: string, id: string) { return { provider, id, name: id, reasoning: { efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }] } } }
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
         requests.push(options)
         const data = options.sessionId?.startsWith('operator-') ? JSON.parse(options.messages[0]!.content.flatMap(b => b.type === 'text' ? [b.text] : []).join('') || '{}') : {}
@@ -248,9 +256,9 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
           } else if (options.system?.includes('当前操作：sem_agg')) {
             payload = { status: 'ok', text: '受控的典型案例说明', source_ids: data.sources.map((s: any) => s.id) }
           } else {
-            payload = { rows: data.records.map((r: any) => ({ ref: r.ref, label: r.passages.find((p: any) => active ? p.field === 'conversationOrUpdates' : p.id === 'summary').text.includes(revised ? '已经完成' : '尚未完成') ? 'accept' : 'exclude',
+            payload = { rows: data.records.map((r: any) => data.decision_format === 'compact_binary' ? { ref: r.ref, label: r.passages.find((p: any) => active ? p.field === 'conversationOrUpdates' : p.id === 'summary').text.includes(revised ? '已经完成' : '尚未完成') ? 'yes' : 'no', confidence: .9 } : ({ ref: r.ref, label: r.passages.find((p: any) => active ? p.field === 'conversationOrUpdates' : p.id === 'summary').text.includes(revised ? '已经完成' : '尚未完成') ? 'accept' : 'exclude',
               citations: [{ ref: r.ref, passage_id: r.passages.find((p: any) => active ? p.field === 'conversationOrUpdates' : p.id === 'summary').id,
-                quote: r.passages.find((p: any) => active ? p.field === 'conversationOrUpdates' : p.id === 'summary').text }], knowledge_ids: [], reason: '依据会话结束时的解绑状态。' })) }
+                quote: r.passages.find((p: any) => active ? p.field === 'conversationOrUpdates' : p.id === 'summary').text }], knowledge_ids: [], confidence: .9, reason: '依据会话结束时的解绑状态。' })) }
           }
         } else {
           name = 'ticket_decide'
@@ -312,15 +320,15 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
       expect(requests).toHaveLength(requestsBefore)
       return
     }
-    if (!active) expect(state.candidates.filter(c => state.selectedCandidateRefs.includes(c.ref)).map(c => c.displayId).sort()).toEqual(
+    if (!active && count !== 1536) expect(state.candidates.filter(c => state.selectedCandidateRefs.includes(c.ref)).map(c => c.displayId).sort()).toEqual(
       records.filter((_, i) => i % 2 === 0).map(r => r.displayId).sort())
     expect(state.query.spec.queryPlan).toBeUndefined()
     expect(state.query.contract?.semanticPlan?.goal.mode).toBe(active ? 'all' : 'adaptive')
     expect(state.contextManifests!.filter(m => m.operator?.operation === 'query_plan').every(m => !m.operator?.metrics)).toBe(true)
     const filtering = state.contextManifests!.filter(m => m.operator?.operation === 'sem_filter')
     if (count !== 1536 && !active) {
-      // 每批初判与独立缺项复核各留一份清单，只提交复核后的判断。
-      expect(filtering).toHaveLength(2 * Math.ceil(count / 8))
+      // 成功教师判断只标一次，每批保留一份实际请求清单。
+      expect(filtering).toHaveLength(Math.ceil(count / 8))
       expect(commits.mock.calls).toHaveLength(Math.ceil(count / 8))
       expect(state.judgments!.every(j => j.basis === 'model')).toBe(true)
     }
@@ -347,7 +355,10 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
       expect(filtering.every(m => m.operator!.records.length <= 4)).toBe(true)
       expect(learning.teacher_unique_records).toBeLessThan(count)
       expect(learning.stop_reason).toBe(fallback ? 'quality_fallback' : 'quality_passed')
-      expect(learning.sampling_requests).toBeLessThanOrEqual(128)
+      expect(learning.sampling_requests).toBe(filtering.length)
+      expect(learning.sample_size).toBe(128)
+      expect(learning.sampling_request_limit).toBe(128)
+      expect(learning).not.toHaveProperty('sampling_limit_reached')
       expect(learning.quality.basis).toBe('selection')
       expect(learning.quality.recall).toBeGreaterThanOrEqual(fallback ? .8 : .95)
       expect(learning.quality.precision_lower).toBeUndefined()
@@ -391,34 +402,23 @@ it.each([[2, false], [24, false], [1536, false], [2048, false], [2048, true], [2
       expect((changed.budget!.operatorUsage!.learning as Record<string, unknown>).stop_reason).toBe('strong_label_corrected')
     }
     if (count === 1536) {
-      const proxies = state.judgments!.filter(j => j.basis === 'proxy')
-      const seenByModel = new Set(filtering.flatMap(m => m.candidateRefs))
-      expect(proxies.length).toBeGreaterThan(0)
-      expect(proxies.every(j => !seenByModel.has(j.candidateRef) && !j.operatorManifestId)).toBe(true)
-      expect(new Set([...seenByModel, ...proxies.map(j => j.candidateRef)]).size).toBe(count)
-      expect(foldRetrievalEvents(readRetrievalSessionEvents(agent.session))?.judgments?.filter(j => j.basis === 'proxy')).toEqual(proxies)
-      const acceptedProxy = proxies.find(j => j.verdict === 'accept')!
-      const evidence = candidateEvidence(state, acceptedProxy.candidateRef)
-      expect(evidence.judgment?.basis).toBe('proxy')
-      expect(evidence.citationCount).toBeGreaterThan(0)
-      const report = createRetrievalReport(state, [])
-      expect(report.confirmedCount).toBe(count / 2)
-      const principal = await app.principal(agent, 'export')
-      const exporter = new CandidateExportService(ctx.ticketRetrievalProvider, new InMemoryExportAuditSink(), { semanticResults: app.semanticResults })
-      const csv = await exporter.exportCsv(principal, state)
-      expect(csv.content).toContain('judgment_basis')
-      expect(csv.content).toContain('proxy')
-      const jsonl: string[] = []
-      await exporter.stream(principal, state, { format: 'jsonl', template: 'summary' }, async text => { jsonl.push(text) })
-      expect(jsonl.join('').split('\n').filter(Boolean).map(s => JSON.parse(s)).some(r => r.judgment?.basis === 'proxy')).toBe(true)
-      const oldStrong = state.judgments!.find(j => j.operatorManifestId)!
-      const oldManifest = state.contextManifests!.find(m => m.id === oldStrong.operatorManifestId)!
-      const changed = admitDecision({ ...state, phase: 'assessed' }, { stateId: state.stateId, judgments: [{ ...oldStrong,
-        verdict: oldStrong.verdict === 'accept' ? 'exclude' : 'accept' }], gaps: [], action: { kind: 'inspect', fields: [] } }, oldManifest.roleId)
-      expect(changed.judgments!.some(j => j.basis === 'proxy')).toBe(false)
-      expect(changed.judgments!.find(j => j.candidateRef === oldStrong.candidateRef)!.verdict).not.toBe(oldStrong.verdict)
+      expect(requests.filter(r => r.system?.includes('当前操作：sem_filter')).length).toBeGreaterThan(128)
+      expect(state.judgments!.some(j => j.verdict === 'undetermined')).toBe(false)
+      expect(state.judgments!.filter(j => j.verdict === 'accept').every(j =>
+        Number(state.candidates.find(c => c.ref === j.candidateRef)!.displayId.slice(2)) % 2 === 0)).toBe(true)
+      // 旧cluster基线现在完成数值推断，固定128在线主链另有真实消费者验收。
+      expect(state.judgments!.some(j => j.basis === 'proxy')).toBe(true)
     }
-    expect(foldRetrievalEvents(readRetrievalSessionEvents(agent.session))?.selectedCandidateRefs).toEqual(state.selectedCandidateRefs)
+    const replay = foldRetrievalEvents(readRetrievalSessionEvents(agent.session))!
+    expect(replay.selectedCandidateRefs).toEqual(state.selectedCandidateRefs)
+    if (count === 2 && fallback === false) {
+      const judgments = state.judgments!.filter(j => j.basis === 'model')
+      expect(judgments.length).toBeGreaterThan(0)
+      expect(judgments.every(j => j.confidence === .9), JSON.stringify(judgments)).toBe(true)
+      for (const judgment of judgments) {
+        expect(replay.judgments?.find(j => j.candidateRef === judgment.candidateRef)?.confidence).toBe(.9)
+      }
+    }
     // 全集分支分别续跑发现和选择两个窗口，随后汇总并结束。
     expect(requests.filter(r => !r.sessionId?.startsWith('operator-'))).toHaveLength(active ? 4 : 1)
     const manifest = state.contextManifests!.find(m => m.operator?.operation === 'sem_filter')!

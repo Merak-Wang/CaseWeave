@@ -73,16 +73,27 @@ export interface ExportCandidatesParams {
   readonly sessionId: string
   readonly retrievalId: RetrievalId
   readonly resultRevision: string
+  /** CSV remains the default for existing clients. */
+  readonly format?: 'csv' | 'xlsx'
+  /** Explicit candidate predictions remain unconfirmed and quality unmeasured. */
+  readonly collection?: 'confirmed' | 'predictions'
+  readonly predictionSelection?: 'accept' | 'all'
   /** Omit to download the complete confirmed set, independent of the UI window. */
   readonly candidateRefs?: readonly TicketCandidateRef[]
 }
 
-export interface ExportCandidatesResponse {
+export type ExportCandidatesResponse = {
   readonly fileName: string
+  readonly receipt: CandidateExportReceipt
+} & ({
   readonly mediaType: 'text/csv; charset=utf-8'
   readonly contentUtf8: string
-  readonly receipt: CandidateExportReceipt
-}
+  readonly contentBase64?: never
+} | {
+  readonly mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  readonly contentBase64: string
+  readonly contentUtf8?: never
+})
 
 export interface ExportCandidatesErrorResponse {
   readonly code: string

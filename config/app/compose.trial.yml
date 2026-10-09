@@ -1,0 +1,90 @@
+name: caseweave-trial
+services:
+  mysql:
+    image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+      MYSQL_DATABASE: caseweave_trial
+    volumes: [trial-mysql:/var/lib/mysql]
+    ports: ['127.0.0.1:${CASEWEAVE_TRIAL_MYSQL_PORT:-13307}:3306']
+    command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_bin, --innodb-buffer-pool-size=256M]
+    healthcheck:
+      test: [CMD, mysqladmin, ping, -h, localhost]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  model-service:
+    image: ${CASEWEAVE_TRIAL_MODEL_IMAGE:-retrieval-agent-model-service:trial}
+    build:
+      args:
+        UV_IMAGE: ${CASEWEAVE_BUILD_UV_IMAGE:-ghcr.io/astral-sh/uv:0.12.10@sha256:2bb3ebca0a796a155094a27773d290c4b074572e6107f171d88d086682fd2500}
+      context: ../..
+      dockerfile: config/model-service/Dockerfile
+    environment:
+      RETRIEVAL_AGENT_MODEL_DEVICE: ${CASEWEAVE_TRIAL_MODEL_DEVICE:-cuda:0}
+      RETRIEVAL_AGENT_MODEL_MAX_BATCH_SIZE: 32
+      RETRIEVAL_AGENT_MODEL_MAX_TOTAL_TOKENS: 16384
+      OMP_NUM_THREADS: 4
+    volumes: [model-weights:/models:ro, trial-model-cache:/cache]
+    ports: ['127.0.0.1:${CASEWEAVE_TRIAL_MODEL_PORT:-28013}:8012']
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+    healthcheck:
+      test: [CMD, python, -m, retrieval_agent_model_service.container, health]
+      interval: 5s
+      timeout: 5s
+      start_period: 120s
+      retries: 24
+  app:
+    image: ${CASEWEAVE_TRIAL_APP_IMAGE:-retrieval-agent-app:trial}
+    build:
+      args:
+        UV_IMAGE: ${CASEWEAVE_BUILD_UV_IMAGE:-ghcr.io/astral-sh/uv:0.12.10@sha256:2bb3ebca0a796a155094a27773d290c4b074572e6107f171d88d086682fd2500}
+      context: ../..
+      dockerfile: config/app/Dockerfile
+    init: true
+    environment:
+      RETRIEVAL_AGENT_STORAGE: jsonl
+      RETRIEVAL_AGENT_TASK_PERSISTENCE: mysql
+      RETRIEVAL_AGENT_TASK_MYSQL_URL: mysql://root@mysql:3306/caseweave_trial
+      RETRIEVAL_AGENT_MYSQL_URL: mysql://root@mysql:3306/caseweave_trial
+      RETRIEVAL_AGENT_DATA_PATH: /app/trial-data/tickets.jsonl
+      RETRIEVAL_AGENT_DATASET_ID: ${CASEWEAVE_TRIAL_DATASET_ID:-production-trial}
+      RETRIEVAL_AGENT_DOCUMENT_PROJECTION: canonical-title-abstract-v1
+      RETRIEVAL_AGENT_SOURCE_LABEL: ${CASEWEAVE_TRIAL_SOURCE_LABEL:-生产工单试用数据}
+      RETRIEVAL_AGENT_MODEL_SERVICE_URL: http://model-service:8012
+      RETRIEVAL_AGENT_WIKI_LEARNING: ${RETRIEVAL_AGENT_WIKI_LEARNING:-1}
+      RETRIEVAL_AGENT_BROWSER_LLM_PROVIDER: ${RETRIEVAL_AGENT_BROWSER_LLM_PROVIDER:-}
+      RETRIEVAL_AGENT_BROWSER_LLM_MODEL: ${RETRIEVAL_AGENT_BROWSER_LLM_MODEL:-}
+      RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL: ${RETRIEVAL_AGENT_BROWSER_LLM_BASE_URL:-}
+      RETRIEVAL_AGENT_BROWSER_LLM_API_KEY_ENV: ${RETRIEVAL_AGENT_BROWSER_LLM_API_KEY_ENV:-}
+      RETRIEVAL_AGENT_BROWSER_LLM_API: ${RETRIEVAL_AGENT_BROWSER_LLM_API:-}
+      RETRIEVAL_AGENT_BROWSER_LLM_CONTEXT_WINDOW: ${RETRIEVAL_AGENT_BROWSER_LLM_CONTEXT_WINDOW:-}
+      RETRIEVAL_AGENT_BROWSER_LLM_MAX_TOKENS: ${RETRIEVAL_AGENT_BROWSER_LLM_MAX_TOKENS:-}
+      RETRIEVAL_AGENT_MAIN_MODEL_API_KEY: ${RETRIEVAL_AGENT_MAIN_MODEL_API_KEY:-}
+    volumes:
+      - ${CASEWEAVE_TRIAL_DATA:?Set CASEWEAVE_TRIAL_DATA to an authorized JSONL file}:/app/trial-data/tickets.jsonl:ro
+      - trial-state:/app/.cache
+      - trial-output:/app/output
+      - trial-wiki:/app/wiki
+    ports: ['127.0.0.1:${RETRIEVAL_AGENT_WEB_PORT:-3080}:3080']
+    depends_on:
+      mysql: {condition: service_healthy}
+      model-service: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3080/retrieval').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 180s
+      retries: 18
+volumes:
+  model-weights:
+    external: true
+    name: ${CASEWEAVE_TRIAL_MODEL_VOLUME:?Set CASEWEAVE_TRIAL_MODEL_VOLUME to the existing model weights volume}
+  trial-mysql:
+  trial-model-cache:
+  trial-state:
+  trial-output:
+  trial-wiki:

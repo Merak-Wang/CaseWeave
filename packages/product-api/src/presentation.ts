@@ -4,7 +4,7 @@ import type {
   TicketCandidateNode,
 } from '@retrieval-agent/contracts'
 import { isReadableTicketField } from '@retrieval-agent/contracts'
-import { createTicketResultCollection } from '@retrieval-agent/domain/result'
+import { createTicketResultCollection, confirmedCount } from '@retrieval-agent/domain/result'
 
 const STATUS_MESSAGES: Partial<Record<RetrievalState['termination'], string>> = {
   no_result: '当前检索表达式没有返回候选；这不能证明授权工单库中不存在语义相关工单。',
@@ -30,7 +30,7 @@ function statusOf(state: RetrievalState | undefined): TicketCandidateNode['statu
     case 'cancelled': return 'stopped'
     case 'active': return state.candidates.length === 0 ? 'searching' : 'results'
     case 'needs_clarification': return state.candidates.length === 0 ? 'searching' : 'results'
-    case 'top_k_accepted': return state.candidates.length === 0 ? 'empty' : 'results'
+    case 'top_k_accepted': return confirmedCount(state) === 0 ? 'empty' : 'results'
     default: return state.termination satisfies never
   }
 }

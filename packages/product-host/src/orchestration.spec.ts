@@ -14,6 +14,34 @@ const state = () => ({ inputGeneration: 2, phase: 'assessed', termination: 'acti
 } as unknown as RetrievalState)
 
 describe('public orchestration facts', () => {
+  it('projects frozen teacher mode separately from teacher weak supervision and enumeration quality', () => {
+    const frozen = projectOrchestration({ ...state(), query: { contract: { semanticExecution: {
+      onlineLearning: false, semanticMethod: 'auto',
+    } } }, budget: { operatorUsage: { learning: { input_revision: 2, stop_reason: 'frozen_completed',
+      regime: 'frozen_teacher', online_feedback_training: false, fit_count: 0,
+      scope_records: 300, completion_basis: 'input_enumeration', undetermined_records: 2,
+    } } } } as unknown as RetrievalState)
+    expect(frozen.retrieval.execution).toEqual({ onlineLearning: false, semanticMethod: 'direct_teacher',
+      onlineFeedbackTraining: false, regime: 'frozen_teacher', orchestration: 'agent', judgeMode: 'compact_binary' })
+    expect(frozen.retrieval.learning).toMatchObject({ fitCount: 0, scopeRecords: 300,
+      completionBasis: 'input_enumeration', unresolvedCount: 2, regime: 'frozen_teacher', onlineFeedbackTraining: false })
+    expect(frozen.retrieval.learning?.quality).toBeUndefined()
+    expect(projectOrchestration(state()).retrieval.execution).toBeUndefined()
+    const explicitDirect = projectOrchestration({ ...state(), query: { contract: { semanticExecution: {
+      onlineLearning: true, semanticMethod: 'direct',
+    } } } } as unknown as RetrievalState)
+    expect(explicitDirect.retrieval.execution).toMatchObject({ regime: 'frozen_teacher', onlineFeedbackTraining: false })
+  })
+  it.each([
+    ['dual_description_margin', 'frozen_score'], ['name_gmm', 'unlabeled_fit_once'], ['kmeans', 'unlabeled_fit_once'],
+  ])('retains the selected experimental method %s across public task projection', (method, regime) => {
+    const projected = projectOrchestration({ ...state(), query: { contract: { semanticExecution: {
+      onlineLearning: false, semanticMethod: method, orchestration: 'fixed',
+    } } } } as unknown as RetrievalState)
+    expect(projected.retrieval.execution).toEqual({ onlineLearning: false, semanticMethod: method,
+      onlineFeedbackTraining: false, regime, orchestration: 'fixed', judgeMode: 'compact_binary' })
+    expect(projected.retrieval.learning?.quality).toBeUndefined()
+  })
   it('does not treat a returned expert as delivery while filtering or reviewing', () => {
     const s = { ...state(), expertTasks: state().expertTasks!.map(t => ({ ...t, status: 'completed' as const })) }
     expect(projectOrchestration(s).stage).toBe('review')
@@ -56,7 +84,8 @@ describe('public orchestration facts', () => {
   it('reports expert knowledge carried by actual sample judgments, excluding planning and old inputs', () => {
     const view = projectOrchestration({ ...state(), expertTasks: [],
       budget: { operatorUsage: { learning: { input_revision: 2, stop_reason: 'sampling', concurrency: 128, batch_size: 1,
-        precision_target: .9, recall_target: .9, sample_size: 128, diversity_records: 25 } } },
+        precision_target: .9, recall_target: .9, sample_size: 128, diversity_records: 25,
+        sampling_requests: 300, sampling_request_limit: 128 } } },
       contextManifests: [
         { inputGeneration: 1, measurement: 'dsh_request', operator: { operation: 'sem_filter', knowledgeIds: ['old'] } },
         { inputGeneration: 2, measurement: 'dsh_request', operator: { operation: 'query_plan', knowledgeIds: ['plan-only'] } },
@@ -64,7 +93,8 @@ describe('public orchestration facts', () => {
       ],
     } as unknown as RetrievalState)
     expect(view.retrieval.learning).toMatchObject({ concurrency: 128, batchSize: 1, precisionTarget: .9, recallTarget: .9,
-      sampleSize: 128, diversityCount: 25, knowledgeEntryCount: 2, knowledgeRequestCount: 1 })
+      sampleSize: 128, diversityCount: 25, samplingRequests: 300, knowledgeEntryCount: 2, knowledgeRequestCount: 1 })
+    expect(view.retrieval.learning?.samplingRequestLimit).toBe(128)
   })
   it('drops old plan and learning progress after a condition revision', () => {
     const view = projectOrchestration({ ...state(), query: { contract: { semanticPlan: { inputGeneration: 1 } } },

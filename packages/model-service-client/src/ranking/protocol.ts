@@ -3,6 +3,7 @@ import type { PreparationProgress, RankingDocument, RankingQuery, RankingResult 
 export const RAG_SERVICE_PROTOCOL_VERSION = 'retrieval-agent.rag.v1' as const
 
 export interface RankingProfileParams {
+  readonly documentProjection?: 'ticket-search-projection-v1' | 'canonical-title-abstract-v1'
   readonly embeddingIdentity?: { readonly model: string; readonly revision: string; readonly dimensions: number }
   readonly rerankerIdentity?: { readonly model: string; readonly revision: string }
   readonly embeddingInstruction: string
@@ -10,7 +11,7 @@ export interface RankingProfileParams {
   readonly embeddingBatchSize: number
   readonly modelDeadlineMs: number
   readonly minimumDenseScore: number
-  /** Minimum recall count; scores above minimumDenseScore are also retained. */
+  /** Legacy profile field; threshold recall never supplements low-score tickets. */
   readonly denseTopK: number
   readonly fusion: {
     readonly rankConstant: number

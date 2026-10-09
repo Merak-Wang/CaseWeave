@@ -136,7 +136,22 @@ export type TicketFastQueryPlan =
  * before Provider access so a retrieval can explain exactly which task,
  * language, domain, entities, constraints, and result-set policy it used.
  */
+export const ONLINE_MODEL_NAMES = ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic'] as const
+export type OnlineModelName = typeof ONLINE_MODEL_NAMES[number]
+
+export interface SemanticExecutionOptions {
+  readonly judgeMode?: 'compact_binary' | 'anyjev_l0'
+  readonly judgePrior?: 'none' | 'batch' | 'content_free'
+  /** False runs a frozen per-ticket teacher with zero feedback-based fitting. */
+  readonly onlineLearning: boolean
+  readonly orchestration?: 'fixed' | 'agent'
+  /** Missing settings preserve the historical single-model bank. */
+  readonly onlineFusion?: 'single' | 'selective'
+  readonly onlineModels?: readonly OnlineModelName[]
+  readonly semanticMethod: 'auto' | 'direct' | 'direct_teacher' | 'dual_description_margin' | 'name_gmm' | 'kmeans'
+}
 export interface TicketQueryContract {
+  readonly semanticExecution?: SemanticExecutionOptions
   readonly semanticPlan?: import('./semantic-operators.js').SemanticQueryPlan
   readonly queryPlan?: QueryPlan
   /** Version 8 records sourced user requirements; older persisted contracts remain readable. */
@@ -248,6 +263,8 @@ export interface TicketSnapshot {
   readonly queryPolicyVersion: string
   /** Versioned data vocabulary exposed for this authorized snapshot. */
   readonly fieldCatalog: readonly TicketFieldDescriptor[]
+  /** Provider-declared document input; this is not inferred from user text. */
+  readonly documentProjection?: 'ticket-search-projection-v1' | 'canonical-title-abstract-v1'
   /** Search predicates can use projections that are not standalone evidence read fields. */
   readonly queryFields?: readonly QueryFieldCapability[]
   readonly capabilities: {
@@ -301,6 +318,8 @@ export interface TicketL0 {
 
 /** Authorized title and summary. Legacy L2 markers are migrated by field meaning. */
 export interface TicketCandidate {
+  /** Local grouping metadata; never a business judgment or LLM input. */
+  readonly groupHashes?: import('./provider.js').NumericFeatureRowGroup
   readonly projectionVersion?: 2
   readonly summaryOrigin?: import('./agent-context.js').TicketContentOrigin
   readonly titleOrigin?: import('./agent-context.js').TicketContentOrigin

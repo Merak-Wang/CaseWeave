@@ -35,7 +35,9 @@ export async function prepareDevelopmentIndex(options = {}) {
   const cacheDir = options.cacheDir ?? developmentVectorCacheDir
   const rerankerEnabled = options.rerankerEnabled
     ?? enabled(environment.RETRIEVAL_AGENT_RERANKER_ENABLED)
+  const documentProjection = environment.RETRIEVAL_AGENT_DOCUMENT_PROJECTION ?? 'ticket-search-projection-v1'
   const engine = new HybridRankingEngine({
+    documentProjection,
     baseUrl,
     embeddingIdentity: {
       model: manifest.embedding.model,
@@ -53,7 +55,7 @@ export async function prepareDevelopmentIndex(options = {}) {
     modelDeadlineMs: options.deadlineMs ?? 120_000,
     preparePollIntervalMs: options.pollIntervalMs ?? configured.pollIntervalMs,
   })
-  const prepared = await engine.prepare(rankingDocuments(records), {
+  const prepared = await engine.prepare(rankingDocuments(records, documentProjection), {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
   })

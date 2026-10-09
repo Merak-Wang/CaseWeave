@@ -23,7 +23,8 @@ const CHANGE = { oneOf: [
 export const DECISION_PARAMETERS = {
   state_id: { type: 'string', required: true, description: '原样填写最新 knowledgeState.stateId（含版本）。' },
   judgments: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
-    candidate_alias: { type: 'string', required: true }, verdict: { type: 'string', required: true, enum: ['accept', 'exclude', 'undetermined'] },
+    candidate_alias: { type: 'string', required: true }, verdict: { type: 'string', required: true, enum: ['accept', 'exclude'] },
+    confidence: { type: 'number', description: '0到1，对所选二分类标签的自报置信度，未校准，不改变标签。' },
     exclusion_checks: { type: 'array', description: 'accept 前逐项核对 semanticExclusions，保留完整条件与或/且、时序；yes/uncertain 不得 accept，无排除项可省略。', items: { type: 'object', additionalProperties: false, properties: {
       requirement_id: { type: 'string', required: true }, source_text: { type: 'string', required: true, description: '原样复制 semanticExclusions 的完整 source_text。' },
       applies: { type: 'string', required: true, enum: ['yes', 'no', 'uncertain'] },
@@ -175,6 +176,7 @@ export function decisionFromArguments(state: RetrievalState, args: DecisionArgum
   return { stateId: RetrievalStateId(args.state_id),
     judgments: args.judgments.map(judgment => ({ candidateRef: activeRef(state, judgment.candidate_alias),
       verdict: judgment.verdict, evidenceRefs: evidenceRefs(state, judgment.evidence_aliases), reason: judgment.reason,
+      ...(judgment.confidence === undefined ? {} : { confidence: judgment.confidence }),
       ...exclusionChecksFromArguments(state, judgment.exclusion_checks),
       ...(judgment.adopted_finding_id ? { adoptedFindingId: judgment.adopted_finding_id } : {}),
       ...(judgment.conflict_resolution ? { conflictResolution: { kind: judgment.conflict_resolution.kind,

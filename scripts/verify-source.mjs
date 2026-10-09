@@ -13,6 +13,7 @@ const files = [], problems = []
 const forbidden = /(^|\/)(?:node_modules|models|output|\.cache|\.tmp|\.venv|sessions|\.private|__pycache__)(\/|$)|(^|\/)\.env(?:\..+)?$|(?:^|\/)\.credentials\.yaml$/u
 const internal = /^(?:(?:asset|attachments)\/|(?:AGENTS|PLAN)\.md$|docs\/(?:PUBLISHING\.md$|VERIFICATION\.md$|BASELINE\.md$|CODEX_INSTRUCTIONS\.md$|DSH_CHANGE_CLASSIFICATION\.md$|PROJECT_REVIEW\.md$|design\/EVOLUTION\.md$|(?:research|archive|adr|reviews|assets|replan-[^/]+)\/))/u
 const secret = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|sk-(?:proj-)?[A-Za-z0-9_-]{32,})\b/u
+const localExperiment = /^docs\/LOCAL_EXPERIMENT_[^/]+\.md$/u
 for (const path of paths) {
   const absolute = resolve(root, path)
   const info = await lstat(absolute).catch(e => { if (e.code !== 'ENOENT') throw e })
@@ -20,6 +21,7 @@ for (const path of paths) {
   if (!info.isFile()) { problems.push({ path, reason: 'source entry is not a regular file' }); continue }
   if (forbidden.test(path) && path !== '.env.example') problems.push({ path, reason: 'private/runtime file selected for Git' })
   if (internal.test(path)) problems.push({ path, reason: 'local reference or internal working record selected for Git' })
+  if (localExperiment.test(path)) problems.push({ path, reason: 'local experiment record selected for Git' })
   if (info.size > 50 * 1024 * 1024) problems.push({ path, reason: 'file exceeds 50 MiB source limit' })
   const bytes = await readFile(absolute)
   if (!bytes.includes(0) && secret.test(bytes.toString('utf8'))) problems.push({ path, reason: 'credential-shaped value; inspect locally (value withheld)' })

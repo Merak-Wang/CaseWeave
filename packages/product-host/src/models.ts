@@ -1,3 +1,4 @@
+import type {} from '@retrieval-agent/dsh-compat'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -8,7 +9,7 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { RetrievalError } from '@retrieval-agent/contracts'
 
-const NS = 'llm-pi-ai'
+const NS = 'retrieval-llm-pi-ai'
 const ENDPOINT = '/api/retrieval-agent/models'
 const invalid = (message: string): never => { throw new RetrievalError('INVALID_REQUEST', message) }
 
@@ -22,7 +23,7 @@ export class WorkbenchModels {
     if (selection) { await this.validateSelection(selection, agent); return selection }
     let saved: ModelSelection | undefined
     for (const e of agent.session.snapshotEvents()) {
-      if (e.type !== 'user/message' || e.data.source.kind !== 'plugin' || e.data.source.plugin !== 'retrieval-agent-models' || e.data.source.form !== 'snapshot') continue
+      if (e.type !== 'user/message' || (e.data.source.kind !== 'retrieval-agent' && e.data.source.kind !== 'plugin') || e.data.source.plugin !== 'retrieval-agent-models' || e.data.source.form !== 'snapshot') continue
       const section = e.data.source.sections.find(s => s.name === 'model-selection')
       if (section) saved = JSON.parse(section.text) as ModelSelection
     }
@@ -56,7 +57,7 @@ export class WorkbenchModels {
     this.notices.set(agent, old ? `原模型 ${old.provider}/${old.model} 已不在可用配置中。${selection.current ? '后续步骤使用当前默认模型。' : '请在模型设置中选择可用模型后继续。'}` : '请先选择可用模型。')
   }
   private descriptor() {
-    const descriptor = this.ctx.settings.describe().find(d => d.ns === NS)
+    const descriptor = this.ctx.settings.describe().find(d => d.ns === NS) ?? this.ctx.settings.describe().find(d => d.ns === 'llm-pi-ai')
     if (!descriptor) throw new RetrievalError('PROVIDER_UNAVAILABLE', '模型设置服务尚未就绪。', { retryable: true })
     return descriptor
   }
@@ -94,7 +95,7 @@ export class WorkbenchModels {
     if (v.api !== undefined && v.api !== '' && !supportedProtocols().includes(String(v.api))) invalid('此 API 协议不在当前 DSH 支持列表中。')
     if (v.apiKey !== undefined && (typeof v.apiKey !== 'string' || /[\r\n]/.test(v.apiKey) || v.apiKey.length > 8192)) invalid('API 密钥格式无效。')
     if (v.action === 'discover') {
-      return { models: await this.ctx.llm.discoverModels(NS, { provider,
+      return { models: await this.ctx.llm.discoverModels(this.descriptor().ns, { provider,
         ...(v.baseURL ? { baseURL: String(v.baseURL) } : {}), ...(v.api ? { api: String(v.api) } : {}),
         ...(v.apiKey ? { apiKey: String(v.apiKey) } : {}) }, AbortSignal.timeout(20000)) }
     }
@@ -122,7 +123,7 @@ export class WorkbenchModels {
       // Validate the same complete provider declaration DSH will consume, before storing credentials.
       ProviderConfig(structuredClone({ providers: { ...profiles, [provider]: profile } }))
       if (apiKey) await this.ctx.credentials.set(credentialRef(ref), apiKey)
-      await this.ctx.settings.update(NS, { providers: { [provider]: profile } }, descriptor.revision)
+      await this.ctx.settings.update(descriptor.ns, { providers: { [provider]: profile } }, descriptor.revision)
     }
     if (!(await this.available({ provider, model }))) invalid('该模型不在当前供应商配置中，请先保存有效模型 ID。')
     const info = await this.ctx.llm.resolveModelInfo(provider, model)
@@ -130,7 +131,7 @@ export class WorkbenchModels {
     if (effort && !info.reasoning?.efforts.some(e => e.id === effort)) invalid('该模型不支持此推理档位。')
     const selection = { provider, model, ...(effort ? { reasoningEffort: ReasoningEffortId(effort) } : {}) }
     if (agent) {
-      agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent-models', form: 'snapshot',
+      agent.session.append('user/message', createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent-models', form: 'snapshot',
         sections: [{ name: 'model-selection', text: JSON.stringify(selection) }] },
         content: [{ type: 'text', text: `后续检索步骤使用模型 ${provider}/${model}，继续遵循当前任务要求。` }] }), { surfaceOp: 'append' })
       ;(await this.bind(agent)).current = selection

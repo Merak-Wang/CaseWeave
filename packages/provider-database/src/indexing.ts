@@ -7,6 +7,7 @@ import { MilvusClient } from './milvus.js'
 /** Immutable collections + SQL publication fence. Checkpoint only after Milvus acknowledges an idempotent upsert. */
 export async function buildIndex(db: TicketDatabase, milvus: MilvusClient, model: RetrievalModelGateway, generation: string,
   identity: EmbeddingIdentity, options: { signal?: AbortSignal; onProgress?: (completed: number, total: number) => void; batchSize?: number } = {}): Promise<string> {
+  if(identity.documentProjection==='canonical-title-abstract-v1' && (identity.chunkVersion!=='canonical-title-abstract-codepoints-v1' || !identity.queryInstruction?.trim() || identity.pooling!=='last_token')) throw new TypeError('Canonical publication requires versioned chunks, pinned query instruction and pooling')
   const source = await db.generation(generation)
   async function* chunkPages() {
     let cursor = ''
@@ -15,7 +16,7 @@ export async function buildIndex(db: TicketDatabase, milvus: MilvusClient, model
       const rows = await db.rows<{ ticket_id: string; record_json: import('@retrieval-agent/contracts').NormalizedTicketRecord }>(
         'SELECT ticket_id,record_json FROM ra_ticket WHERE generation=? AND ticket_id>? ORDER BY ticket_id LIMIT 256', [generation, cursor])
       if (!rows.length) return
-      yield rows.flatMap(row => ticketChunks(row.record_json, identity.chunkChars))
+      yield rows.flatMap(row => ticketChunks(row.record_json, identity.chunkChars, identity.documentProjection))
       cursor = rows.at(-1)!.ticket_id
     }
   }
@@ -32,7 +33,7 @@ export async function buildIndex(db: TicketDatabase, milvus: MilvusClient, model
     ownsLock = true
     await db.pool.query('INSERT IGNORE INTO ra_index(id,generation,collection_name,identity_json,status,total_chunks,watermark) VALUES (?,?,?,?,?,?,?)', [id, generation, collection, JSON.stringify(identity), 'building', totalChunks, source.source_watermark])
     await milvus.ensureCollection(collection, identity)
-    const cacheIdentity = sha256(stableJson({ model: identity.model, revision: identity.revision, dimensions: identity.dimensions, normalization: identity.normalization, inputType: 'document' }))
+    const cacheIdentity = sha256(stableJson({ model: identity.model, revision: identity.revision, dimensions: identity.dimensions, normalization: identity.normalization, pooling:identity.pooling??'last_token', projection:identity.documentProjection??'ticket-search-projection-v1', chunkVersion:identity.chunkVersion, chunkChars:identity.chunkChars, queryInstruction:identity.queryInstruction??'manifest-default-v1', inputType: 'document' }))
     let count = Number((await db.rows<{ n: number }>('SELECT COUNT(*) n FROM ra_index_checkpoint WHERE index_id=?', [id]))[0]!.n)
     const batchSize = options.batchSize ?? 16
     for await (const chunks of chunkPages()) {

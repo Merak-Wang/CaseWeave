@@ -25,5 +25,6 @@ export function candidateEvidence(state: RetrievalState, candidateRef: string) {
   }
   return { candidateRef, displayId: candidate.displayId, sourceVersion: candidate.sourceVersion, contentHash: candidate.contentHash,
     inputGeneration: state.inputGeneration ?? 0, current: state.candidates.some(c => c.ref === candidateRef), judgment: judgment ? { verdict: judgment.verdict, reason: judgment.reason, basis: judgment.basis ?? 'model' } : null,
+    confidence: judgment?.confidence ?? null,
     inference: judgment?.operatorInference ?? null, citationCount: citations.length, citations: citations.slice(0, 30) }
 }

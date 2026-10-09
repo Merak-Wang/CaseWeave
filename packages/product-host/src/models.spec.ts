@@ -1,8 +1,13 @@
 import { createServer } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
-import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import SettingsForms from '@deepseek-ai/dsh-settings'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { resolve, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { randomUUID } from 'node:crypto'
 import { CredentialProvider, type CredentialRef, type CredentialRecord } from '@deepseek-ai/dsh-credentials'
-import DefaultModel from '@deepseek-ai/dsh-agent-default-model'
 import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, it, expect } from 'vitest'
@@ -11,12 +16,6 @@ import { WorkbenchModels } from './models.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { inject as hostInject } from './index.js'
 
-class Settings extends SettingsProvider {
-  readonly writable = true
-  readonly saved: Record<string, unknown> = {}
-  protected async load() { return this.saved }
-  protected async persist(ns: SettingsNamespace, section: Record<string, unknown>) { this.saved[ns] = section }
-}
 class Credentials extends CredentialProvider {
   private values = new Map<string, string>()
   async resolve(ref: CredentialRef) { const value = this.values.get(ref); return value ? { value, source: 'fixture' } : undefined }
@@ -43,10 +42,30 @@ describe('workbench settings through native DSH provider configuration', () => {
     await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
     const baseURL = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`
     const ctx = new Context()
+    const directory = resolve('.cache/semantic-operators/settings-probes', randomUUID()), home = join(directory, 'home')
+    await mkdir(home, { recursive: true })
+    const patchPath = join(directory, 'cordis.patch.yml'), basePath = join(directory, 'base.yml')
+    await writeFile(join(directory, 'package.json'), JSON.stringify({ name: 'settings-fixture', version: '0.0.0',
+      exports: { './package.json': './package.json' }, dsh: { profile: { bundles: ['settings-fixture'] }, bundle: { patch: 'bundle.patch.yml' } } }))
+    await writeFile(patchPath, '[]\n')
+    const require = createRequire(import.meta.url), settingsRequire = createRequire(require.resolve('@deepseek-ai/dsh-settings'))
+    const editorPath = settingsRequire.resolve('@deepseek-ai/dsh-config-editor')
+    const { mountRootInclude, readProfilePatches } = await import(pathToFileURL(createRequire(editorPath).resolve('@deepseek-ai/dsh-app-boot')).href)
+    await writeFile(basePath, '[]\n')
+    await writeFile(join(directory, 'bundle.patch.yml'), JSON.stringify([
+      { id: 'agent-default-model', insert: true, name: pathToFileURL(require.resolve('@deepseek-ai/dsh-agent-default-model')).href, config: { provider: 'opencode-test', model: 'fixture' } },
+      { id: 'retrieval-llm-pi-ai', insert: true, name: pathToFileURL(resolve('packages/dsh-compat/lib/opencode-pi-ai.js')).href, config: { providers: { 'opencode-test': { baseURL, api: 'openai-completions', headers: { 'x-custom': 'kept' }, models: [{ id: 'fixture', contextWindow: 8192, maxTokens: 1024 }] } } } },
+    ]))
     try {
-      await ctx.plugin(Settings); await ctx.plugin(Credentials); await ctx.plugin(LlmRuntime)
-      await ctx.plugin(DefaultModel, { provider: 'opencode-test', model: 'fixture' })
-      await ctx.plugin(compatibility, { providers: { 'opencode-test': { baseURL, api: 'openai-completions', headers: { 'x-custom': 'kept' }, models: [{ id: 'fixture', contextWindow: 8192, maxTokens: 1024 }] } } })
+      ctx.baseUrl = pathToFileURL(resolve('packages/product-host')+'/').href
+      await ctx.plugin(Loader); await ctx.plugin(Credentials); await ctx.plugin(LlmRuntime)
+      const profile = { dir: directory, home, patchPath, installAnchor: join(directory, 'package.json'), overlays: [] }
+      ctx.reflect.provide('profileContext' as never, profile as never)
+      await ctx.plugin((await import(pathToFileURL(editorPath).href)).default)
+      await ctx.plugin(SettingsForms)
+      await mountRootInclude(ctx, basePath, readProfilePatches('dsh', profile), ctx.baseUrl)
+      await ctx.loader.await()
+      expect(ctx.agentDefaultModel, JSON.stringify([...ctx.loader.entries()].map(e => ({ id: e.options.id, state: e.fiber?.state })))).toBeDefined()
       for (const name of ['webServer', 'agents', 'agentPresets', 'workspaceRegistry']) ctx.reflect.provide(name as never, {} as never)
       let models!: WorkbenchModels
       await ctx.plugin({ name: 'model-settings-host-scope', inject: hostInject, apply(scope: Context) { models = new WorkbenchModels(scope) } })
@@ -68,7 +87,7 @@ describe('workbench settings through native DSH provider configuration', () => {
       expect(models.current(seeded)).toEqual({ provider: 'opencode-test', model: 'fixture' })
       expect((await models.view(seeded)).notice).toContain('供应商默认')
       await expect(models.update({ action: 'select', provider: 'opencode-test', model: 'removed-model' })).rejects.toThrow('不在当前')
-      expect(JSON.stringify((ctx.settings as Settings).saved)).not.toContain('fixture-secret')
+      expect(await readFile(patchPath, 'utf8')).not.toContain('fixture-secret')
       await expect(models.update({ action: 'save', provider: 'opencode-test', model: 'changed', revision: before.revision })).rejects.toThrow('配置已更新')
       const request = { ...after.selected, sessionId: SessionId('model-settings-session'), messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text' as const, text: 'hello' }] })] }
       const chunks = []; for await (const chunk of ctx.llm.stream(request)) chunks.push(chunk)

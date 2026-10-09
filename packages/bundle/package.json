@@ -22,6 +22,10 @@
       "types": "./lib/opencode-pi-ai.d.ts",
       "default": "./lib/opencode-pi-ai.js"
     },
+    "./preset": {
+      "types": "./lib/preset.d.ts",
+      "default": "./lib/preset.js"
+    },
     "./provider": {
       "types": "./lib/provider.d.ts",
       "default": "./lib/provider.js"
@@ -52,6 +56,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "yaml": "2.9.0",
     "@retrieval-agent/agent-plugin": "workspace:*",
     "@retrieval-agent/contracts": "workspace:*",
     "@retrieval-agent/domain": "workspace:*",
@@ -66,18 +71,18 @@
     "@deepseek-ai/schemastery": "3.18.2"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-persona": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-compaction-basic": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.1.5-rc.2",
-    "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-agent-presets": "0.1.5-rc.2"
+    "@deepseek-ai/dsh-persona": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction-basic": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.2.0-rc.2",
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-agent-preset": "0.2.0-rc.2"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-persona": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-compaction-basic": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.1.5-rc.2",
-    "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-agent-presets": "0.1.5-rc.2"
+    "@deepseek-ai/dsh-persona": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction-basic": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.2.0-rc.2",
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-agent-preset": "0.2.0-rc.2"
   },
   "publishConfig": {
     "access": "public"

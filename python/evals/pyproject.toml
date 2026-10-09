@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "External deterministic evaluation contracts and scorers for CaseWeave"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["httpx==0.28.1", "inspect-ai==0.3.263"]
+dependencies = ["httpx==0.28.1", "inspect-ai==0.3.263", "numpy>=2.2,<3", "pymongo>=4.10,<5", "scikit-learn>=1.7,<2", "scipy>=1.15,<2", "transformers==4.57.6"]
+
+[project.scripts]
+caseweave-eval-hybrid = "retrieval_agent_evals.hybrid:main"
+caseweave-eval-teacher = "retrieval_agent_evals.teacher:main"
+caseweave-eval-methods = "retrieval_agent_evals.run_methods:main"
 
 [dependency-groups]
 dev = ["pytest==8.4.2"]

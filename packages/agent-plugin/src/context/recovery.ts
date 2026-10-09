@@ -19,7 +19,7 @@ export function contextCompressionStats(agent: Agent): ContextCompressionStats {
   for (const e of agent.session.snapshotEvents()) {
     if (e.type === 'compaction/start') dshActive = true
     if (e.type === 'compaction/end') { dshActive = false; if (e.data.error) dshFailures++; else dshCount++ }
-    if (e.type !== 'user/message' || e.data.source.kind !== 'plugin' || e.data.source.plugin !== 'retrieval-agent' || e.data.source.form !== 'snapshot') continue
+    if (e.type !== 'user/message' || (e.data.source.kind !== 'retrieval-agent' && e.data.source.kind !== 'plugin') || e.data.source.plugin !== 'retrieval-agent' || e.data.source.form !== 'snapshot') continue
     const note = e.data.source.sections.find(s => s.name === 'retrieval-agent:compaction')
     if (!note) continue
     const details = e.data.source.sections.find(s => s.name === 'retrieval-agent:compaction-details')
@@ -42,7 +42,8 @@ export function isContextOverflow(code: string, message: string): boolean {
 }
 
 export function requestTokens(ctx: Context, options: GenerateOptions): number {
-  return options.messages.reduce((sum, message) => sum + ctx.tokenMeter.estimateMessage(message), 0)
+  return options.messages.reduce((sum, message) => sum + ctx.tokenMeter.estimateMessage(message.role === 'user' && !message.id
+    ? createUserMessage({ source: message.source ?? { kind: 'user' }, content: message.content }) : message as import('@deepseek-ai/dsh-llm').Message), 0)
     + estimateContextTokens(JSON.stringify({ system: options.system, tools: options.tools }))
 }
 
@@ -67,7 +68,7 @@ export function installContextRecovery(ctx: Context, owner: {
     const rendered = await owner.render(agent, budget)
     compactRetrievalSurface(agent, { freshTurn: true })
     const note = `上下文已自动压缩；原始轨迹与证据仍完整保存。根据下列权威任务状态继续完成检索，旧来源可按别名重新读取。\n${rendered}`
-    agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot',
       sections: [{ name: 'retrieval-agent:compaction', text: note }, { name: 'retrieval-agent:compaction-details',
         text: JSON.stringify({ reason, beforeTokens: previous.input, thresholdTokens: Math.floor(previous.limit * .85), limit: previous.limit, at: new Date().toISOString() }) }] }, content: [{ type: 'text', text: note }] }), { surfaceOp: 'append' })
     attempts.set(agent, { ...previous, budget, count: previous.count + 1 })

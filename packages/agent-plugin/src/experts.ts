@@ -81,7 +81,7 @@ export class ExpertCoordinator {
       compactRetrievalSurface(agent, { contextWindow: agent.session.requestContext()?.contextWindow ?? application.modelContextTokenLimit(branch.parent) ?? 32000 })
       // Errors do not contain a source window. Rebuild from this branch's durable cursor on every model step.
       const rendered = await this.context(branch)
-      return { kind: 'enter' as const, messages: [createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
+      return { kind: 'enter' as const, messages: [createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot',
         sections: [{ name: 'retrieval-agent:expert-state', text: rendered }] }, content: [{ type: 'text', text: rendered }] })] }
     }, { prepend: true, global: true })
     ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
@@ -122,7 +122,7 @@ export class ExpertCoordinator {
       this.repeatedReplies.set(agent, { reply, count })
       if (count >= 3) return
       const text = '尚未提交专家产物。用 ticket_expert 补证或搜索，完成后 report 提交 judgments、semantic_gaps、next_action。'
-      agent.inject(createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
+      agent.inject(createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot',
         sections: [{ name: 'retrieval-agent:expert-repair', text }] }, content: [{ type: 'text', text }] }))
     })
     installContextRecovery(ctx, { owns: agent => this.bindings.has(agent),

@@ -225,7 +225,7 @@ export class WikiLearningService {
     const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(120000)])
     const request: GenerateOptions = { provider: config.provider, model: config.model,
       sessionId: SessionId(`wiki-${job.id}-${stage}`), signal: requestSignal, maxTokens: 3000, system: POLICY,
-      tools: [tool], messages: [createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
+      tools: [tool], messages: [createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot',
         sections: [{ name: `wiki-learning:${stage}`, text: JSON.stringify(data) }] }, content: [{ type: 'text', text: JSON.stringify(data) }] })] }
     const measured = estimateContextTokens(JSON.stringify({ system: request.system, tools: request.tools, messages: request.messages }))
     const limit = Math.min(agent.session.requestContext()?.contextWindow ?? 32000, this.application.maxContextTokens ?? 32000)

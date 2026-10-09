@@ -248,8 +248,12 @@ export class DurableRetrievalAgentService extends RetrievalAgentService {
     const p = await this.resolve(agent, 'search', signal); return this.execute(agent, (c, s) => c.applyUserFeedback(p, s, input, signal))
   }
   override async cancel(agent: Agent): Promise<RetrievalState> { return this.execute(agent, async (c, s) => c.stop(s, 'cancelled')) }
-  override async stopIncomplete(agent: Agent, explanation: string): Promise<RetrievalState> {
-    return this.execute(agent, async (c, s) => c.stopIncomplete(s, explanation))
+  override async stopIncomplete(agent: Agent, explanation: string, expected?: Pick<RetrievalState, 'retrievalId' | 'inputGeneration'>): Promise<RetrievalState> {
+    return this.execute(agent, async (c, s) => {
+      if (expected && (s.retrievalId !== expected.retrievalId || (s.inputGeneration ?? 0) !== (expected.inputGeneration ?? 0))) return s
+      if (s.phase === 'stopped' || s.phase === 'awaiting_clarification') return s
+      return c.stopIncomplete(s, explanation)
+    })
   }
   override async authorizePresentation(agent: Agent, id: RetrievalId, signal?: AbortSignal): Promise<RetrievalState> {
     const p = await this.resolve(agent, 'detail_read', signal)

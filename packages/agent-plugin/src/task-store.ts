@@ -7,7 +7,7 @@ import { RetrievalController, createRetrievalStatePatch, migrateProjectionState,
 import { ARTIFACT_DDL, externalizeArtifacts, hydrateArtifacts, artifactIdentities } from './artifact-store.js'
 import { SEMANTIC_RESULT_DDL, MySqlSemanticResultStore } from './semantic-result-store.js'
 
-export type TaskCommand = { kind: 'query'; text: string }
+export type TaskCommand = { kind: 'query'; text: string; execution?: import('@retrieval-agent/contracts').SemanticExecutionOptions }
   | { kind: 'supplement'; text: string; information: RetrievalClarificationAnswer }
   | { kind: 'feedback'; text: string; candidateRef: string; relevance: 'related' | 'unrelated' }
   | { kind: 'answer'; text: string; questionId: string; information: RetrievalClarificationAnswer }
@@ -18,7 +18,7 @@ export interface TaskRecord {
   input_revision: number; semantic_revision: number; query_revision: number;
   state_json: RetrievalState | null; failure: string | null; created_at: Date;
 }
-export interface TaskJob { id: string; task_id: string; kind: 'search' | 'agent' | 'page' | 'learn' | 'unlearn' | 'source_check'; input_revision: number;
+export interface TaskJob { id: string; task_id: string; kind: 'search' | 'agent' | 'fixed' | 'page' | 'learn' | 'unlearn' | 'source_check'; input_revision: number;
   fence: number; owner: string; attempts: number; status: string }
 export interface TaskEvent { seq: number; kind: string; data: unknown }
 export interface CommandReceipt { taskId: string; operationId: string; eventSeq: number; inputRevision: number; status: 'accepted' }
@@ -127,11 +127,11 @@ export class MySqlTaskStore {
     await c.query('INSERT IGNORE INTO ra_task_job(id,task_id,kind,input_revision,status) VALUES (?,?,?,?,?)',
       [randomUUID(), task.id, kind, task.input_revision, 'queued'])
   }
-  async create(id: string, sessionId: string, principal: TrustedPrincipalContext, text: string, operationId = id): Promise<CommandReceipt> {
+  async create(id: string, sessionId: string, principal: TrustedPrincipalContext, text: string, operationId = id, execution?: import('@retrieval-agent/contracts').SemanticExecutionOptions): Promise<CommandReceipt> {
     return this.transaction(async c => {
       await c.query('INSERT IGNORE INTO ra_task(id,session_id,owner_hash,original_query) VALUES (?,?,?,?)', [id, sessionId, taskOwner(principal), text])
       const task = await this.lock(c, id)
-      return this.accept(c, task, principal, operationId, { kind: 'query', text })
+      return this.accept(c, task, principal, operationId, { kind: 'query', text, ...(execution ? { execution } : {}) })
     })
   }
   async submit(id: string, principal: TrustedPrincipalContext, operationId: string, command: Exclude<TaskCommand, { kind: 'query' }>): Promise<CommandReceipt> {
@@ -189,7 +189,7 @@ export class MySqlTaskStore {
       const state = task.state_json
       const needsSearch = !state || (command.kind === 'resume' ? !state.lastPage
         : hard || !state.lastPage || state.searchProgress?.channels.some(channel => channel.status === 'running'))
-      await this.enqueue(c, task, needsSearch ? 'search' : 'agent')
+      await this.enqueue(c, task, needsSearch ? 'search' : state?.query.contract?.semanticExecution?.orchestration === 'fixed' ? 'fixed' : 'agent')
     }
     const receipt: CommandReceipt = { taskId: task.id, operationId, eventSeq: task.event_seq, inputRevision: task.input_revision, status: 'accepted' }
     await c.query('INSERT INTO ra_task_command(task_id,operation_id,request_hash,command_json,receipt_json) VALUES (?,?,?,?,?)',
@@ -301,11 +301,11 @@ export class MySqlTaskStore {
       if (task.input_revision !== job.input_revision) return
       await this.assertLease(c, job)
       const status = error ? retryable && job.attempts < 3 ? 'queued' : 'failed'
-        : job.kind === 'agent' && task.state_json?.phase === 'awaiting_clarification' ? 'waiting' : 'completed'
+        : ['agent', 'fixed'].includes(job.kind) && task.state_json?.phase === 'awaiting_clarification' ? 'waiting' : 'completed'
       await c.query('UPDATE ra_task_job SET status=?,error=?,lease_until=NULL,available_at=TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(3)) WHERE id=?', [status, error ?? null, job.kind === 'source_check' ? 60 : job.attempts, job.id])
       await this.append(c, task, `job/${status}`, { id: job.id, kind: job.kind, attempts: job.attempts, ...(error ? { error } : {}) })
       if (status === 'failed' && !['learn', 'unlearn', 'source_check'].includes(job.kind)) task.failure = error ?? '后台任务失败。'
-      if (status === 'completed' && job.kind === 'search' && task.state_json?.phase !== 'stopped') await this.enqueue(c, task, 'agent')
+      if (status === 'completed' && job.kind === 'search' && task.state_json?.phase !== 'stopped') await this.enqueue(c, task, task.state_json?.query.contract?.semanticExecution?.orchestration === 'fixed' ? 'fixed' : 'agent')
       if (status === 'waiting' && task.state_json?.lastPage?.nextCursor) await this.enqueue(c, task, 'page')
       await this.save(c, task)
     })

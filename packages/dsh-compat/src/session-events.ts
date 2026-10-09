@@ -16,7 +16,15 @@ import {
 const require = createRequire(import.meta.url)
 const sessionPackage = require('@deepseek-ai/dsh-session/package.json') as { readonly version?: unknown }
 
-export const PINNED_DSH_SESSION_VERSION = '0.1.5-rc.2' as const
+export const PINNED_DSH_SESSION_VERSION = '0.2.0-rc.2' as const
+
+declare module '@deepseek-ai/dsh-llm/message' {
+  interface MessageSourceMap {
+    'retrieval-agent': { kind: 'retrieval-agent'; plugin: string } & import('@deepseek-ai/dsh-llm').ContextFormed
+    /** 旧任务按原来源重放；新消息使用产品自己的 kind。 */
+    plugin: { kind: 'plugin'; plugin: string } & import('@deepseek-ai/dsh-llm').ContextFormed
+  }
+}
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {

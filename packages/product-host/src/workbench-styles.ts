@@ -87,6 +87,17 @@ svg { width: 19px; height: 19px; flex: none; stroke: currentColor; fill: none; s
 textarea { display: block; width: 100%; min-height: 80px; resize: vertical; border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--paper); line-height: 1.7; }
 textarea::placeholder { color: #9a9898; }
 .query-box textarea { min-height: 70px; max-height: 260px; resize: none; padding: 0; border: 0; border-radius: 0; font-size: 15px; background: transparent; outline: none; }
+.query-execution { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 14px; font-size: 12px; }
+.query-execution label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.query-execution input { accent-color: var(--accent); }
+.query-execution select { font: inherit; max-width: 100%; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
+.query-execution #semantic-method-note { flex-basis: 100%; }
+.online-model-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; flex-basis: 100%; }
+.online-model-controls[hidden] { display: none; }
+.online-model-bank { flex-basis: 100%; }
+.online-model-bank summary { cursor: pointer; color: var(--muted); }
+.online-model-bank fieldset { display: flex; flex-wrap: wrap; gap: 9px 14px; border: 0; margin: 8px 0 0; padding: 0; }
+.quality-grid .quality-reference { grid-column: 1 / -1; margin: 0; }
 .query-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; }
 .search-mode { display: inline-flex; align-items: center; gap: 7px; color: #747272; font-size: 12px; padding: 5px 9px; background: var(--soft); border-radius: 7px; }
 .search-mode svg { width: 14px; height: 14px; }

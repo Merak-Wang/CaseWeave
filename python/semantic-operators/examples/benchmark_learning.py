@@ -1,6 +1,7 @@
 """数值路径实验：memmap + 显式脚本 teacher，不是业务 Gold、真实 LLM 或 40M I/O 验收。"""
 import argparse
 import asyncio
+from contextlib import ExitStack
 import base64
 import json
 from pathlib import Path
@@ -13,9 +14,11 @@ from caseweave_ops import invoke_rows, records_from
 
 
 async def experiment(size, dimensions, kind):
-    with tempfile.TemporaryDirectory(prefix='caseweave-numeric-') as folder:
+    with tempfile.TemporaryDirectory(prefix='caseweave-numeric-') as folder, ExitStack() as cleanup:
         X = np.memmap(Path(folder)/'features.f32', mode='w+', dtype='<f4', shape=(size, dimensions))
+        cleanup.callback(X._mmap.close)
         predicted = np.memmap(Path(folder)/'labels.i1', mode='w+', dtype='i1', shape=(size,)); predicted[:] = -1
+        cleanup.callback(predicted._mmap.close)
         rng = np.random.default_rng(16)
         labels = rng.integers(0, 2, size, dtype=np.int8)
         for start in range(0, size, 2048):
@@ -51,9 +54,10 @@ async def experiment(size, dimensions, kind):
                 requests += 1
                 payload = json.loads(request['messages'][-1]['content'])
                 return ModelReply({'rows': [{'ref': r['ref'], 'label': 'accept' if labels[int(r['ref'])] else 'exclude',
-                    'reason': 'Synthetic script label', 'knowledge_ids': [], 'citations': [{'ref': r['ref'],
+                    'confidence': 1.0, 'reason': 'Synthetic script label', 'knowledge_ids': [], 'citations': [{'ref': r['ref'],
                     'passage_id': 'p', 'quote': r['passages'][0]['text']}]} for r in payload['records']]})
         store = ArtifactStore(':memory:')
+        cleanup.callback(store.close)
         runtime = Runtime(Scope('numeric-experiment', 1, 'synthetic', 'local'), Teacher(), store, Knowledge('empty'))
         runtime.resources = resource
         start = perf_counter()
@@ -62,13 +66,11 @@ async def experiment(size, dimensions, kind):
         tp = int(np.count_nonzero((predicted == 1) & (labels == 1)))
         returned, positives = int(np.count_nonzero(predicted == 1)), int(np.count_nonzero(labels == 1))
         summary = {k: v for k, v in updates[-1].items() if k not in ('_usage', 'training_ids', 'selection_ids', 'audit_ids')}
-        store.close()
         result = {'case': kind, 'rows': size, 'dimensions': dimensions, 'elapsed_seconds': elapsed,
                   'source_rows_read': len(set(reads)), 'script_teacher_requests': requests,
                   'actual_llm_calls': None, 'business_quality': None, 'mysql_io': None, '40M_cold_warm_io': None,
                   'synthetic_precision': tp/returned if returned else None, 'synthetic_recall': tp/positives if positives else None,
-                  'learning': summary}
-        del X, predicted
+                  'learning': summary, 'metering': store.metrics('numeric-experiment')}
         return result
 
 

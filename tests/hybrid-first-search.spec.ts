@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { type TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import { createTicketResultCollection } from '@retrieval-agent/domain/result'
 import { InMemoryRetrievalEventJournal, RetrievalController } from '@retrieval-agent/domain'
@@ -72,13 +72,15 @@ describe('fixed first-pass Hybrid retrieval', () => {
       piiRedactionStatus: 'redacted', language: 'zh',
       searchText: [title],
     })
+    const ranker = testHybridRanker()
+    const rank = vi.spyOn(ranker, 'rank')
     const provider = new LocalTicketProvider([
       ticket('ESFT-SUMMARY-TRAIN-024545', '副卡无法使用'),
       ticket('ESFT-SUMMARY-TRAIN-024546', '副卡无法使用'),
       ticket('TKT-0005', '副卡无法使用'),
     ], {
       now: () => NOW,
-      ranker: testHybridRanker(),
+      ranker,
       defaultMode: 'hybrid',
     })
     const request = await buildFastTicketRequest('查找工单 ESFT-SUMMARY-TRAIN-024545。', {
@@ -101,13 +103,18 @@ describe('fixed first-pass Hybrid retrieval', () => {
     expect(page.boundary).toMatchObject({
       authorizedCorpusSize: 3,
       documentsAfterStructuredFilters: 1,
-      documentsEligibleForKeywordChannel: 1,
+      documentsEligibleForKeywordChannel: 0,
     })
-    expect(page.trace.channels).toEqual(expect.arrayContaining([
-      expect.objectContaining({ channel: 'keyword', querySource: 'direct_user_keywords', resultCount: 1 }),
-      expect.objectContaining({ channel: 'vector', querySource: 'direct_user_original' }),
-    ]))
-    expect(page.candidates[0]?.matchSignals?.channels).toContain('keyword')
+    expect(rank).toHaveBeenCalledOnce()
+    const [rankedDocuments, rankingQuery] = rank.mock.calls[0]!
+    expect(rankedDocuments.map(document => document.id)).toEqual(['ESFT-SUMMARY-TRAIN-024545'])
+    expect(rankedDocuments[0]?.title).toBe('副卡无法使用')
+    expect(rankedDocuments[0]?.summary).toBe('副卡无法使用')
+    expect(rankingQuery).toMatchObject({ fastPath: true })
+    expect(rankingQuery.keywordQuery).toBeUndefined()
+    expect(page.trace.channels.map(channel => channel.channel)).toEqual(['vector'])
+    expect(page.trace.channels[0]).toMatchObject({ querySource: 'direct_user_original', resultCount: 1 })
+    expect(page.candidates[0]?.matchSignals?.channels).not.toContain('keyword')
   })
 
   it('keeps vector diagnostics separate while assessment selects the automatic Hybrid result collection', async () => {

@@ -10,13 +10,27 @@
       name: '@retrieval-agent/product-host'
       config:
         workspacePath: !!js dshHomePath('retrieval-agent', 'workspace')
-        taskPersistence: !!js "process.env.RETRIEVAL_AGENT_STORAGE === 'mysql_milvus' ? 'mysql' : 'session'"
+        taskPersistence: !!js "process.env.RETRIEVAL_AGENT_TASK_PERSISTENCE ?? (process.env.RETRIEVAL_AGENT_STORAGE === 'mysql_milvus' ? 'mysql' : 'session')"
     - id: retrieval-ticket-results-ui
       name: '@retrieval-agent/ui-ticket-results'
+    - id: retrieval-agent-preset
+      name: '@retrieval-agent/bundle/preset'
+      config:
+        path: !!js dshHomePath('.agent-presets', 'retrieval-agent', 'agent.cordis.yml')
 
-- id: agent-presets
+- id: agent-preset-registry
   config:
     default: retrieval-agent
+
+# 产品工作台只激活自己的预设，通用开发工具仍可由独立 DSH profile 使用。
+- id: preset-standard
+  disabled: true
+- id: preset-ptc
+  disabled: true
+- id: preset-minimal
+  disabled: true
+- id: preset-cordis
+  disabled: true
 
 # rc.2 receives GenerateOptions.sessionId but omits OpenCode's required routing header.
 # Reuse the upstream adapter/config/credentials through the version-bound compatibility facade.

@@ -226,6 +226,12 @@ def create_app(backend: Any, ranking_backend: RetrievalRankingBackend | None = N
         return {"protocolVersion": RAG_PROTOCOL_VERSION, "requestId": request_id,
                 **ranking_backend.read_feature_block(value.get("documents"), value.get("profile"))}
 
+    @app.post("/v1/ranking/query-anchors")
+    def query_anchors(value: dict[str, Any], request: Request) -> dict[str, Any]:
+        request_id = _request_id(value, request, RAG_PROTOCOL_VERSION)
+        return {"protocolVersion": RAG_PROTOCOL_VERSION, "requestId": request_id,
+                **ranking_backend.query_anchors(value.get("texts"),value.get("profile"))}
+
     @app.post("/v1/ranking/rank")
     async def rank(value: dict[str, Any], request: Request) -> dict[str, Any]:
         started = time.perf_counter()

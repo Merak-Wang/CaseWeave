@@ -76,6 +76,21 @@
     "typescript": "6.0.3",
     "vite": "8.2.2",
     "vitest": "4.1.8",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "@deepseek-ai/dsh-attachment": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-authorization": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-commands": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-fs": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-home-paths": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-invariants": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm-retry": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-sandbox": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-storage": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-storage-domain": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-subagent-in-process-driver": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-user-approval": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-util-time": "0.2.0-rc.2",
+    "@deepseek-ai/cordis-plugin-include": "1.0.9"
   }
 }

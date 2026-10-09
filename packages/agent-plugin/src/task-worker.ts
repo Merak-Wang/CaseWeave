@@ -6,19 +6,24 @@ import type { DurableRetrievalAgentService } from './durable-service.js'
 import type { TaskJob } from './task-store.js'
 import { compactRetrievalSurface } from './context/surface.js'
 import { modelFailure } from './model-failure.js'
+import { runFixedRetrieval } from './fixed-retrieval.js'
 
 /** Drives the installed DSH loop. Page connections and subscriptions never own this lifetime. */
 export async function executeTaskJob(application: DurableRetrievalAgentService, agent: Agent, job: TaskJob,
   analyzer: TicketQueryAnalyzer, signal: AbortSignal): Promise<void> {
   await application.withJob(agent, job, async () => {
     const runOperators = async () => {
-      try { await application.operators!.searchAndFilter(agent, signal) }
+      const expected = application.currentOrUndefined(agent)
+      try {
+        if (application.currentOrUndefined(agent)?.query.contract?.semanticExecution?.orchestration === 'fixed') await runFixedRetrieval(application, agent, signal)
+        else await application.operators!.searchAndFilter(agent, signal)
+      }
       catch (error) {
         // 请求重试耗尽后明确保存未完成终态；取消与旧代次继续由原作业栅栏处理。
         if (!signal.aborted && error instanceof RetrievalError && !error.retryable
           && (error.cause as { modelFailure?: unknown } | undefined)?.modelFailure
           && application.currentOrUndefined(agent)?.phase !== 'stopped') {
-          await application.stopIncomplete(agent, error.publicMessage)
+          await application.stopIncomplete(agent, error.publicMessage, expected)
         }
         throw error
       }
@@ -43,9 +48,11 @@ export async function executeTaskJob(application: DurableRetrievalAgentService, 
       if (!application.operators && job.attempts > 1 && current?.lastPage && current.phase !== 'snapshot_opened'
         && current.termination !== 'backend_error' && !current.searchProgress?.channels.some(c => c.status === 'running')) return
       const query = current ? undefined : (await application.store.rows<{ original_query: string }>('SELECT original_query FROM ra_task WHERE id=?', [job.task_id]))[0]
+      const queryCommand = current ? undefined : (await application.store.commands(job.task_id)).find(command => command.kind === 'query')
+      const execution = queryCommand?.kind === 'query' ? queryCommand.execution : undefined
       const state = current ? application.operators && current.phase !== 'snapshot_opened' && current.termination !== 'backend_error'
         ? (await application.ensureModelAccess(agent, signal))! : await application.refresh(agent, signal)
-        : await application.start(agent, application.operators ? buildSemanticTicketRequest(query!.original_query)
+        : await application.start(agent, application.operators ? buildSemanticTicketRequest(query!.original_query, execution)
           : await buildFastTicketRequest(query!.original_query, { analyzer, signal }), signal)
       if (state.termination === 'backend_error') throw new RetrievalError('PROVIDER_UNAVAILABLE', state.stopExplanation ?? '检索来源暂时不可用。', { retryable: true })
       if (application.operators) await runOperators()
@@ -53,6 +60,10 @@ export async function executeTaskJob(application: DurableRetrievalAgentService, 
     }
     const state = await application.ensureModelAccess(agent, signal)
     if (!state || state.phase === 'stopped') return
+    if (state.query.contract?.semanticExecution?.orchestration === 'fixed') {
+      await runOperators()
+      return
+    }
     if (application.operators && state.phase !== 'awaiting_clarification') {
       await runOperators()
     }
@@ -80,7 +91,7 @@ export async function executeTaskJob(application: DurableRetrievalAgentService, 
     const previousEvents = agent.session.snapshotEvents().length
     const detachFailure = agent.ctx.on('agent/request-error', (event, next) => { failed = event.failure; return next() })
     try {
-      agent.followup(createUserMessage({ source: { kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
+      agent.followup(createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot',
         sections: [{ name: 'retrieval-agent:state', text: selection.rendered }] }, content: [{ type: 'text', text: selection.rendered }] }))
       await agent.whenIdle()
       signal.throwIfAborted()

@@ -24,7 +24,7 @@ const DDL = [
 ]
 export interface Generation { id: string; dataset_id: string; status: string; record_count: number; fields_json: QueryFieldCapability[]; grams_ready: number; source_watermark: string }
 export interface IndexGeneration { id: string; generation: string; collection_name: string; identity_json: EmbeddingIdentity; status: string; total_chunks: number; completed_chunks: number; watermark: string }
-export interface EmbeddingIdentity { model: string; revision: string; dimensions: number; normalization: 'l2'; metric: 'COSINE'; chunkChars: number; chunkVersion: 'field-codepoints-v3' }
+export interface EmbeddingIdentity { model: string; revision: string; dimensions: number; normalization: 'l2'; metric: 'COSINE'; chunkChars: number; chunkVersion: 'field-codepoints-v3' | 'canonical-title-abstract-codepoints-v1'; documentProjection?: 'ticket-search-projection-v1' | 'canonical-title-abstract-v1'; queryInstruction?: string; pooling?: 'last_token' }
 export class TicketDatabase {
   readonly pool: Pool
   readonly #searchLocks: Pool

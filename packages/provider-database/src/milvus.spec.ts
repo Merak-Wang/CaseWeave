@@ -20,7 +20,7 @@ it('bounds concurrent filtered searches, merges ticket scores and honours cancel
   await expect(client.search('test', [1], ['1'], 2, abort.signal)).rejects.toThrow()
 })
 
-it('unions Top 15 with every score strictly above .75, paging in hundreds', async () => {
+it('includes every score at least .75 without a Top-K floor, paging in hundreds', async () => {
   const client = new MilvusClient()
   let scores = Array.from({ length: 280 }, (_, i) => i < 260 ? .99 - i * .0008 : .75)
   const pages: number[] = []
@@ -31,10 +31,10 @@ it('unions Top 15 with every score strictly above .75, paging in hundreds', asyn
   }
   async function* batches() { yield Array.from({ length: 280 }, (_, i) => String(i)) }
   const hits = await client.searchBatches('test', [1], batches(), 15, undefined, .75)
-  expect(hits).toHaveLength(260)
+  expect(hits).toHaveLength(280)
   expect(pages).toEqual([0, 100, 200])
   scores = Array.from({ length: 280 }, (_, i) => i < 5 ? .9 : .75 - i * .001)
-  expect(await client.searchBatches('test', [1], batches(), 15, undefined, .75)).toHaveLength(15)
+  expect(await client.searchBatches('test', [1], batches(), 15, undefined, .75)).toHaveLength(5)
   scores = [.9, .8, .75]
   expect(await client.searchBatches('test', [1], batches(), 15, undefined, .75)).toHaveLength(3)
 })

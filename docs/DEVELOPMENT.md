@@ -1,20 +1,30 @@
 # 开发与运行
 
+## 三服务 GPU 试用
+
+`start.cmd --trial` 使用本地 `local.env.trial` 和 `config/app/compose.trial.yml`，显式指定独立项目 `caseweave-trial`。首次启动及日常启动都会构建更新 app、model-service，再启动 app、model-service、MySQL 三个服务；不下载示例工单、不启动 Milvus。Python 3.12 算子以常驻 stdio worker 运行在应用容器内。完整 MySQL/Milvus 部署继续使用不带 `--trial` 的原入口。
+
+配置需给定已授权的 JSONL 路径 `CASEWEAVE_TRIAL_DATA`、已有模型权重卷 `CASEWEAVE_TRIAL_MODEL_VOLUME` 及模型供应商配置。工单数据只读挂载，任务持久化在独立 MySQL 卷，关闭浏览器不会取消后台任务。`CASEWEAVE_TRIAL_SOURCE_LABEL` 在工作台标明实际数据范围；标题摘要试用文件不提供原文，不能将其称为完整工单证据。默认工作台地址是 `http://127.0.0.1:3080/retrieval`，可通过 `RETRIEVAL_AGENT_WEB_PORT` 调整。
+
+此 Compose 是 NVIDIA GPU 配置；CPU 部署需移除 GPU device reservation 并改模型设备，不能仅设置 CPU 环境变量。默认启用并持久化自动 Wiki 学习；公平对照实验可显式设 `RETRIEVAL_AGENT_WIKI_LEARNING=0`，须注明知识被冻结。独立卷与项目名避免恢复其他项目的历史模型任务。
+
+标题摘要试用的 JSONL 应保留工单身份、title、summary 和真实来源元数据，正文及对话为空，不用摘要伪造正文。另保存的完整原文文件可供后续按身份读取，但不会被本试用自动加载；切回完整数据前需要相应 Provider 和运行验收。工作台提交原始业务问题后，可比较在线学习与无反馈选项；相似度阈值是 cosine >= 0.75，不设 Top-K 保底，关键词 OR 命中仍全部枚举。模型自报置信度不是校准准确率；结果直接交付所选方法判定为是的工单及 XLSX，无需人工确认。运行失败如实显示未完成，已计算结果与完整交付分别呈现。
+
 ## Python 算子服务
 
 完整 Compose 部署包含内部 `semantic-operators` FastAPI 服务。源码开发可直接使用默认常驻 stdio worker，也可先运行 `pnpm operators:serve --port 8013`，再向 Node 进程设置 `CASEWEAVE_OPERATORS_URL=http://127.0.0.1:8013`。健康检查为 `/health`，内部 WebSocket 为 `/v1/operators`；浏览器不直接调用算子。已有安装好的 Python 可通过 `CASEWEAVE_PYTHON` 指定，需安装 `python/semantic-operators` 的锁定依赖。
 
 `pnpm operators:test` 运行 Python 验收。uv 的 `--inexact` 保留已有模型依赖，不删除环境内其他包。算子不重新下载模型权重，embedding/rerank 继续复用既有模型服务。模型供应商和凭据仍配置在 DSH；共享服务令牌用 `CASEWEAVE_OPERATORS_TOKEN` 同时配置服务和 Node，避免放进 URL。算子设计与计量定义见 [Python 算子](design/OPERATORS.md)。
 
-默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 的学习与预测范围是关键词 OR 宽召回全部命中和语义召回结果按工单身份去重后的并集，不包含未进入该召回并集的授权工单。Provider 为并集内对齐 ID 提供连续数值块；共享样本拟合 LR/SVM/MLP/HGB，选择集 P/R 达标后预测并集；未达标时用选择集 F1 最好的已训练模型，查准率低于 60% 则返回“不知道”及已确认工单。关键词命中仍需完整枚举，语义分支按检索配置召回。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。缺特征与已有未决项保持未知，不自动逐条强判。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验与显式旧 baseline 命令见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
+默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 的学习与预测范围是关键词 OR 宽召回全部命中和语义召回结果按工单身份去重后的并集，不包含未进入该召回并集的授权工单。Provider 为并集内对齐 ID 提供连续数值块；固定排序前128条由S2生成yes/no＋confidence伪标签，拟合LR/SVM/MLP/HGB/反馈原型/关系LR，以训练内交叉验证择优并二分类投票预测其余候选。关闭学习时无反馈算法直接判断候选并集。最终是集合直接进入结果和XLSX，不等待人工确认，不做二次教师复核、不扩标至1024，也不设置60%发布门槛。关键词命中仍需完整枚举，语义分支按检索配置召回。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。教师与投票只输出yes/no，低confidence不弃权；传输/解析/缺特征是技术失败，不参与拟合或补成no。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验与显式旧 baseline 命令见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
 
 从旧版算法升级 Docker 部署时，运行 `start.cmd` 或 `bash setup.sh start`，自动构建并更新应用、算子和排名服务。旧算子镜像不认识新筛选参数时可能返回 `ProtocolError`。若旧数据库尚无数值特征，另执行 `docker compose exec app node scripts/database.mjs index --dataset=esft-development`，复用已有向量和索引检查点补齐；自定义数据集替换名称。已有安装的日常启动不自动重新导入数据或重建索引。
 
 学习启动前必须完成两路召回并取得 `recallScope`。召回中的进度可以先显示，正文分页游标不决定学习范围，也不需要逐页读完正文才训练；数值特征读取直接限定在 Provider 保存的完整并集。任一通道失败时保持未完成，不用部分召回或全库数据继续训练。空并集也不会回退到全部授权工单。
 
-语言模型标注的并发与每次样本数由 `RETRIEVAL_AGENT_FILTER_CONFIG` 配置。例如在 `.env` 设置 `RETRIEVAL_AGENT_FILTER_CONFIG={"batchSize":4,"options":{"concurrency":32,"precision_target":0.9,"recall_target":0.9}}`，表示最多同时执行 32 个样本判断请求，每个请求包含至多 4 条工单，并要求模型选择集的查准率/召回率均不低于 0.90；这是选择集经验指标，不是全库质量下界；尾批及命中复核可能少于 4 条。抽样初判和命中复核累计最多 128 次独立判断请求，自动重试不重复占用额度，续跑共用额度；此配置不能提高累计上限，也不改变 Agent 证据窗口或分类器训练并行度。修改后执行 `docker compose up -d --no-deps --wait app`，未取消的后台任务在原任务内恢复。
+语言模型标注的并发与每次样本数由 `RETRIEVAL_AGENT_FILTER_CONFIG` 配置，例如 `{"batchSize":8,"options":{"concurrency":4}}` 表示每请求最多8条工单、最多4个并发请求。标注范围固定为召回并集排序前128条，批大小和并发不改变工单数，不追加命中复核或补充选择标签。原precision_target/recall_target可用于研究记录，不作为阻止结果发布的门槛。实际请求、失败、重试和用量如实计量。
 
-选择样本覆盖不足时，后续筛选复用同一查询、来源及配置下召回并集中的有界排序 ID 池、已判断标签和已训练模型，只补充独立选择样本；训练标签更正后重新拟合。原文及证据要求未变化的未决样本沿用原结论，不重复请求模型。工作台显示复用与续补进度。批量判断可减少请求和重复提示开销，实际费用仍取决于训练/选择样本正文及命中复核数量；预测范围仍是当前召回并集。
+恢复筛选复用相同查询、来源与特征配置下已经完成的固定128工单伪标签，只继续尚未完成的工作，不主动扩标、不更换低置信样本。单类标签使用真实常量回退并说明不能学习正负边界，不造标签。技术失败保留具体原因，不填第三类。批量判断减少重复提示，预测范围仍是完整召回并集。
 
 完整容器部署适合单机试用；源码入口供开发、集成与排障使用。产品概览见 [README](../README.md)，测试范围见 [评测与验收](EVALUATION_STRATEGY.md)。
 
@@ -79,7 +89,7 @@ docker compose up -d --wait app
 
 .env 的模型配置只作为启动种子；相同配置的重启不会覆盖页面里保存的设置。修改环境中的模型种子可显式更新默认值。首次升级会建立种子指纹；后续设置沿 DSH 私有状态卷保存。
 
-恢复任务时会核对保存的模型是否仍在当前 Provider 配置中。已失效的选择改用当前有效默认模型并显示说明；没有有效默认值时要求在模型设置中选择后继续。主 Agent 与语义算子共用当前选择。查询规划和语义算子遇到连接中断、超时、临时限流、服务端错误，或模型 JSON 结构缺少必填字段/不符合输出 schema（`OUTPUT_SCHEMA`）时，只对失败的逻辑请求最多进行三次实际尝试，默认退避 1 秒、2 秒；供应商返回等待时间时优先等待较长值，单次等待最多 30 秒，取消可立即打断。凭据无效、模型不存在和额度耗尽不自动重试；引用身份、证据与业务规则校验仍严格执行，不因结构错误重试而放宽，也不自动重试整个检索作业。每次尝试独立计量，同一筛选请求的自动重试不重复占用同代次 128 次额度；重试耗尽后明确显示未完成并保留已确认结果。最终报告仍遵循单次生成、失败后显式重试的规则。
+恢复任务时会核对保存的模型是否仍在当前 Provider 配置中。已失效的选择改用当前有效默认模型并显示说明；没有有效默认值时要求在模型设置中选择后继续。主 Agent 与语义算子共用当前选择。查询规划和语义算子遇到连接中断、超时、临时限流、服务端错误，或模型 JSON 结构缺少必填字段/不符合输出 schema（`OUTPUT_SCHEMA`）时，只对失败的逻辑请求最多进行三次实际尝试，默认退避 1 秒、2 秒；供应商返回等待时间时优先等待较长值，单次等待最多 30 秒，取消可立即打断。凭据无效、模型不存在和额度耗尽不自动重试；引用身份、证据与业务规则校验仍严格执行，不因结构错误重试而放宽，也不自动重试整个检索作业。每次尝试独立计量，固定128工单中的同一失败请求只做技术重试，不标注额外工单；重试耗尽后明确显示未完成并保留已确认结果。最终报告仍遵循单次生成、失败后显式重试的规则。
 
 模型失败提示保留可公开的错误代码和 HTTP 状态。私有 `.cache/semantic-operators/requests/<manifestId>.json` 为每次尝试保存模型、开始时间、耗时、用量及 `modelFailure`，其中仅提取 `ECONNRESET`、`CONNECTION_FAILED`、`STREAM_INTERRUPTED` 等稳定诊断原因，不保存供应商错误正文。请求文件含任务材料，应按私有执行数据处理；页面不会收到供应商错误正文或凭据。只有这些结构化信息不足时，不能将传输错误直接判定为限流或密钥问题。
 
@@ -166,7 +176,7 @@ pnpm exec vitest run packages/agent-plugin/src/durable-service.spec.ts tests/dat
 | 某一路召回失败 | 先恢复对应数据或检索服务；完整召回未就绪时不会开始并集学习 |
 | 报告生成失败 | 保留确认集合，显式重试报告生成；不重新开始筛选 |
 
-取消或故障暂停后，点击“恢复检索”沿用原查询条件、确认结果和筛选进度。对应接口为 `POST /api/retrieval-agent/tasks/:id`，请求体 `{ "operationId": "唯一幂等键", "kind": "resume" }`。恢复不增加查询条件代次，不重置该代次的 128 次独立判断额度；重复提交同一幂等键只返回原回执。需要改变业务条件时再提交补充。已经用完判断额度时，恢复也不能增加额度或保证得到更多结果。
+取消或故障暂停后，点击“恢复检索”沿用原查询条件、确认结果和筛选进度。对应接口为 `POST /api/retrieval-agent/tasks/:id`，请求体 `{ "operationId": "唯一幂等键", "kind": "resume" }`。恢复不增加查询条件代次，不重置固定128工单的已取得标签；重复提交同一幂等键只返回原回执。需要改变业务条件时再提交补充。固定样本已完成后恢复不追加标注工单。
 
 恢复仍重新核对当前访问资格，已完成或正在执行的任务不接受此恢复命令。后台只重排未完成执行，成功判断与有效缓存继续复用。自动重试、恢复检索和修改查询条件是不同操作，恢复请求无需再把“继续检索”作为查询条件补充。
 
@@ -242,7 +252,7 @@ node scripts/verify-workbench-browser.mjs --session=workbench --scenario=files -
 
 ## OpenCode Go 会话路由
 
-当前固定的 DSH `0.1.5-rc.2` 已把 `sessionId` 传至 pi-ai，但原适配器没有发送 OpenCode Go 要求的 `x-opencode-session`。项目 bundle 现禁用默认 `llm-pi-ai` 组合行，装配 `@retrieval-agent/bundle/opencode-pi-ai` 兼容入口；仍使用同一 `llm-pi-ai` 设置、模型目录、凭证和上游请求实现。无需在设置中手填固定请求头。政策依据见 [上游讨论 #5495](https://github.com/deepseek-ai/deepseek-harness/discussions/5495)。
+当前固定的 DSH `0.2.0-rc.2` 已把 `sessionId` 传至 pi-ai，但原适配器没有发送 OpenCode Go 要求的 `x-opencode-session`。项目 bundle 现禁用默认 `llm-pi-ai` 组合行，装配 `@retrieval-agent/bundle/opencode-pi-ai` 兼容入口；使用 `retrieval-llm-pi-ai` 设置命名空间，复用官方模型目录、凭证和上游请求实现。无需在设置中手填固定请求头。政策依据见 [上游讨论 #5495](https://github.com/deepseek-ai/deepseek-harness/discussions/5495)。
 
 每次请求根据 DSH 的完整会话身份生成稳定 UUID：已有 UUID（含 `session-` 前缀）保留其 UUID，其他历史/自定义身份确定性映射为 UUID v5。续问、重试、恢复和带相同身份的压缩调用保持一致；新建/分叉/子会话使用其各自身份。仅 OpenCode provider 或解析后地址的精确 `opencode.ai` 主机启用，缺少会话身份时在发出请求前报错；同时查询不会修改或共用 provider 配置里的会话头。
 
@@ -387,7 +397,7 @@ pnpm retrieval-agent web --no-open --port 3081
 | `pnpm exec vitest run packages/agent-plugin/src/service.spec.ts` | 运行指定相邻测试；路径可换成受影响的现有 spec |
 | `pnpm test` | 运行默认行为/边界回归；不加载全量语料做假排名，实库专项需显式启用 |
 | `pnpm model:test` | 通过 uv 运行 Python model-service 测试；环境未就绪时可能同步依赖 |
-| `pnpm operators:test` | 三个核心算子、默认四模型/召回并集预测、128 次独立判断额度与重试计量、60% 查准率门槛、未知/缺特征、数值等价和旧 filter baseline；CI 使用同一入口 |
+| `pnpm operators:test` | 三个核心算子、六模型/召回并集二分类预测、排序前128工单固定S2伪标签、实际请求/重试计量、自动是集合交付、技术失败不fit/缺特征、数值等价和旧 filter baseline；CI 使用同一入口 |
 | `pnpm eval:self-test` | Python 评测数据与 scorer 自检，不执行真实 Agent 任务 |
 
 跨包导入可能通过 package exports 读取 `lib/`。跨包源码变更后先显式 `pnpm build` 一次，再运行 `pnpm typecheck:code` 和所选行为检查；也可直接用 `pnpm typecheck` 完成构建与类型检查。单独 `--noEmit` 不能证明已有构建产物与源码一致。依赖开发语料的测试和运行入口要求事先显式准备数据，纯代码检查无需此步骤。
