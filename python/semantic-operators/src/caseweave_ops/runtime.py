@@ -61,10 +61,6 @@ class ModelRequestError(RuntimeError):
         self.manifest_id: str | None = None
 
 
-class SamplingLimitReached(RuntimeError):
-    """当前查询代次的独立判断请求已用完，重试仍可结算。"""
-
-
 class ArtifactStore:
     def __init__(self, path: str | Path = ":memory:", clock: Callable[[], float] = time.time):
         self.clock, self.lock = clock, threading.RLock()
@@ -100,22 +96,12 @@ class ArtifactStore:
                 AND (json_extract(request_json, '$.input_revision')=? OR scope=?)""",
                 (scope.task_id, scope.input_revision, scope.key)).fetchone()[0]
 
-    def begin(self, task: str, scope: str, op: str, request: dict[str, Any], *, limit_sampling=False) -> str:
+    def begin(self, task: str, scope: str, op: str, request: dict[str, Any]) -> str:
         ident = str(uuid.uuid4())
         # 请求发出前登记 running，后续所有结算都以该唯一调用 ID 为准。
         with self.lock, self.db:
             args = (ident, task, scope, op, self.clock(), canonical(request))
-            if limit_sampling:
-                # 单条SQL同时预留额度与写入调用，跨进程和并发不能突破128。
-                inserted = self.db.execute("""INSERT INTO calls(id,task,scope,op,started,status,request_json)
-                    SELECT ?,?,?,?,?,'running',? WHERE (SELECT COUNT(*) FROM calls
-                    WHERE task=? AND op='sem_filter' AND COALESCE(json_extract(request_json,'$.retry_attempt'),0)=0
-                    AND (json_extract(request_json,'$.input_revision')=? OR scope=?)) < 128""",
-                    (*args, task, request['input_revision'], scope))
-                if inserted.rowcount == 0:
-                    raise SamplingLimitReached('128 independent judgments exhausted for this query revision')
-            else:
-                self.db.execute("INSERT INTO calls(id,task,scope,op,started,status,request_json) VALUES(?,?,?,?,?,'running',?)", args)
+            self.db.execute("INSERT INTO calls(id,task,scope,op,started,status,request_json) VALUES(?,?,?,?,?,'running',?)", args)
         return ident
 
     def finish(self, ident: str, status: str, usage: Usage, error: str | None = None) -> None:
@@ -335,8 +321,7 @@ class Runtime:
         ident = self.store.begin(self.scope.task_id, self.scope.key, op,
                                  {"model_identity": self.model.identity, "input_revision": self.scope.input_revision,
                                   "retry_attempt": retry_attempt, "sampling": sampling,
-                                  **({"retry_of": retry_of} if retry_of else {}), **request},
-                                 limit_sampling=False)
+                                  **({"retry_of": retry_of} if retry_of else {}), **request})
         request = {**request, "manifest_id": ident, "operation": op}
         usage = Usage()
         settled = False

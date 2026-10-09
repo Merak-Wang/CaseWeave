@@ -13,6 +13,7 @@ import {
 import { DurableRetrievalAgentService } from '@retrieval-agent/agent-plugin'
 import { trustedExportBinding } from './export-binding.js'
 import { installTaskHost } from './tasks.js'
+import { installDeliveryHistory } from './delivery-history.js'
 export * from './tasks.js'
 import {
   CandidateDetailService,
@@ -350,6 +351,7 @@ export interface Config {
 
 /** Seed the product workspace and register the export route without changing the DSH Agent loop. */
 export async function apply(ctx: Context, config: Config = {}): Promise<void> {
+  installDeliveryHistory(ctx)
   if (config.workspacePath !== undefined) {
     const workspacePath = config.workspacePath.trim()
     if (workspacePath.length === 0) throw new Error('retrieval-product-host workspacePath must not be empty')

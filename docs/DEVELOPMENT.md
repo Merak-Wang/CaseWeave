@@ -1,14 +1,12 @@
 # 开发与运行
 
-## 三服务 GPU 试用
+## 单一数据库部署入口
 
-`start.cmd --trial` 使用本地 `local.env.trial` 和 `config/app/compose.trial.yml`，显式指定独立项目 `caseweave-trial`。首次启动及日常启动都会构建更新 app、model-service，再启动 app、model-service、MySQL 三个服务；不下载示例工单、不启动 Milvus。Python 3.12 算子以常驻 stdio worker 运行在应用容器内。完整 MySQL/Milvus 部署继续使用不带 `--trial` 的原入口。
+运行 `start.cmd` 使用本地 `.env` 的数据库、模型和数据配置；开发与生产使用同一入口及同一Provider，不另启动旧JSONL试用系统。当前精简方案为三个容器：MySQL、内嵌etcd的Milvus Standalone、运行Node/DSH与GPU模型API的app。Python算子在app内以常驻stdio执行。部署方案的最终健康、迁移与启动证据以本地核验记录为准，源码配置不能替代运行验收。
 
-配置需给定已授权的 JSONL 路径 `CASEWEAVE_TRIAL_DATA`、已有模型权重卷 `CASEWEAVE_TRIAL_MODEL_VOLUME` 及模型供应商配置。工单数据只读挂载，任务持久化在独立 MySQL 卷，关闭浏览器不会取消后台任务。`CASEWEAVE_TRIAL_SOURCE_LABEL` 在工作台标明实际数据范围；标题摘要试用文件不提供原文，不能将其称为完整工单证据。默认工作台地址是 `http://127.0.0.1:3080/retrieval`，可通过 `RETRIEVAL_AGENT_WEB_PORT` 调整。
+自有工单以只读JSONL导入MySQL并发布Milvus索引。设置数据集、输入路径和文档投影，保留可信来源元数据；标题摘要数据正文及对话可为空，不以摘要伪造原文。完整原文可另存，但当前标题摘要索引不会自动加载它。初次导入、索引及一致性检查完成后再使用工作台，后续启动复用已准备的数据和模型。
 
-此 Compose 是 NVIDIA GPU 配置；CPU 部署需移除 GPU device reservation 并改模型设备，不能仅设置 CPU 环境变量。默认启用并持久化自动 Wiki 学习；公平对照实验可显式设 `RETRIEVAL_AGENT_WIKI_LEARNING=0`，须注明知识被冻结。独立卷与项目名避免恢复其他项目的历史模型任务。
-
-标题摘要试用的 JSONL 应保留工单身份、title、summary 和真实来源元数据，正文及对话为空，不用摘要伪造正文。另保存的完整原文文件可供后续按身份读取，但不会被本试用自动加载；切回完整数据前需要相应 Provider 和运行验收。工作台提交原始业务问题后，可比较在线学习与无反馈选项；相似度阈值是 cosine >= 0.75，不设 Top-K 保底，关键词 OR 命中仍全部枚举。模型自报置信度不是校准准确率；结果直接交付所选方法判定为是的工单及 XLSX，无需人工确认。运行失败如实显示未完成，已计算结果与完整交付分别呈现。
+GPU部署需要NVIDIA容器支持；CPU设备、精度或模型变化须相应配置并核验索引，不应直接沿用不同embedding身份的缓存。模型自报confidence不是校准准确率，最终是集合可直接下载XLSX，不要求人工逐条确认。
 
 ## 私有模型网关
 
@@ -20,11 +18,11 @@
 
 ## Python 算子服务
 
-完整 Compose 部署包含内部 `semantic-operators` FastAPI 服务。源码开发可直接使用默认常驻 stdio worker，也可先运行 `pnpm operators:serve --port 8013`，再向 Node 进程设置 `CASEWEAVE_OPERATORS_URL=http://127.0.0.1:8013`。健康检查为 `/health`，内部 WebSocket 为 `/v1/operators`；浏览器不直接调用算子。已有安装好的 Python 可通过 `CASEWEAVE_PYTHON` 指定，需安装 `python/semantic-operators` 的锁定依赖。
+正常部署仅使用app内常驻Python stdio worker，模型判断经DSH回调；不提供独立WebSocket算子服务或direct/baseline旧入口。源码开发可通过 `CASEWEAVE_PYTHON` 指定安装了锁定依赖的Python。
 
 `pnpm operators:test` 运行 Python 验收。uv 的 `--inexact` 保留已有模型依赖，不删除环境内其他包。算子不重新下载模型权重，embedding/rerank 继续复用既有模型服务。模型供应商和凭据仍配置在 DSH；共享服务令牌用 `CASEWEAVE_OPERATORS_TOKEN` 同时配置服务和 Node，避免放进 URL。算子设计与计量定义见 [Python 算子](design/OPERATORS.md)。
 
-默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 的学习与预测范围是关键词 OR 宽召回全部命中和语义召回结果按工单身份去重后的并集，不包含未进入该召回并集的授权工单。Provider 为并集内对齐 ID 提供连续数值块；固定排序前128条由S2生成yes/no＋confidence伪标签，拟合LR/SVM/MLP/HGB/反馈原型/关系LR，以训练内交叉验证择优并二分类投票预测其余候选。关闭学习时无反馈算法直接判断候选并集。最终是集合直接进入结果和XLSX，不等待人工确认，不做二次教师复核、不扩标至1024，也不设置60%发布门槛。关键词命中仍需完整枚举，语义分支按检索配置召回。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。教师与投票只输出yes/no，低confidence不弃权；传输/解析/缺特征是技术失败，不参与拟合或补成no。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验与显式旧 baseline 命令见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
+默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 的学习与预测范围是关键词 OR 宽召回全部命中和语义召回结果按工单身份去重后的并集，不包含未进入该召回并集的授权工单。Provider 为并集内对齐 ID 提供连续数值块；固定排序前128条由S2生成yes/no＋confidence伪标签，拟合LR/SVM/MLP/HGB/反馈原型/关系LR，以训练内交叉验证择优并二分类投票预测其余候选。关闭学习时无反馈算法直接判断候选并集。最终是集合直接进入结果和XLSX，不等待人工确认，不做二次教师复核、不扩标至1024，也不设置60%发布门槛。关键词命中仍需完整枚举，语义分支按检索配置召回。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。教师与投票只输出yes/no，低confidence不弃权；传输/解析/缺特征是技术失败，不参与拟合或补成no。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验方法与运行说明见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
 
 从旧版算法升级 Docker 部署时，运行 `start.cmd` 或 `bash setup.sh start`，自动构建并更新应用、算子和排名服务。旧算子镜像不认识新筛选参数时可能返回 `ProtocolError`。若旧数据库尚无数值特征，另执行 `docker compose exec app node scripts/database.mjs index --dataset=esft-development`，复用已有向量和索引检查点补齐；自定义数据集替换名称。已有安装的日常启动不自动重新导入数据或重建索引。
 
@@ -68,7 +66,7 @@ bash setup.sh --no-build                      # 复用现有应用/模型镜像
 bash setup.sh --env-file .env.local --check    # 检查另一份配置
 ```
 
-`start` 在缺少 `.env` 或 Compose 项目尚无 app 容器（包括停止的容器）时自动执行首次准备，因此复制好 `.env` 的新安装和准备中断也可继续使用同一入口。已有安装先执行 `docker compose build app model-service`，成功后再执行 `docker compose up -d --wait --no-build --pull never app`；构建失败不替换现有容器。Docker 复用未变化的构建层，Compose 更新变化的服务并启动依赖；不重复运行 model-prepare、app-prepare 或索引脚本。`start --no-build` 是显式跳过构建的入口。`install` 和 CPU/GPU 选项执行完整准备，`--check` 只检查配置。
+`start` 在缺少 `.env` 或 Compose 项目尚无 app 容器（包括停止的容器）时自动执行首次准备，因此复制好 `.env` 的新安装和准备中断也可继续使用同一入口。已有安装先执行 `docker compose build model-prepare app`，成功后再执行 `docker compose up -d --wait --no-build --pull never app`；构建失败不替换现有容器。Docker 复用未变化的构建层，Compose 更新变化的服务并启动依赖；不重复运行 model-prepare、app-prepare 或索引脚本。`start --no-build` 是显式跳过构建的入口。`install` 和 CPU/GPU 选项执行完整准备，`--check` 只检查配置。
 
 `stop` 使用 `compose stop --timeout 60`，给服务 60 秒退出时间；`status` 使用 `compose ps --all`，`logs` 读取有限日志。这三种管理操作要求已有 `.env`，不修改配置，也不运行主模型配置向导；即使模型凭据待修复，仍可停止或查看服务。应用容器存在但模型或数据卷损坏时，可显式运行 `setup.cmd install` 重新检查完整准备流程。
 
@@ -79,9 +77,9 @@ bash setup.sh --env-file .env.local --check    # 检查另一份配置
 向导按顺序执行以下入口；需要逐步排障时，在已填写 `.env` 的仓库根目录执行：
 
 ```sh
-docker compose build app model-service
+docker compose build model-prepare app
 docker compose run --rm --no-deps model-prepare prepare --download
-docker compose up -d --wait mysql milvus model-service
+docker compose up -d --wait mysql milvus
 docker compose run --rm --no-deps app-prepare
 docker compose run --rm --no-deps app-prepare node scripts/database.mjs prepare
 docker compose run --rm --no-deps app-prepare node scripts/database.mjs grams
@@ -115,11 +113,11 @@ MySQL 数据文件位于 mysql-data 卷，Milvus/etcd 位于 milvus-data 卷。�
 
 标题摘要数据使用 `canonical-title-abstract-v1`；完整字段数据使用对应完整投影。导入、建索引与运行Provider必须采用相同数据集和投影，避免沿用不同文本输入的向量索引。工单文件保留真实身份、标题、摘要及来源元数据；标题摘要数据不伪造原文。数据库CLI默认读取这组环境配置，显式 `--dataset` / `--path` 可以覆盖单次命令。
 
-这个入口将文件导入MySQL并向Milvus发布索引，不是实时连接生产Mongo。运行前需自行提供合规数据与模型配置；完整部署常驻app、model-service、MySQL、Milvus及etcd五个服务，Python算子在app内常驻stdio运行。业务准确率、负载和远端生产发布需在目标环境分别验收。
+这个入口将文件导入MySQL并向Milvus发布索引，不是实时连接生产Mongo。运行前需自行提供合规数据与模型配置；精简部署常驻app、MySQL、Milvus Standalone三个容器；模型API与Python算子在app内执行，etcd内嵌Milvus。业务准确率、负载和远端生产发布需在目标环境分别验收。
 
 首次使用推荐根 [README 的完整容器步骤](../README.md#快速开始)。[应用 Dockerfile](../config/app/Dockerfile) 安装 Node 24.13.0、pnpm 10.28.2、workspace 锁文件与独立 [DSH runtime 锁文件](../config/app/runtime/pnpm-lock.yaml)，并以非 root 用户运行。下面的宿主命令用于源码开发；不要求完整容器路径的使用者安装宿主 Node/Python。
 
-`.env.example` 的 `COMPOSE_FILE` 合并数据库、模型和应用配置，固定 `;` 分隔符，跨 Windows/Linux 使用同一文件；NVIDIA GPU 追加 `config/model-service/compose.gpu.yml`。`app-prepare` 与 `app` 共用具名 data/state/wiki/output 卷，默认模型仅 embedding；可选 reranker 先以 `RETRIEVAL_AGENT_RERANKER_ENABLED=true` 运行 model-prepare 下载，再启动同配置的模型服务。CPU 双模型比单 embedding 消耗更多内存，部署时应按所选模型测量常驻内存。
+`.env.example` 的 `COMPOSE_FILE` 合并数据库、模型和应用配置，固定 `;` 分隔符，跨 Windows/Linux 使用同一文件；NVIDIA GPU 追加 `config/app/compose.gpu.yml`。`app-prepare` 与 `app` 共用具名 data/state/wiki/output 卷，默认模型仅 embedding；可选 reranker 先以 `RETRIEVAL_AGENT_RERANKER_ENABLED=true` 运行 model-prepare 下载，再启动同配置的app内模型API。CPU 双模型比单 embedding 消耗更多内存，部署时应按所选模型测量常驻内存。
 
 镜像升级前给现有 app/model 镜像添加明确备份标签，记录 `docker image inspect` 的 ID；对 MySQL 做一致性备份，并保存 Milvus、etcd、app-state、app-data、app-wiki 和模型/缓存卷。包含凭据的备份只保留在私有目录。更新源码后运行 `start.cmd` 或 `bash setup.sh start`，自动构建应用、算子和模型服务，保留原 Compose 项目名和卷。回退时在 `.env` 指定 `RETRIEVAL_AGENT_APP_IMAGE` / `RETRIEVAL_AGENT_MODEL_IMAGE` 为已保存标签，再通过 `start --no-build` 启动。镜像回退仅适用于 schema 仍兼容的版本；数据库不兼容升级必须使用匹配的一致性备份恢复。
 
@@ -281,98 +279,13 @@ node scripts/migrate-dsh-sessions.mjs --home=.cache/retrieval-agent-local/dsh-ho
 
 回退必须使用升级前的完整备份：新版继续运行后，新增事件只写 V3，旧程序读取保留的 V0 文件会得到过时状态。若旧文件在迁移后又被写入，校验回执会阻止继续迁移，需先恢复一致备份。
 
-## Python 模型服务容器部署
+## 模型镜像与app内API
 
-本节是源码开发的混合部署入口：Node.js/pnpm/DSH 在宿主运行，Python 模型服务在容器运行。完整容器部署使用前面的[一键容器部署](#一键容器部署)，不需要宿主 Node.js/pnpm/DSH。Windows 使用 Docker Desktop 的 WSL 2 Linux x86_64 引擎；模型服务的 Python、uv、spaCy、PyTorch 和 CUDA 用户态库均在镜像中。Linux 主机需要 Docker Engine/Compose，GPU 还需要兼容的 NVIDIA 驱动及容器 GPU 配置。CPU 配置没有 GPU reservation，不要求 NVIDIA 设备。CPU/GPU 共用锁定的 cu128 wheel 镜像，CPU 也会携带 CUDA 库；这是保持同一依赖基线的体积取舍。
+模型依赖镜像用于构建app及显式模型准备，不在正常部署单独运行模型容器。app启动时运行内部模型HTTP API，算子通过常驻stdio回调；业务请求统一由数据库工作台发起。模型权重和向量缓存使用持久卷，源码输入指纹未变时复用模型镜像，不重复下载权重。
 
-首次从源码准备（所有命令在仓库根执行）：
+CPU/GPU由本地设备配置及app GPU Compose覆盖选择；GPU覆盖路径为 `config/app/compose.gpu.yml`。模型API默认内部8012，使用 `RETRIEVAL_AGENT_MODEL_SERVICE_URL` 连接；公开模型端口是否绑定由Compose决定，不能将容器内localhost当宿主地址。设备、精度、模型revision、归一化或文档投影改变时，需重新核验相应索引身份与候选差异。
 
-```powershell
-pnpm model:container build
-# 已有本地权重：只读导入，不修改原 models 目录
-pnpm model:container prepare --import=./models
-# 新机器没有权重时，改用下面一条；只由容器内程序联网下载
-pnpm model:container prepare --download
-pnpm model:container up --device=gpu --with-database
-```
-
-CPU 使用 `pnpm model:container up --device=cpu --with-database`。`--with-database` 对已有 MySQL/Milvus 使用 `--no-recreate`，不替换其容器；数据库端口、project name 和卷身份沿用原 Compose。普通 `up` 只管理模型服务。构建使用 [Dockerfile](../config/model-service/Dockerfile) 中固定 digest 的 Python 3.12.11 和 uv 0.12.10，`uv sync --frozen` 安装既有锁文件中的 Linux 运行依赖，启动时不安装包。构建上下文采用显式允许列表，不传入模型、业务工单、凭证、Session、宿主虚拟环境或缓存。
-
-模型初始化按 [manifest](../architecture/model-manifest.json) 的固定 revision 和每个必需文件的 SHA-256 校验。`prepare` 将下载断点放在持久模型卷的 staging 中，进程锁串行准备，全部通过后原子发布至 manifest/角色身份目录；重复准备校验并复用。已有导入缺文件或校验失败时明确拒绝，不发布部分结果。日常服务只读挂载模型卷、设置离线加载；spaCy 管线由锁定 wheel 在构建时物化进镜像。缓存使用独立 `model-cache` 卷。可选 reranker 仍由 `RETRIEVAL_AGENT_RERANKER_ENABLED=true` 启用，须在准备和启动两步设置同一值。
-
-宿主 Node.js 连接并使用 Docker 管理的服务：
-
-```powershell
-$env:RETRIEVAL_AGENT_MODEL_SERVICE_MODE='container'
-$env:RETRIEVAL_AGENT_MODEL_CONTAINER_DEVICE='gpu' # CPU 对应 cpu
-$env:RETRIEVAL_AGENT_UV_COMMAND='host-uv-must-not-run' # 可选验收哨兵
-pnpm start:database --no-open --port 3084
-```
-
-模型 HTTP 仍为 `http://127.0.0.1:8012`。容器内通过显式 `--allow-container-bind` 监听 `0.0.0.0:8012`，宿主发布仅为 `127.0.0.1`；普通 Python CLI 保持回环默认。容器模式在 Compose 状态为 healthy 后核对 HTTP 就绪及所选 CPU/CUDA 设备身份，识别 starting、exited/restarting、unhealthy 和启动期限；失败打印日志且禁止回退宿主 Python。`Ctrl+C` 退出 Node.js 不停止 Docker 拥有的服务。已经 ready 的任意外部服务可用 `MODEL_SERVICE_MODE=external`；未就绪明确失败。默认 `host` 兼容本地 Python 开发、原 JSONL 启动器与模型调试命令，待这些实际消费者迁移并通过验收后才移除。
-
-| 参数/操作 | 用途 |
-| --- | --- |
-| `RETRIEVAL_AGENT_MODEL_SERVICE_URL` / `RETRIEVAL_AGENT_MODEL_PORT` | 改宿主模型端口，例如 `http://127.0.0.1:18012` / `18012`；同时设置必须一致 |
-| `RETRIEVAL_AGENT_MODEL_IMAGE` | 明确选择已构建或已导入的版本标签/digest；`up` 不自动拉取或构建 |
-| `RETRIEVAL_AGENT_MODEL_START_TIMEOUT_MS` | 启动就绪观察期限，默认 600000；不影响 Agent 的语义停止 |
-| `RETRIEVAL_AGENT_MODEL_MEMORY` / `MODEL_CPUS` / `MODEL_THREADS` | 全名均带 `RETRIEVAL_AGENT_` 前缀；默认 8g / 4 / 4 |
-| `RETRIEVAL_AGENT_MODEL_MAX_BATCH_SIZE` / `MODEL_MAX_TOTAL_TOKENS` | 全名均带 `RETRIEVAL_AGENT_`；默认 16 / 8192，必须为正数 |
-| `pnpm model:container status` / `logs` / `check` | 查看状态、最近日志、重新校验完整模型；check 不下载 |
-| `pnpm model:container restart --device=gpu` | 重启并等待所选设备就绪，缓存和权重保留 |
-| `pnpm model:container stop` | 只停止模型服务，不停止数据库、不删除任何卷 |
-
-缺模型先执行 `prepare`；端口冲突先查看已有服务的所有权，或显式改端口。GPU 访问不可用时检查驱动和 Docker GPU 配置，或显式选择 CPU，不能把自动降级当作 GPU 验收。损坏模型不能就绪，应从可信备份恢复相同哈希文件；不要删除数据库、任务或整个缓存来处理模型问题。
-
-镜像可用版本标签导出/导入，不需要镜像仓库：
-
-```powershell
-docker image tag retrieval-agent-model-service:0.1.0-cu128 retrieval-agent-model-service:saved-version
-docker image save -o retrieval-agent-model-service-backup.tar retrieval-agent-model-service:saved-version
-# 新机器导入镜像，然后导入原 models 或执行容器 prepare --download
-docker image load -i retrieval-agent-model-service-backup.tar
-$env:RETRIEVAL_AGENT_MODEL_IMAGE='retrieval-agent-model-service:saved-version'
-pnpm model:container up --device=cpu
-```
-
-升级前保留上一个版本标签/digest；新版本显式 build/load、prepare、up，回退通过 `MODEL_IMAGE` 选回旧镜像并 up。不同 manifest/角色的模型发布并存，旧版本可继续校验读取。Node/DSH、数据准备、已发布索引、Wiki 和主模型凭证仍按原流程配置，模型容器化不提供这些业务配置。资源需求需结合模型配置和部署硬件评估。
-
-定向检查：`node --test scripts/model-container.spec.mjs`、`pnpm model:test`、`pnpm exec vitest run tests/local-app.spec.ts tests/model-dependencies.spec.ts`。真实对照用 `node scripts/verify-model-container.mjs --url=http://127.0.0.1:8012 --out=output/phase7/host.json` 保存基线，再加 `--baseline=output/phase7/host.json --device=cpu --out=output/phase7/cpu.json` 检查容器。该入口只查询现有 publication，不导入/重建索引；保存向量数值、候选集合差异与预设容差，不替代公开 Agent 验收。`node scripts/verify-model-container-lifecycle.mjs` 准备两条小规模向量缓存并检查 HTTP 取消后继续推理；重启后加 `--after-restart` 必须命中磁盘缓存，两次通过 `MODEL_SERVICE_URL` 指向同一服务。
-
-## JSONL 本地技术预览
-
-需要 Node.js `>=22.19.0`、pnpm `10.28.2` 和 uv；版本依据根 [package.json](../package.json) 与 [uv workspace](../pyproject.toml)。在仓库根执行：
-
-```powershell
-pnpm install --frozen-lockfile --ignore-scripts
-pnpm data:sync
-pnpm build
-pnpm retrieval-agent web
-```
-
-`pnpm build` 只编译代码。首次准备技术预览时，显式执行 `pnpm data:sync`，下载或复用锁定的 ESFT 数据、校验并构建派生数据；后续改代码无需重复同步数据。数据来源与目录见 [data/README.md](../data/README.md)。
-
-数据许可、再分发和字段生成以 [data/manifest.json](../data/manifest.json) 为准。当前未能验证的时间、地域、状态字段保持缺失；条件检索可用声明这些字段的受控 fixture 验收，不能给现有语料编造属性。脱敏数据不等于生产权限或使用许可已经完成。
-
-首次 `web` 会准备仓库专属 DSH runtime/profile，按模型 manifest 同步缺失依赖，复用或启动 Python 服务，并准备开发语料向量索引。这些步骤可能联网、下载模型并运行较长时间。构建产物、数据和模型已就绪后，后续启动复用它们。
-
-```powershell
-pnpm retrieval-agent web --no-open --port 3081
-```
-
-默认 Web 地址为 `http://127.0.0.1:3080`，模型服务为 `http://127.0.0.1:8012`。`pnpm start`、`pnpm app:serve` 是 Web 入口别名；`pnpm app:setup` 只准备本地 profile。浏览器中的 Agent 主模型通过 DSH 设置配置，真实任务需要可用的模型配置。
-
-| 位置或环境变量 | 当前用途 |
-|---|---|
-| `.cache/retrieval-agent-local/` | 仓库专属 DSH runner、profile 与会话 |
-| `.cache/retrieval-agent-vectors/` | 可复用的开发向量缓存 |
-| `models/` | Git 忽略的模型文件，身份来自 `architecture/model-manifest.json` |
-| `RETRIEVAL_AGENT_MODEL_SERVICE_URL` | 指向已有且 ready 的模型服务 |
-| `RETRIEVAL_AGENT_AUTO_DOWNLOAD_MODEL=0` | 禁止启动器自动下载模型；缺失依赖时明确失败 |
-
-`Ctrl+C` 退出启动器并清理它启动的子进程，持久 profile、Session 和缓存保留。外部模型服务由其原有管理入口负责停止。
-
-索引预热保存 checkpoint 以便恢复，配置见 [index-preparation-config](../scripts/index-preparation-config.mjs)。DSH 固定版本由 [运行时清单](../provenance/baseline-manifest.json) 声明；凭据与用户设置保存在本地 profile。
+正常更新使用 `start.cmd`；不使用旧模型容器up/down或JSONL Session技术预览建立第二套系统。源码开发、合成契约测试和真实数据任务共用当前Provider，测试结果分别说明是否使用真实模型。
 
 ## TypeScript 包与测试约定
 
@@ -399,7 +312,7 @@ pnpm retrieval-agent web --no-open --port 3081
 | `pnpm exec vitest run packages/agent-plugin/src/service.spec.ts` | 运行指定相邻测试；路径可换成受影响的现有 spec |
 | `pnpm test` | 运行默认行为/边界回归；不加载全量语料做假排名，实库专项需显式启用 |
 | `pnpm model:test` | 通过 uv 运行 Python model-service 测试；环境未就绪时可能同步依赖 |
-| `pnpm operators:test` | 三个核心算子、六模型/召回并集二分类预测、排序前128工单固定S2伪标签、实际请求/重试计量、自动是集合交付、技术失败不fit/缺特征、数值等价和旧 filter baseline；CI 使用同一入口 |
+| `pnpm operators:test` | 三个核心算子、六模型/召回并集二分类预测、排序前128工单固定S2伪标签、实际请求/重试计量、自动是集合交付、技术失败不fit/缺特征、数值等价；CI 使用同一入口 |
 | `pnpm eval:self-test` | Python 评测数据与 scorer 自检，不执行真实 Agent 任务 |
 
 跨包导入可能通过 package exports 读取 `lib/`。跨包源码变更后先显式 `pnpm build` 一次，再运行 `pnpm typecheck:code` 和所选行为检查；也可直接用 `pnpm typecheck` 完成构建与类型检查。单独 `--noEmit` 不能证明已有构建产物与源码一致。依赖开发语料的测试和运行入口要求事先显式准备数据，纯代码检查无需此步骤。

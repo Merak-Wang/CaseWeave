@@ -9,7 +9,7 @@ export function assertSemanticExecutionOptions(value: unknown): asserts value is
   if (Object.keys(v).some(key => !['onlineLearning', 'semanticMethod', 'orchestration', 'onlineFusion', 'onlineModels', 'judgeMode', 'judgePrior'].includes(key))
     || v.judgeMode !== undefined && !['compact_binary', 'anyjev_l0'].includes(String(v.judgeMode))
     || v.judgePrior !== undefined && !['none', 'batch', 'content_free'].includes(String(v.judgePrior))
-    || typeof v.onlineLearning !== 'boolean' || !['auto', 'direct', 'direct_teacher', 'dual_description_margin', 'name_gmm', 'kmeans'].includes(String(v.semanticMethod))
+    || typeof v.onlineLearning !== 'boolean' || !['auto', 'dual_description_margin', 'name_gmm', 'kmeans'].includes(String(v.semanticMethod))
     || v.orchestration !== undefined && !['fixed', 'agent'].includes(String(v.orchestration))
     || v.onlineLearning === true && ['dual_description_margin', 'name_gmm', 'kmeans'].includes(String(v.semanticMethod))
     || v.onlineFusion !== undefined && !['single', 'selective'].includes(String(v.onlineFusion))

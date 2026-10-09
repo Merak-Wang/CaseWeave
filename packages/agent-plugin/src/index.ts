@@ -37,12 +37,12 @@ export const name = 'retrieval-agent'
 export const inject = ['agents', 'llm', 'tokenMeter', 'ticketRetrievalProvider', 'ticketPrincipalProvider', 'tools', 'systemPrompt']
 
 interface SemanticFilterConfig {
-  algorithm?: 'auto' | 'cluster' | 'active' | 'learned' | 'baseline' | 'direct'
+  algorithm?: 'auto' | 'learned'
   batchSize?: number
   options?: Record<string, number | string>
 }
 const SemanticFilterConfig: z<SemanticFilterConfig> = z.object({
-  algorithm: z.union(['auto', 'cluster', 'active', 'learned', 'baseline', 'direct'] as const),
+  algorithm: z.union(['auto', 'learned'] as const),
   batchSize: z.number().step(1).min(1).max(8),
   options: z.dict(z.union([z.number(), z.string()])),
 })

@@ -36,7 +36,6 @@
     "model:smoke": "node scripts/verify-real-model.mjs",
     "model:smoke:rerank": "node scripts/verify-real-model.mjs --reranker",
     "model:probe": "node scripts/probe-model-service.mjs",
-    "model:eval": "node scripts/evaluate-real-retrieval.mjs",
     "data:download": "node scripts/manage-ticket-data.mjs download",
     "data:build": "node scripts/manage-ticket-data.mjs build",
     "data:verify": "node scripts/manage-ticket-data.mjs verify",

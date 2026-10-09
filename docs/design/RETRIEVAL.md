@@ -10,7 +10,7 @@
 
 ## 模型服务部署边界
 
-模型服务支持独立容器部署。完整容器部署同时提供 Node/DSH 应用容器；源码运行也可使用宿主 Node/DSH 连接模型服务。实现为 [容器入口](../../python/model-service/src/retrieval_agent_model_service/container.py)、[Compose](../../config/model-service/compose.yml) 和 [Node 管理入口](../../scripts/model-container.mjs)。沿用 models.v1/RAG 协议、固定模型 revision、1024 维 L2 embedding 和已发布 SQL/Milvus 索引身份；部署设备不重建索引，CPU/GPU 数值差异与候选变化须通过预先定义容差对照。
+正常部署将模型HTTP API与Node/DSH放在同一app容器，模型依赖镜像只用于构建及权重准备。实现为 [模型容器入口](../../python/model-service/src/retrieval_agent_model_service/container.py) 与 [app Compose](../../config/app/compose.yml)。当前数据库索引使用固定模型revision、1024维L2 embedding和发布SQL/Milvus身份；CPU/GPU数值差异与候选变化须对照核验。
 
 运行镜像与模型发布分离：锁文件安装运行库，spaCy 来自固定 wheel；Qwen 权重/config/tokenizer 在显式准备时逐文件校验，经 staging 原子发布至 manifest/启用角色寻址目录。服务只读加载完整发布，下载与向量缓存分别持久保存；正常启动不联网补包或使用半成品模型。容器内的全接口监听必须显式启用，宿主端口只发布到回环。GPU 配置显式请求 CUDA，失败不回退 CPU；Node 的 container/external 模式也不回退宿主 Python。停止 Node 不获得停止外部服务的所有权。
 
@@ -116,4 +116,4 @@ MySQL 工单是事实源；索引异步构建，按 sourceVersion 幂等 upsert/
 
 验收重点：跨字段 AND、嵌套 OR/NOT、空值和日期、字面原因区分、关键词全集与分页一致、SQL/文件匹配一致、Milvus 真实调用、陈旧索引与删除、单路失败、千级候选内存/首屏、召回并集跨首屏分页的 scope 一致性、范围外强阳性特征不能进入预测集合、空召回保持为空、取消后的模型服务占用。加速效果必须同时报告命中集合差异与延迟，不用“变快了”掩盖漏检。
 
-规划后的学习式检索由 Provider 并行执行关键词与向量通道。关键词 OR 在 SQL 内一次生成命中 ID 集合，同一词表共享一次字段扫描；不按 500 条重跑谓词，也不要求 Host 按 100 条把全部正文搬入任务状态。首批候选可先展示；关键词全集枚举与计划启用的语义召回都完成后，Host 才启动学习，并把完整召回运行的 `recallScope` 传给 Provider 与 Python 算子。抽样、训练和数值预测都在两路去重并集内，首屏页宽不改变总体范围，也不把全库授权范围当作总体。显式案例/direct/baseline 保留按需分页路径。
+规划后的学习式检索由 Provider 并行执行关键词与向量通道。关键词 OR 在 SQL 内一次生成命中 ID 集合，同一词表共享一次字段扫描；不按 500 条重跑谓词，也不要求 Host 按 100 条把全部正文搬入任务状态。首批候选可先展示；关键词全集枚举与计划启用的语义召回都完成后，Host 才启动学习，并把完整召回运行的 `recallScope` 传给 Provider 与 Python 算子。抽样、训练和数值预测都在两路去重并集内，首屏页宽不改变总体范围，也不把全库授权范围当作总体。

@@ -44,11 +44,11 @@ export function projectOrchestration(state: RetrievalState, runtime?: TaskRuntim
   const execution = state.query?.contract?.semanticExecution
   const onlineLearning = execution?.onlineLearning ?? true
   const selectedMethod = execution?.semanticMethod ?? 'auto'
-  const semanticMethod = selectedMethod === 'direct' || !onlineLearning && selectedMethod === 'auto' ? 'direct_teacher' : selectedMethod
+  const semanticMethod = !onlineLearning && selectedMethod === 'auto' ? 'dual_description_margin' : selectedMethod
   const onlineFeedbackTraining = onlineLearning && semanticMethod === 'auto'
   const regime = semanticMethod === 'dual_description_margin' ? 'frozen_score'
     : ['name_gmm', 'kmeans'].includes(semanticMethod) ? 'unlabeled_fit_once'
-      : onlineFeedbackTraining ? 'teacher_weak_supervision' : 'frozen_teacher'
+      : 'teacher_weak_supervision'
   const sampleRequests = manifests.filter(m => m.operator?.operation === 'sem_filter')
   const sampleKnowledge = new Set(sampleRequests.flatMap(m => m.operator!.knowledgeIds ?? []))
   const knowledgeRequests = sampleRequests.filter(m => m.operator!.knowledgeIds?.length)

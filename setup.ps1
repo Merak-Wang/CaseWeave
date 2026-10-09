@@ -7,7 +7,7 @@ $script:exitCode = 1
 $stage = '环境检查'
 $envFile = Join-Path $PSScriptRoot '.env'
 $action = ''; $device = ''; $nonInteractive = $false; $checkOnly = $false; $build = $true
-$trial = $false; $explicitEnv = $false; $composeOptions = @()
+$composeOptions = @()
 
 function Show-Usage {
     Write-Host @'
@@ -20,7 +20,6 @@ function Show-Usage {
   --non-interactive 缺少配置时失败，不等待输入
   --check           只检查 Docker 与已有配置，不修改或启动
   --no-build        显式跳过构建，复用已有镜像
-  --trial           三容器试用：授权JSONL、已有模型权重、MySQL和工作台
 '@
 }
 function Invoke-Docker {
@@ -79,13 +78,13 @@ function Step([string]$label, [string[]]$command) {
 }
 function Build-Application {
     if (-not $build) { return }
-    $modelImage = if ($trial) { $script:config.CASEWEAVE_TRIAL_MODEL_IMAGE } else { $script:config.RETRIEVAL_AGENT_MODEL_IMAGE }
-    if (-not $modelImage) { $modelImage = if ($trial) { 'retrieval-agent-model-service:trial' } else { 'retrieval-agent-model-service:0.1.0-cu128' } }
+    $modelImage = $script:config.RETRIEVAL_AGENT_MODEL_IMAGE
+    if (-not $modelImage) { $modelImage = 'retrieval-agent-model-service:0.1.0-cu128' }
     $modelInputs = Get-ModelBuildFingerprint $PSScriptRoot $script:config.CASEWEAVE_BUILD_UV_IMAGE
     if (Test-ModelImageCurrent $modelImage $modelInputs) {
         Write-Host '模型构建输入未变化，复用已有模型镜像。'
     } else {
-        Step '模型输入变化或镜像缺失，构建模型服务' @('build', '--build-arg', "CASEWEAVE_MODEL_INPUT_HASH=$modelInputs", 'model-service')
+        Step '模型输入变化或镜像缺失，构建模型服务' @('build', '--build-arg', "CASEWEAVE_MODEL_INPUT_HASH=$modelInputs", 'model-prepare')
     }
     Step '构建应用更新（算子随应用部署）' @('build', 'app')
 }
@@ -100,18 +99,13 @@ try {
             }
             '--gpu' { $device = 'gpu' }
             '--cpu' { $device = 'cpu' }
-            '--env-file' { $i++; if ($i -ge $SetupArguments.Count) { throw '--env-file 缺少路径。' }; $envFile = $SetupArguments[$i]; $explicitEnv = $true }
-            '--trial' { $trial = $true }
+            '--env-file' { $i++; if ($i -ge $SetupArguments.Count) { throw '--env-file 缺少路径。' }; $envFile = $SetupArguments[$i] }
             '--non-interactive' { $nonInteractive = $true }
             '--check' { $checkOnly = $true; $nonInteractive = $true }
             '--no-build' { $build = $false }
             { $_ -in '--help', '-h' } { Show-Usage; exit 0 }
             default { throw "未知选项：$item" }
         }
-    }
-    if ($trial) {
-        $composeOptions = @('-p', 'caseweave-trial', '-f', (Join-Path $PSScriptRoot 'config/app/compose.trial.yml'))
-        if (-not $explicitEnv) { $envFile = Join-Path $PSScriptRoot 'local.env.trial' }
     }
     if (-not $action) { if ($device -or $checkOnly -or -not $build) { $action = 'install' } else { $action = 'start' } }
     if ($checkOnly -and $device) { throw '--check 不修改设备配置，请单独运行 --gpu 或 --cpu。' }
@@ -131,29 +125,12 @@ try {
     }
     $created = -not (Test-Path -LiteralPath $envFile)
     if ($created) {
-        if ($trial) { throw '试用配置缺失：请在local.env.trial填写CASEWEAVE_TRIAL_DATA、CASEWEAVE_TRIAL_MODEL_VOLUME和已有模型服务配置。' }
         if ($checkOnly -or $action -ne 'install') { throw '配置文件不存在，请运行 start.cmd 完成首次初始化。' }
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot '.env.example') -Destination $envFile
         Write-Host "已创建配置：$envFile"
     }
     $stage = '读取配置'; Read-Config
     $port = $script:config.RETRIEVAL_AGENT_WEB_PORT; if (-not $port) { $port = '3080' }
-    if ($trial) {
-        # 试用入口只消费已授权JSONL及已有权重，不下载示例集或初始化Milvus。
-        Test-ComposeConfig
-        if ($checkOnly) { Write-Host '三容器试用配置检查通过；未修改、构建或启动。'; exit 0 }
-        switch ($action) {
-            { $_ -in 'install', 'start' } {
-                Build-Application
-                Step '启动三容器试用并等待健康' @('up', '-d', '--wait', '--no-build', '--pull', 'never', 'mysql', 'model-service', 'app')
-                Write-Host "`n试用工作台已启动：http://127.0.0.1:$port/retrieval"
-            }
-            'stop' { Step '停止三容器试用，保留数据卷' @('stop', '--timeout', '60') }
-            'status' { Invoke-Compose ps --all }
-            'logs' { Invoke-Compose logs --tail 100 app model-service mysql }
-        }
-        exit 0
-    }
     if ($action -ne 'install') {
         Test-ComposeConfig
         switch ($action) {
@@ -164,7 +141,7 @@ try {
             }
             'stop' { Step '停止当前项目服务' @('stop', '--timeout', '60'); Write-Host '服务已停止，容器和数据卷保留。下次运行 start.cmd。' }
             'status' { Invoke-Compose ps --all }
-            'logs' { Invoke-Compose logs --tail 100 app model-service }
+            'logs' { Invoke-Compose logs --tail 100 app }
         }
         exit 0
     }
@@ -175,7 +152,7 @@ try {
     }
     if ($device) {
         if ($script:config.COMPOSE_PATH_SEPARATOR -ne ';') { throw '设备选择需要 COMPOSE_PATH_SEPARATOR=;。' }
-        $gpuFile = 'config/model-service/compose.gpu.yml'
+        $gpuFile = 'config/app/compose.gpu.yml'
         $files = @($script:config.COMPOSE_FILE -split ';' | Where-Object { $_ -ne $gpuFile })
         if ($device -eq 'gpu') { $files += $gpuFile }
         Save-Value 'COMPOSE_FILE' ($files -join ';')
@@ -196,15 +173,8 @@ try {
     if ($build) { Build-Application }
     else { Write-Host '[1/8] 使用已有镜像' }
     Step '[2/8] 下载并校验模型（首次下载可能较慢）' @('run', '--rm', '--no-deps', 'model-prepare', 'prepare', '--download')
-    Step '[3/8] 启动数据库与模型服务，等待健康检查' @('up', '-d', '--wait', '--no-build', 'mysql', 'milvus', 'model-service')
-    if ($script:config.RETRIEVAL_AGENT_DATA_PATH) {
-        Write-Host '[4/8] 使用已配置的只读工单文件，跳过示例数据下载。'
-    } else {
-        Step '[4/8] 下载数据、清洗脱敏并校验' @('run', '--rm', '--no-deps', 'app-prepare')
-    }
-    Step '[5/8] 导入工单并建立向量索引（支持续跑）' @('run', '--rm', '--no-deps', 'app-prepare', 'node', 'scripts/database.mjs', 'prepare')
-    Step '[6/8] 准备关键词索引' @('run', '--rm', '--no-deps', 'app-prepare', 'node', 'scripts/database.mjs', 'grams')
-    Step '[7/8] 验证数据与检索索引' @('run', '--rm', '--no-deps', 'app-prepare', 'node', 'scripts/database.mjs', 'verify')
+    Step '[3/8] 启动数据库与模型服务，等待健康检查' @('up', '-d', '--wait', '--no-build', 'mysql', 'milvus')
+    Step '[4/8] 初始化工单和检索索引' @('run', '--rm', '--no-deps', 'app-prepare', 'node', 'scripts/container-prepare.mjs')
     Step '[8/8] 启动工作台，等待健康检查' @('up', '-d', '--wait', '--no-build', 'app')
     Write-Host "`n部署完成：http://127.0.0.1:$port/retrieval"
     exit 0

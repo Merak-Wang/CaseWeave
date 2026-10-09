@@ -35,8 +35,8 @@ if(args[1]==='version'||args.includes('config')){const r=spawnSync(process.env.S
 if(args.includes('ps')&&args.includes('--services')){if(mode!=='uninitialized')console.log('app');process.exit(0)}
 appendFileSync(join(process.env.SETUP_FIXTURE,'calls.jsonl'),JSON.stringify(args)+'\\n');
 if(mode==='build-failure'&&args.includes('build'))process.exit(41);
-if(mode==='index-failure'&&args.at(-1)==='prepare'&&args.includes('scripts/database.mjs'))process.exit(37);
-if(mode==='gpu-failure'&&args.includes('up')&&args.includes('model-service'))process.exit(42);
+if(mode==='index-failure'&&args.includes('scripts/container-prepare.mjs'))process.exit(37);
+if(mode==='gpu-failure'&&args.includes('up')&&args.includes('app'))process.exit(42);
 if(mode==='start-failure'&&args.includes('up'))process.exit(43);
 `)
   if (configured) {
@@ -87,7 +87,7 @@ test('index failure stops before app startup; rerun preserves configuration and 
   const f = fixture({ mode: 'index-failure' }), before = readFileSync(join(f.dir, '.env'), 'utf8')
   const failed = f.run(['install', '--non-interactive'])
   assert.equal(failed.status, 37, failed.stderr)
-  assert.match(failed.stderr, /未完成：\[5\/8\]/u)
+  assert.match(failed.stderr, /未完成：\[4\/8\]/u)
   assert.ok(!failed.stdout.includes('部署完成'))
   assert.ok(!f.calls().some(call => call.includes('up') && call.at(-1) === 'app'))
   f.env.SETUP_TEST_MODE = ''
@@ -130,7 +130,7 @@ test('explicit GPU failure cannot fall back to CPU or announce completion', () =
   assert.equal(result.status, 42, result.stderr)
   assert.match(readFileSync(join(f.dir, '.env'), 'utf8'), /compose\.gpu\.yml/u)
   assert.ok(!result.stdout.includes('部署完成'))
-  assert.equal(f.calls().filter(call => call.includes('up')).length, 1)
+  assert.deepEqual(f.calls().filter(call => call.includes('up')).map(call => call.filter(value => ['mysql', 'milvus', 'app'].includes(value))), [['mysql', 'milvus'], ['app']])
 })
 
 for (const mode of ['offline', 'windows']) {
@@ -190,8 +190,8 @@ test('configured production ticket file skips example download but still imports
   writeFileSync(join(f.dir, '.env'), readFileSync(join(f.dir, '.env'), 'utf8') + '\nRETRIEVAL_AGENT_DATA_PATH=/app/data/company.jsonl\n')
   const result = f.run(['start', '--non-interactive'])
   assert.equal(result.status, 0, result.stderr)
-  assert.ok(!f.calls().some(call => call.at(-1) === 'app-prepare'))
-  assert.ok(f.calls().some(call => call.includes('scripts/database.mjs') && call.at(-1) === 'prepare'))
+  assert.equal(f.calls().filter(call => call.includes('scripts/container-prepare.mjs')).length, 1)
+  assert.ok(f.calls().some(call => call.includes('app-prepare') && call.includes('scripts/container-prepare.mjs')))
 })
 
 test('build failure leaves running containers alone and never announces startup success', () => {

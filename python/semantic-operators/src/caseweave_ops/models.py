@@ -9,7 +9,6 @@ from time import perf_counter
 from typing import Any
 from sklearn.model_selection import StratifiedGroupKFold
 import numpy as np
-from joblib import Parallel, delayed, parallel_config
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
@@ -192,21 +191,6 @@ def _fit(candidate, views, y, *, groups=None):
     return result
 
 
-def fit_models(views, y, *, workers=1, candidates=None, seed=0):
-    """Parallelize SMALL labeled data only. Worker pools cap nested BLAS threads."""
-    y = np.asarray(y)
-    if not np.isin(y, [-1, 0, 1]).all():
-        raise ValueError("Training labels must be determinate binary or unknown")
-    y = y.astype(np.int8)
-    candidates = candidates or model_bank(sparse="sparse" in views, seed=seed)
-    if workers == 1:
-        with threadpool_limits(limits=1):
-            return [_fit(c, views, y) for c in candidates]
-    with parallel_config(backend="loky", n_jobs=min(workers, len(candidates)),
-                         inner_max_num_threads=1, max_nbytes="1M"):
-        return Parallel()(delayed(_fit)(c, views, y) for c in candidates)
-
-
 def operating_point(y, scores, *, precision_target=.95, recall_target=.95, weights=None):
     """OOF/selection-only threshold. Nonfinite scores stay unknown, never negative."""
     y, scores = np.asarray(y), np.asarray(scores, dtype=np.float64)
@@ -236,31 +220,3 @@ def operating_point(y, scores, *, precision_target=.95, recall_target=.95, weigh
             "recall": float(r[idx]), "f1": float(f1[idx]), "feasible_on_selection": bool(feasible[idx]),
             "selection_unknown": int(np.count_nonzero(~valid)), "coverage": coverage,
             "nonfinite_scores": int(np.count_nonzero(known & ~np.isfinite(scores)))}
-
-
-def choose_model(models, views, y, *, corpus_size, precision_target=.95, recall_target=.95,
-                 weights=None, feature_seconds_per_row=None):
-    """Pick cheapest empirically feasible model, or best provisional challenger.
-
-    Timings are selection-block microbenchmarks, not production latency promises.
-    Selection metrics describe this holdout only, not population quality bounds.
-    """
-    board = []
-    feature_cost = feature_seconds_per_row or {}
-    for model in models:
-        X = views[model.view]
-        with threadpool_limits(limits=1):
-            scores = model.score(X)  # warm-up, then measure its actual serving path
-            times = []
-            for _ in range(3):
-                t = perf_counter(); model.score(X); times.append(perf_counter()-t)
-        point = operating_point(y, scores, precision_target=precision_target,
-                                recall_target=recall_target, weights=weights)
-        seconds = float(np.median(times))/len(y) + feature_cost.get(model.view, 0.)
-        board.append({"name": model.name, "view": model.view, **point,
-                      "fit_seconds": model.fit_seconds, "score_seconds_per_row": seconds,
-                      "estimated_execution_seconds": model.fit_seconds + corpus_size*seconds})
-    feasible = [i for i, row in enumerate(board) if row["feasible_on_selection"]]
-    winner = min(feasible, key=lambda i: board[i]["estimated_execution_seconds"]) if feasible else max(
-        range(len(board)), key=lambda i: (board[i]["f1"], -board[i]["estimated_execution_seconds"]))
-    return models[winner], board[winner]["threshold"], board

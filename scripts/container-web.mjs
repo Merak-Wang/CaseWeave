@@ -28,16 +28,35 @@ export function workbenchGateway(upstreamPort) {
   })
 }
 
+export async function startEmbeddedModel() {
+  // 模型进程只加载一次GPU权重，轻量stdio算子使用另一套Python环境。
+  const model = spawn('/app/.venv/bin/python', ['-m', 'retrieval_agent_model_service.container', 'serve'],
+    { stdio: 'inherit', env: process.env, windowsHide: true })
+  let modelExited = false
+  model.once('exit', () => { modelExited = true })
+  while (!modelExited) {
+    try {
+      const response = await fetch('http://127.0.0.1:8012/health/ready')
+      if (response.ok && (await response.json()).ready === true) break
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+  if (modelExited) throw new Error('应用内模型进程启动失败。')
+  return model
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const model = await startEmbeddedModel()
   const upstreamPort = 3081, server = workbenchGateway(upstreamPort)
-  const entrypoint = process.env.RETRIEVAL_AGENT_STORAGE === 'jsonl' ? 'scripts/retrieval-agent.mjs' : 'scripts/database-web.mjs'
-  const args = [...(entrypoint === 'scripts/retrieval-agent.mjs' ? ['web'] : []), '--host', '127.0.0.1', '--port', String(upstreamPort), '--no-open']
+  const entrypoint = 'scripts/database-web.mjs'
+  const args = ['--host', '127.0.0.1', '--port', String(upstreamPort), '--no-open']
   const child = spawn(process.execPath, [entrypoint, ...args],
     { stdio: 'inherit', env: process.env, windowsHide: true })
   server.on('error', error => { console.error(error.message); child.kill('SIGTERM'); process.exitCode = 1 })
   server.listen(3080, '0.0.0.0')
-  const stop = () => { server.close(); child.kill('SIGTERM') }
+  const stop = () => { server.close(); child.kill('SIGTERM'); model.kill('SIGTERM') }
+  model.once('exit', stop)
   process.on('SIGINT', stop); process.on('SIGTERM', stop)
-  child.on('error', error => { console.error(error.message); server.close(); process.exitCode = 1 })
-  child.on('exit', code => { server.close(); server.closeAllConnections(); process.exitCode = code ?? 1 })
+  child.on('error', error => { console.error(error.message); stop(); process.exitCode = 1 })
+  child.on('exit', code => { server.close(); server.closeAllConnections(); model.kill('SIGTERM'); process.exitCode = code ?? 1 })
 }

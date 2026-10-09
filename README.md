@@ -19,9 +19,9 @@
 
 ## 快速开始
 
-已有授权工单数据和模型权重时，使用已验证的三服务入口 `start.cmd --trial`，打开 `http://127.0.0.1:3080/retrieval`。此模式从 `local.env.trial` 读取 JSONL 路径及模型配置，业务数据只读，MySQL 保存任务和结果，embedding 服务负责索引和数值特征；不用启动 Milvus。配置步骤见 [三服务 GPU 试用](docs/DEVELOPMENT.md#三服务-gpu-试用)。
+使用单一 `start.cmd` 数据库部署入口；开发和生产通过本地配置选择数据集与模型，不另启动旧试用系统。工单导入MySQL，Milvus提供向量索引，app承载Node/DSH、常驻Python算子与模型API。自有文件配置见 [单一数据库部署入口](docs/DEVELOPMENT.md#单一数据库部署入口) 与 [导入自有工单文件](docs/DEVELOPMENT.md#导入自有工单文件)。
 
-该入口可对真实生产数据的授权副本进行本机试用，不会自动连接生产 Mongo，也不代表已完成远端生产上线。下面不带 `--trial` 的入口准备示例数据及完整 MySQL/Milvus 部署；生产数据库数据映射、导入及负载需另行验证。
+这套入口不会自动连接生产Mongo；需要提供已授权JSONL并完成导入、索引和一致性检查。真实生产数据上的本机验证不等于远端发布、人工业务准确率或生产SLA验收。
 
 获取源码可用 Git 或下载源码包。Windows 直接运行 `start.cmd`：自动准备 WSL 2，缺少 Docker 时从官方下载并安装 Docker Desktop（含 Compose），未运行时自动启动；无需 Git Bash。Linux 需先安装 Docker 和 Compose v2.20 或以上版本。GPU 模式需要 NVIDIA GPU 及可用的容器 GPU 支持。
 
@@ -96,7 +96,7 @@ bash setup.sh
 | 检查配置 | `setup.cmd --check` | `bash setup.sh --check` |
 | 重新检查完整安装 | `setup.cmd install` | `bash setup.sh install` |
 
-每次启动先准备 Docker，再构建应用、Python 算子和模型服务，Docker 自动复用未变化的构建层，再更新有变化的容器并等待健康检查。已有安装复用模型、索引和数据卷，不重新执行下载或索引准备。构建失败时停止部署，现有容器继续保留。电脑重启后直接运行 `start.cmd`。
+每次启动先准备 Docker，再按源码输入构建模型依赖镜像与应用，Docker 自动复用未变化的构建层，再更新有变化的容器并等待健康检查。Python算子和模型API运行在app内。已有安装复用模型、索引和数据卷，不重新执行下载或索引准备。构建失败时停止部署，现有容器继续保留。电脑重启后直接运行 `start.cmd`。
 
 仅需复用现有镜像时可显式运行 `start.cmd --no-build`。普通 `docker compose restart` 仍会运行原容器中的旧代码；源码更新使用启动入口即可。模型服务升级及回退见 [部署与运行](docs/DEVELOPMENT.md#mysql--milvus-与持久任务入口)。
 
@@ -108,7 +108,7 @@ bash setup.sh
 
 ## 技术与文档
 
-应用使用 TypeScript / Node.js 和 DSH 运行 Agent。当前三服务试用使用只读 JSONL 工单、MySQL 持久任务与结果、Python 模型服务的向量索引和 embedding；完整数据库配置提供 MySQL 工单与 Milvus 向量 Provider。两种数据模式的生产质量和性能须分别验证，浏览器工作台共用同一入口。
+应用使用 TypeScript / Node.js 和 DSH 运行 Agent。当前统一使用 MySQL 工单与持久任务、Milvus 向量 Provider；app内Python模型API提供embedding和数值特征。JSONL用于导入自有工单，浏览器工作台使用同一数据库入口。
 
 - [交互式产品介绍](docs/project-introduction.html)：下载后用浏览器打开，体验检索流程与证据分层示意。
 - [文档目录](docs/README.md)：按使用、部署和技术主题查阅。

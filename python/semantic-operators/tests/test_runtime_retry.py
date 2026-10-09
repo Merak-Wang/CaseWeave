@@ -1,11 +1,11 @@
 import asyncio
 import json
 import pytest
-from caseweave_ops.runtime import ModelRequestError, Runtime, ArtifactStore, ModelReply, Usage, SamplingLimitReached
+from caseweave_ops.runtime import ModelRequestError, Runtime, ArtifactStore, ModelReply, Usage
 from caseweave_ops.types import Scope, Knowledge
 from caseweave_ops import invoke_rows
 from conftest import source, collect
-from test_learning_sets import numeric_port
+from test_online_fusion import port as numeric_port
 from caseweave_ops.filter import DECISION_SCHEMA
 
 
@@ -72,37 +72,9 @@ def test_only_query_operations_retry(tmp_path, monkeypatch):
     assert len(port.requests) == 1
 
 
-def test_retry_last_slot_counts_physical_calls_and_restart_preserves_cap(tmp_path, monkeypatch):
-    path = tmp_path / "budget.sqlite"
-    store = ArtifactStore(path)
-    scope = Scope("t", 1, "s", "a")
-    for _ in range(127):
-        ident = store.begin("t", scope.key, "sem_filter", {"input_revision": 1})
-        store.finish(ident, "error", Usage(), "prior_failure")
-    port = Port([ModelRequestError("TRANSPORT", "failed", True), {"ok": True}, {"ok": True}])
-    rt = Runtime(scope, port, store, Knowledge("w"))
-    result = asyncio.run(rt.call("sem_filter", "x", {}, {"type": "object"}, sampling=True, use_cache=False))
-    assert result.payload == {"ok": True} and len(port.requests) == 2
-    assert store.sampling_calls(scope) == 128
-    rows = store.db.execute("select id,request_json,status from calls order by started").fetchall()
-    manifests = [json.loads(row[1]) for row in rows[-2:]]
-    assert [item["retry_attempt"] for item in manifests] == [0, 1]
-    assert manifests[1]["retry_of"] == rows[-2][0]
-    assert store.db.execute("select count(*) from calls").fetchone()[0] == 129
-    resumed = ArtifactStore(path)
-    rt.store = resumed
-    try:
-        with pytest.raises(SamplingLimitReached):
-            asyncio.run(rt.call("sem_filter", "x", {"new": True}, {"type": "object"}, sampling=True, use_cache=False))
-        assert len(port.requests) == 2 and resumed.sampling_calls(scope) == 128
-        assert resumed.metrics("t")["llm_adapter_calls"] == 129
-        assert resumed.metrics("t")["running"] == 0
-    finally:
-        resumed.close()
-        store.close()
 
 
-def test_concurrent_retries_meter_all_attempts_without_crossing_128_logical_calls(tmp_path, monkeypatch):
+def test_concurrent_retries_meter_all_attempts_without_request_cap(tmp_path, monkeypatch):
     class ConcurrentPort:
         identity = "concurrent-retry"
         def __init__(self): self.calls = 0
@@ -119,17 +91,16 @@ def test_concurrent_retries_meter_all_attempts_without_crossing_128_logical_call
         return await asyncio.gather(*(rt.call("sem_filter", "x", {"i": i}, {"type": "object"}, sampling=True,
             use_cache=False) for i in range(256)), return_exceptions=True)
     results = asyncio.run(run())
-    assert sum(not isinstance(result, Exception) for result in results) == 128
-    assert sum(isinstance(result, SamplingLimitReached) for result in results) == 128
-    assert store.sampling_calls(rt.scope) == 128
-    assert port.calls == 192
+    assert sum(not isinstance(result, Exception) for result in results) == 256
+    assert store.sampling_calls(rt.scope) == 256
+    assert port.calls == 320
     assert store.metrics("t")["failed_attempts"] == 64
 
 
 def test_filter_cancels_and_settles_sibling_requests_after_retry_exhaustion(make_runtime):
     import numpy as np
     rt = make_runtime()
-    numeric_port(rt, np.ones((2000, 2), dtype=np.float32), np.zeros(2000, dtype=np.int8))
+    numeric_port(rt)
     failing_ref = None
     async def fail(payload, request):
         nonlocal failing_ref

@@ -23,7 +23,7 @@ class ConstantTeacherSelection:
 
 
 async def online_group_filter(runtime, instruction, *, options=None, batch_size=8,
-        initial_refs=(), host_labels=None, require_source=True, required_fields=(), recall_scope_key=None):
+        require_source=True, required_fields=(), recall_scope_key=None):
     from .filter import judge_batch
     cfg = {"block_size": 1024, "pool_size": 4096, "sample_size": 128, "selection_size": 128,
         "workers": 1, "precision_target": .95, "recall_target": .95, "seed": 0, "concurrency": 4,
@@ -198,7 +198,6 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
                     yield {"type": "decision", "value": asdict(decision)}
             await update("sampling", sampling_phase="ranked_top128")
     try:
-        seeds = await call("features.seeds", {"refs": list(dict.fromkeys([*initial_refs, *(host_labels or {})]))})
         ranked = PrioritySample(cfg["pool_size"])
         await update("scanning")
         async for block in scan(discovery=True):
@@ -218,9 +217,6 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
         stats.update(groups_digest=digest([[i, metadata[i], roles[i]] for i in ids]),
             group_verified_records=sum(group is not None for group in all_groups),
             group_unverified_records=sum(group is None for group in all_groups))
-        seed_ids = list(dict.fromkeys(map(int, seeds.get("ids", []))))
-        if any(i not in seen_ids for i in seed_ids) or (seeds.get("feature_id") and seeds["feature_id"] != stats["feature_id"]):
-            raise ValueError("Seed identities differ from authorized scope")
         # 完整召回并集按真实相似度/ngram分数抽样，首屏展示种子不再覆盖排序。
         pool_order = list(map(int, ranked.ids))
         if checkpoint and checkpoint.get("protocol") == "online-group-resume-v1" and checkpoint["stats"].get("feature_id") == stats["feature_id"]:
@@ -239,13 +235,6 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
             else:
                 stats["snapshot_invalidated"] = "group_membership_or_role_changed"
             await update("resuming_discovery", reused_label_records=len(labels))
-        # Trusted current host labels are still bound to the actual row identity.
-        known = {int(i): int(v) for i, v in seeds.get("known_labels", {}).items() if int(i) in seen_ids and v in (0, 1)}
-        if known:
-            for start in range(0, len(known), 1024):
-                part = list(known)[start:start+1024]
-                for ident, row in zip(part, await read(part)):
-                    labels[ident], identities[ident] = known[ident], row.identity
         if not ids:
             raise ProtocolError("Empty authorized recall scope")
         # 排序前128工单只标一次；监督目标仅来自教师二分类伪标签。

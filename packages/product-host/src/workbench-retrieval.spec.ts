@@ -21,9 +21,7 @@ describe('retrieval workbench presentation', () => {
   it('describes actual feedback training and leaves legacy mode unspecified', () => {
     expect(executionDescription(undefined)).toBe('')
     expect(executionDescription({ onlineLearning: true, semanticMethod: 'auto' })).toBe('本任务：在线学习（模型伪标签）。')
-    const teacher = { onlineLearning: true, semanticMethod: 'direct_teacher', onlineFeedbackTraining: false }
-    expect(usesFeedbackLearning(teacher)).toBe(false)
-    expect(executionDescription(teacher)).toBe('本任务：固定判据逐条判断。')
+
   })
   it('shows sample knowledge usage even without a domain expert', () => {
     const orchestration = { experts: [], samplingKnowledge: { entries: [{ id: 'billing', reference: 'billing@2', requestCount: 12 }] } }

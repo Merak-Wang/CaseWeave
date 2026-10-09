@@ -16,7 +16,7 @@ export const evidenceScopeChanged = (previous, next) => previous.inputRevision !
 export const collectionBoundary = result => result.resultPagesExhausted ? '当前检索表达式已枚举完。' : '当前检索表达式未全部枚举。'
 const candidateMethods = ['dual_description_margin', 'name_gmm', 'kmeans']
 export const usesFeedbackLearning = execution => typeof execution?.onlineFeedbackTraining === 'boolean'
-  ? execution.onlineFeedbackTraining : execution?.onlineLearning !== false && !['direct', 'direct_teacher', ...candidateMethods].includes(execution?.semanticMethod)
+  ? execution.onlineFeedbackTraining : execution?.onlineLearning !== false && !candidateMethods.includes(execution?.semanticMethod)
 export const frozenMethodLabel = execution => ({ dual_description_margin: '双描述匹配', name_gmm: 'GMM 名称聚类', kmeans: 'KMeans 聚类' })[execution?.semanticMethod] ?? '固定判据逐条判断'
 export const hasUnmeasuredCandidates = execution => candidateMethods.includes(execution?.semanticMethod)
 export const executionDescription = execution => !execution ? '' : usesFeedbackLearning(execution)

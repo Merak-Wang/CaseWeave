@@ -484,9 +484,7 @@ function updateExecutionControls() {
   $('online-fusion-note').textContent = $('online-fusion').value === 'single'
     ? '根据训练组交叉拟合的教师一致率选择一个候选模型。'
     : '比较候选模型与融合方案，根据训练组交叉拟合的教师一致率选择。'
-  $('semantic-method-note').textContent = $('semantic-method').value === 'direct_teacher'
-    ? '按固定判据逐条判断；仍需要模型调用。'
-    : '该方式不调用教师学习，直接输出模型判断为相关的工单，可下载 XLSX；质量未人工评测。'
+  $('semantic-method-note').textContent = '该方式不调用教师学习，直接输出模型判断为相关的工单，可下载 XLSX；质量未人工评测。'
 }
 $('online-learning').onchange = updateExecutionControls
 $('semantic-method').onchange = updateExecutionControls

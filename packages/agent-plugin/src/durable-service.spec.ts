@@ -1647,7 +1647,7 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
     }
     if (deliveryScale) installWorkingContext(ctx, application)
     // 两条合成工单只验证 Python 判断的持久化接线；全集学习质量由独立评测验收。
-    if (operatorMode) new SemanticOperators(ctx, application, undefined, undefined, undefined, { algorithm: 'direct' })
+    if (operatorMode) new SemanticOperators(ctx, application, undefined, undefined, undefined)
     if (learning) new WikiLearningService(ctx, application, learning.root)
     installAutomaticRetrievalStart(ctx, application, { analyzer }); installRetrievalTools(ctx, application); installRetrievalRuntimeBudget(ctx, application)
     ctx.on('tools/result', (_exec, result) => { if (result.isError) errors.push(result.content) })

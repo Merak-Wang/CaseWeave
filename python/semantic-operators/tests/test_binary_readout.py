@@ -22,7 +22,7 @@ def test_actual_runtime_counts_two_rotations_once_per_ticket(make_runtime):
     assert all(d.label == 'accept' for d in result)
     assert rt.model.calls == rt.store.sampling_calls(rt.scope) == 16
     assert rt.judge_metrics['l0_records'] == 8
-    assert {p['review_stage'] for p in requests} == {'initial'}
+    assert all('review_stage' not in p for p in requests)
     assert all('分数未校准' in d.reason for d in result)
 
 

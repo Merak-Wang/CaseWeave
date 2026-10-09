@@ -148,7 +148,7 @@ export interface SemanticExecutionOptions {
   /** Missing settings preserve the historical single-model bank. */
   readonly onlineFusion?: 'single' | 'selective'
   readonly onlineModels?: readonly OnlineModelName[]
-  readonly semanticMethod: 'auto' | 'direct' | 'direct_teacher' | 'dual_description_margin' | 'name_gmm' | 'kmeans'
+  readonly semanticMethod: 'auto' | 'dual_description_margin' | 'name_gmm' | 'kmeans'
 }
 export interface TicketQueryContract {
   readonly semanticExecution?: SemanticExecutionOptions

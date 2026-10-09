@@ -96,7 +96,7 @@ async function fixture(method: Method, variant: Variant = 'normal') {
   const root = process.cwd()
   // Pin local stdio explicitly: ambient service/model environment cannot select a network endpoint.
   const bridge = new TraceBridge(root, resolve(tmpdir(), `caseweave-unlabeled-${randomUUID()}.sqlite`),
-    resolve(root, '.venv/Scripts/python.exe'), '')
+    resolve(root, '.venv/Scripts/python.exe'))
   try {
     await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime); await ctx.plugin(ToolRuntime)
     await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)

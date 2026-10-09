@@ -150,7 +150,8 @@ if [[ $action != install ]]; then
       if $build; then
         stage='构建应用（内置算子）和模型服务更新（复用 Docker 缓存）'
         printf '%s\n' "$stage"
-        compose build app model-service
+        compose build model-prepare
+        compose build app
       fi
       stage='启动更新后的服务，等待健康检查'
       printf '%s\n' "$stage"
@@ -166,7 +167,7 @@ if [[ $action != install ]]; then
       compose ps --all ;;
     logs)
       stage='读取最近日志'
-      compose logs --tail 100 app model-service ;;
+      compose logs --tail 100 app ;;
   esac
   exit 0
 fi
@@ -180,7 +181,7 @@ if [[ -n $device ]]; then
   files=$(value_of COMPOSE_FILE)
   separator=$(value_of COMPOSE_PATH_SEPARATOR)
   [[ $separator == ';' ]] || die '设备选择需要 COMPOSE_PATH_SEPARATOR=;，与 .env.example 保持一致。'
-  gpu_file='config/model-service/compose.gpu.yml'
+  gpu_file='config/app/compose.gpu.yml'
   IFS=';' read -r -a entries <<< "$files"
   files=''
   for entry in "${entries[@]}"; do
@@ -221,20 +222,14 @@ step() {
   compose "$@"
 }
 if $build; then
-  step '[1/8] 构建应用（内置算子）和模型服务镜像' build app model-service
+  step '[1/8] 构建应用（内置算子）和模型服务镜像' build model-prepare
+  step '构建应用' build app
 else
   printf '\n[1/8] 使用已有镜像\n'
 fi
 step '[2/8] 下载并校验模型（首次下载可能较慢）' run --rm --no-deps model-prepare prepare --download
-step '[3/8] 启动数据库与模型服务，等待健康检查' up -d --wait --no-build mysql milvus model-service
-if [[ -n $(value_of RETRIEVAL_AGENT_DATA_PATH) ]]; then
-  printf '\n[4/8] 使用已配置的只读工单文件，跳过示例数据下载。\n'
-else
-  step '[4/8] 下载数据、清洗脱敏并校验' run --rm --no-deps app-prepare
-fi
-step '[5/8] 导入工单并建立向量索引（按进度输出，支持续跑）' run --rm --no-deps app-prepare node scripts/database.mjs prepare
-step '[6/8] 准备关键词索引' run --rm --no-deps app-prepare node scripts/database.mjs grams
-step '[7/8] 验证数据与检索索引' run --rm --no-deps app-prepare node scripts/database.mjs verify
+step '[3/8] 启动数据库与模型服务，等待健康检查' up -d --wait --no-build mysql milvus
+step '[4/8] 初始化工单和索引' run --rm --no-deps app-prepare node scripts/container-prepare.mjs
 step '[8/8] 启动工作台，等待健康检查' up -d --wait --no-build app
 printf '\n部署完成：http://127.0.0.1:%s/retrieval\n' "$port"
 printf '%s\n' '请在工作台提交一次查询，确认主模型服务实际可用。关闭终端不会停止后台服务。'

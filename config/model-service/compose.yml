@@ -16,29 +16,7 @@ services:
     profiles: [prepare]
     command: [prepare]
     volumes: [model-weights:/models, model-cache:/cache]
-  model-service:
-    <<: *model-image
-    environment:
-      <<: *model-environment
-      RETRIEVAL_AGENT_MODEL_DEVICE: cpu
-      RETRIEVAL_AGENT_MODEL_MAX_BATCH_SIZE: ${RETRIEVAL_AGENT_MODEL_MAX_BATCH_SIZE:-16}
-      RETRIEVAL_AGENT_MODEL_MAX_TOTAL_TOKENS: ${RETRIEVAL_AGENT_MODEL_MAX_TOTAL_TOKENS:-8192}
-      RETRIEVAL_AGENT_INDEX_CHECKPOINT_BATCHES: ${RETRIEVAL_AGENT_INDEX_CHECKPOINT_BATCHES:-8}
-    ports: ['127.0.0.1:${RETRIEVAL_AGENT_MODEL_PORT:-8012}:8012']
-    volumes: [model-weights:/models:ro, model-cache:/cache]
-    read_only: true
-    tmpfs: [/tmp]
-    init: true
-    restart: 'on-failure:3'
-    stop_grace_period: 30s
-    mem_limit: ${RETRIEVAL_AGENT_MODEL_MEMORY:-8g}
-    cpus: ${RETRIEVAL_AGENT_MODEL_CPUS:-4}
-    healthcheck:
-      test: [CMD, python, '-m', retrieval_agent_model_service.container, health]
-      interval: 5s
-      timeout: 5s
-      start_period: 120s
-      retries: 12
+
 volumes:
   model-weights:
     name: ${RETRIEVAL_AGENT_VOLUME_PREFIX:-${COMPOSE_PROJECT_NAME:-retrieval-agent-database}}_model-weights

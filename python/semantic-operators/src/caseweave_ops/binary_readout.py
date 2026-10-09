@@ -1,7 +1,6 @@
 """AnyJev二元轮换、无标签先验修正；宿主HTTP读取，Runtime统一预算。"""
 import asyncio
 import numpy as np
-from .runtime import SamplingLimitReached
 from .types import Decision, verify_citations
 
 READOUT_SCHEMA = {'type': 'object', 'additionalProperties': False,
@@ -10,8 +9,7 @@ READOUT_SCHEMA = {'type': 'object', 'additionalProperties': False,
     'unavailable_reason': {'type': 'string'}}}
 
 
-async def judge_readout(runtime, records, instruction, key, compact_fallback, use_cache, sampling, review=False):
-    from .filter import unknown
+async def judge_readout(runtime, records, instruction, key, compact_fallback, use_cache, sampling):
     if not hasattr(runtime, 'judge_metrics'):
         runtime.judge_metrics = {'requested_mode': 'anyjev_l0', 'l0_records': 0,
             'rotation_only_records': 0, 'compact_fallback_records': 0}
@@ -24,15 +22,12 @@ async def judge_readout(runtime, records, instruction, key, compact_fallback, us
     content_free_prior = getattr(runtime, 'content_free_prior', None)
     async def calibrate_once():
         async def calibration(probe, rotation):
-            try:
-                reply = await runtime.call('sem_filter', instruction, {
-                    'decision_format': 'next_token_binary', 'rotation': rotation,
-                    'calibration_state': probe, 'records': []}, READOUT_SCHEMA, sampling=sampling)
-                if not reply.payload['available']:
-                    runtime.label_logprobs_unavailable = True
-                return rotation, reply.payload['p_first'] if reply.payload['available'] else None
-            except SamplingLimitReached:
-                return rotation, None
+            reply = await runtime.call('sem_filter', instruction, {
+                'decision_format': 'next_token_binary', 'rotation': rotation,
+                'calibration_state': probe, 'records': []}, READOUT_SCHEMA, sampling=sampling)
+            if not reply.payload['available']:
+                runtime.label_logprobs_unavailable = True
+            return rotation, reply.payload['p_first'] if reply.payload['available'] else None
         calibration_scores = await asyncio.gather(*(calibration(p, k)
             for p in ('N/A', '', '[MASK]') for k in range(2)))
         if all(score is not None for _, score in calibration_scores):
@@ -47,26 +42,20 @@ async def judge_readout(runtime, records, instruction, key, compact_fallback, us
         content_free_prior = await runtime.content_free_calibration
         runtime.content_free_prior = content_free_prior
         if getattr(runtime, 'label_logprobs_unavailable', False):
-            return await judge_readout(runtime, records, instruction, key, compact_fallback, use_cache, sampling, review)
+            return await judge_readout(runtime, records, instruction, key, compact_fallback, use_cache, sampling)
     async def read(record, rotation):
-        try:
-            reply = await runtime.call('sem_filter', instruction, {
-                'decision_format': 'next_token_binary', 'rotation': rotation,
-                'review_stage': 'criterion_gaps' if review else 'initial',
-                'records': [record.model_payload()]}, READOUT_SCHEMA, use_cache=use_cache, sampling=sampling)
-            return record.ref, rotation, reply
-        except SamplingLimitReached:
-            return record.ref, rotation, None
+        reply = await runtime.call('sem_filter', instruction, {
+            'decision_format': 'next_token_binary', 'rotation': rotation,
+            'records': [record.model_payload()]}, READOUT_SCHEMA, use_cache=use_cache, sampling=sampling)
+        return record.ref, rotation, reply
     readings = await asyncio.gather(*(read(r, k) for r in records for k in range(2)))
     by_ref = {r.ref: {} for r in records}
     for ref, rotation, reply in readings:
         by_ref[ref][rotation] = reply
-    valid, failed, exhausted = [], [], set()
+    valid, failed = [], []
     for r in records:
         pair = by_ref[r.ref]
-        if any(pair[k] is None for k in range(2)):
-            exhausted.add(r.ref)
-        elif all(pair[k].payload['available'] and pair[k].payload['p_first'] is not None for k in range(2)):
+        if all(pair[k].payload['available'] and pair[k].payload['p_first'] is not None for k in range(2)):
             valid.append(r)
         else:
             failed.append(r)
@@ -96,7 +85,7 @@ async def judge_readout(runtime, records, instruction, key, compact_fallback, us
         metrics['l0_records' if prior_used else 'rotation_only_records'] += len(valid)
         for r, probabilities in zip(valid, distribution):
             runtime.store.observe(runtime.scope.task_id, 'binary_readout_pair', {
-                'ref': r.ref, 'review': review, 'rotation_manifests': [by_ref[r.ref][k].manifest_id for k in range(2)],
+                'ref': r.ref, 'rotation_manifests': [by_ref[r.ref][k].manifest_id for k in range(2)],
                 'requested_prior': prior_method, 'prior_applied': bool(prior_used),
                 'p_yes': float(probabilities[0])})
             citations = verify_citations([{'ref': r.ref, 'passage_id': p.id, 'quote': p.text}
@@ -108,4 +97,4 @@ async def judge_readout(runtime, records, instruction, key, compact_fallback, us
     runtime.judge_metrics = metrics
     metrics['requested_prior'] = prior_method
     runtime.store.observe(runtime.scope.task_id, 'binary_readout', metrics)
-    return [unknown(r, key, 'sampling_request_limit') if r.ref in exhausted else outcomes[r.ref] for r in records]
+    return [outcomes[r.ref] for r in records]

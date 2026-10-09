@@ -142,33 +142,8 @@ def run(runtime, **options):
             'pool_size':256,'sample_size':128,**options}})))
 
 
-def test_public_route_full_scope_exploration_metadata_and_raw_final_holdout(make_runtime, monkeypatch):
-    rt=make_runtime(); updates,predicted,samples,begin,groups,y=port(rt,flipped_holdout=True)
-    seen_fit=[]; original=models._fit
-    def fit(candidate,views,labels,**kwargs):
-        seen_fit.extend(kwargs['groups'].tolist())
-        return original(candidate,views,labels,**kwargs)
-    monkeypatch.setattr(models,'_fit',fit)
-    run(rt)
-    final=updates[-1]
-    assert final['stop_reason']=='needs_coverage' and not predicted and not begin
-    assert final['discovery_remaining_records'] > 0 and final['sampling_requests'] < 128
-    assert final['threshold_metrics_oof']['precision'] >= .6
-    assert final['final_teacher_agreement']['agreement']==0
-    assert final['final_teacher_agreement']['raw_before_label_override']
-    assert final['final_teacher_agreement']['used_for_output_gate']
-    closure=group_closure(groups)
-    assert not set(closure[final['final_holdout_ids']]) & set(seen_fit)
-    assert final['exploration_records']>=25 and any(i>255 for i in samples)
-    assert final['selected_members'] and final['crossfit_folds']>=2
-    assert rt.model.calls==final['sampling_requests']
 
 
-def test_group_absence_retains_teacher_decisions_without_fabricated_unique_groups(make_runtime):
-    rt=make_runtime(); updates,predicted,_,_,_,_=port(rt,grouped=False)
-    events=run(rt)
-    assert events and updates[-1]['stop_reason']=='model_unknown' and not predicted
-    assert updates[-1]['group_unverified_records']==512 and updates[-1]['fit_count']==0
 
 
 def test_cancelled_window_can_resume_without_losing_completed_labels(make_runtime):
@@ -248,22 +223,3 @@ def test_explicit_six_method_names_remain_available_with_optional_sparse_view():
         methods=list(DEFAULT_METHODS),fusion='single')
     assert {row['name'] for row in manifest['models']}==set(DEFAULT_METHODS)
     assert selected.name in DEFAULT_METHODS
-
-
-def test_final_unknown_teacher_reference_is_counted_instead_of_negative_or_hidden(make_runtime):
-    from caseweave_ops.ensemble import group_roles
-    rt=make_runtime(); updates,predicted,_,_,groups,_=port(rt)
-    roles=group_roles(range(512),groups)
-    target=next(i for i in range(100) if roles[i]=='final_holdout')
-    original=rt.resources
-    async def missing(method,payload):
-        result=await original(method,payload)
-        if method=='rows.read':
-            for ident,row in zip(payload['ids'],result['rows']):
-                if ident==target: row['attributes']['required_evidence_fields']=['missing_original_dialogue']
-        return result
-    rt.resources=missing
-    run(rt)
-    assert predicted[target]==-1
-    assert updates[-1]['final_teacher_agreement']['reference_unknown']==1
-    assert updates[-1]['final_teacher_agreement']['reference_coverage']<1

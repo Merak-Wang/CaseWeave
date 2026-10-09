@@ -120,7 +120,7 @@ class TraceBridge extends PythonOperatorBridge {
 }
 async function fixture(execution: SemanticExecutionOptions, flipFinalTeacher = false, complementary = false) {
   const ctx = new Context(), root = process.cwd(), calls = { intent: 0, teacher: 0, main: 0, rank: 0 }
-  const bridge = new TraceBridge(root, resolve(tmpdir(), 'caseweave-online-' + randomUUID() + '.sqlite'), resolve(root, '.venv/Scripts/python.exe'), '')
+  const bridge = new TraceBridge(root, resolve(tmpdir(), 'caseweave-online-' + randomUUID() + '.sqlite'), resolve(root, '.venv/Scripts/python.exe'))
   const teacherLabels = new Map<number, number>(), vectors = complementary ? complementaryVectors(poolCount + outsideCount) : undefined
   let dispose: (() => Promise<void>) | undefined
   try {

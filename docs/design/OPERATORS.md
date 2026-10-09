@@ -14,9 +14,9 @@
 
 `工作台任务 → task-worker/pre-step/sem_filter 工具 → SemanticOperators.filter → PythonOperatorBridge → server.Bridge.execute → invoke_rows → filter.sem_filter → online_group_filter`。
 
-`auto` 和 `learned` 进入同一学习主干，`active` 是已有配置消费者的薄别名。无明确示例数量时，对关键词 OR 全部字面命中与语义召回结果的去重并集进行学习筛选；这里的“召回全集”不包含未进入并集的授权工单。`direct` 仅为显式小范围参照；`baseline/cluster` 按需加载独立 `baseline.py`，保留旧区域算法用于迁移对照，不是失败回退。缺少数值 Provider 时默认召回并集筛选报错，不逐条强判。
+`auto` 和 `learned` 进入同一固定128学习主干，`active` 是配置薄别名。学习范围为关键词OR与语义召回去重并集；缺少数值Provider报技术失败，不回退逐条强判。公开方法包括在线 `auto` 与无反馈 `dual_description_margin`、`name_gmm`、`kmeans`，判断模式为 `compact_binary` 或 `anyjev_l0`；不提供旧direct/baseline/cluster/frozen_teacher路径。
 
-Python 包的模块按职责收敛：三个算子各一文件，模型与数值块各一文件；`search.py` 保留现有一次规划与检索回调，`runtime.py` 统一模型回调、缓存和计量，`server.py` 共用 stdio/WebSocket 服务。抽样归入 `features.py`，证据选择归入 `aggregate.py`，分发直接位于包入口。没有独立 JSONL、embedding 或 HTTP 模型适配，也没有第二套 Python 启动编排。
+Python 包的模块按职责收敛：三个算子各一文件，模型与数值块各一文件；`search.py` 保留现有一次规划与检索回调，`runtime.py` 统一模型回调、缓存和计量，`server.py` 仅提供常驻stdio服务。抽样归入 `features.py`，证据选择归入 `aggregate.py`，分发直接位于包入口。没有独立 JSONL、embedding 或 HTTP 模型适配，也没有第二套 Python 启动编排。
 
 Python `Runtime.call` 只覆盖 `query_plan`、`sem_filter`、`sem_extract`、`sem_agg` 的模型回调；收到明确可重试的传输/超时/限流/服务端错误，或模型 JSON 结构缺少必填字段、不符合输出 schema（`OUTPUT_SCHEMA`）时，对该逻辑请求最多执行三次物理尝试，即首次加最多两次重试。默认等待 1 秒、2 秒；供应商给出更长等待提示时优先采用，但单次最多等 30 秒。每次尝试有独立调用 ID、DSH 清单和回执，实际失败、成功与 token 用量均分别计量；每次尝试前重新核验作用域，取消会打断等待。凭据、模型配置、额度等明确永久错误及未知错误不重试。JSON schema 重试不放宽引用身份、证据或业务校验；查询规划中部分计划约束另有一次带校验原因的修正机会。自定义检索的128是固定排序标注工单数，不是把初判、复核和扩标串联的独立请求额度；技术重试与AnyJev双轮的实际物理调用仍计量。该策略不是主 Agent、最终报告或所有模型调用的通用重试规则；Python 请求耗尽后返回终态错误，由 Host 结束本轮为未完成并保留确认结果，不自动重新执行整份检索作业。
 

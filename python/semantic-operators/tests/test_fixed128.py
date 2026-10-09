@@ -50,3 +50,18 @@ def test_single_class_teacher_uses_constant_without_extra_labels(make_runtime):
     assert updates[-1]['quality']['basis'] == 'teacher_single_class'
     assert len(predicted) == 512 and set(predicted.values()) == {0}
     assert rt.model.calls == 16
+
+
+def test_only_teacher_labels_train_without_host_seed_import(make_runtime):
+    from caseweave_ops.filter import learned_filter
+    from conftest import collect
+    rt = make_runtime()
+    updates, _, samples, _, _, _ = port(rt)
+    original = rt.resources
+    async def resources(method, payload):
+        assert method != "features.seeds", "Host judgments must never become training labels"
+        return await original(method, payload)
+    rt.resources = resources
+    asyncio.run(collect(learned_filter(rt, "synthetic predicate", require_source=False)))
+    assert len(samples) == 128
+    assert updates[-1]["training_records"] == 128

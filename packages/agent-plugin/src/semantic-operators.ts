@@ -58,7 +58,7 @@ export class SemanticOperators {
   private readonly metricsReady: Promise<void>
   constructor(readonly ctx: Context, readonly application: RetrievalAgentService, readonly wikiRoot?: string,
     readonly root = process.cwd(), bridge?: PythonOperatorBridge,
-    readonly filterConfig: { readonly algorithm?: 'auto' | 'cluster' | 'active' | 'learned' | 'baseline' | 'direct'; readonly batchSize?: number; readonly options?: Readonly<Record<string, number | string>> } = {}) {
+    readonly filterConfig: { readonly algorithm?: 'auto' | 'learned'; readonly batchSize?: number; readonly options?: Readonly<Record<string, number | string>> } = {}) {
     this.bridge = bridge ?? new PythonOperatorBridge(root)
     application.operators = this
     this.metricsReady = installSessionMetrics(ctx)
@@ -387,12 +387,9 @@ export class SemanticOperators {
     const execution = state.query.contract?.semanticExecution
     const method = execution?.semanticMethod ?? 'auto'
     const unlabeled = ['dual_description_margin', 'name_gmm', 'kmeans'].includes(method)
-    const algorithm = unlabeled ? method : plan.goal.mode === 'examples' || execution?.onlineLearning === false
-      || ['direct', 'direct_teacher'].includes(method) ? 'direct' : this.filterConfig.algorithm ?? 'auto'
-    const fullScope = unlabeled || plan.goal.mode !== 'examples'
-      && (execution?.onlineLearning === false || method === 'direct_teacher' || ['auto', 'active', 'learned'].includes(algorithm))
+    const algorithm = unlabeled ? method : this.filterConfig.algorithm ?? 'auto'
     let recallScope: string | undefined
-    if (fullScope) {
+    {
       state = await this.discoverPlanned(agent, signal)
       if (state.searchProgress?.channels.some(channel => channel.status === 'failed')) throw new RetrievalError('PROVIDER_UNAVAILABLE', '召回通道失败，完整召回并集尚未建立。')
       recallScope = state.lastPage?.recallScope
@@ -421,8 +418,8 @@ export class SemanticOperators {
     const requiredFields = unlabeled ? [] : planFields
     const discoveryKey = (s: RetrievalState) => hash(['ngram-vector-desc-v1', recallScope, s.candidates.map(c => c.ref).sort(), s.promotedEvidence.map(e => e.evidenceId).sort(), this.filterConfig.options, requiredFields])
     if (lastLearning?.input_revision === generation && lastLearning.stop_reason === 'model_unknown') return this.finishUnknown(agent)
-    if (fullScope && lastLearning?.input_revision === generation
-      && (['quality_passed', 'quality_fallback', 'frozen_completed', 'complete'].includes(lastLearning.stop_reason ?? '') || lastLearning.discovery_key === discoveryKey(state)
+    if (lastLearning?.input_revision === generation
+      && (['quality_passed', 'quality_fallback', 'complete'].includes(lastLearning.stop_reason ?? '') || lastLearning.discovery_key === discoveryKey(state)
         && (['quality_not_met', 'needs_information'].includes(lastLearning.stop_reason ?? '')
           || lastLearning.stop_reason === 'needs_coverage' && !(lastLearning.discovery_remaining_records! > 0)))) return state
     const byRef = new Map(state.candidates.map(c => [c.ref, c]))
@@ -435,7 +432,7 @@ export class SemanticOperators {
     }) : state.candidates).filter(c => !known.has(c.ref))
     // 少量案例每轮只审阅一个窗口后交回 Agent；未决项由 Agent 定向补证，不盲扫整池。
     if (exampleWindow) candidates = candidates.slice(0, this.application.reviewBatchSize)
-    if ((!fullScope && !candidates.length) || (!refs && plan.goal.mode === 'examples' && state.selectedCandidateRefs.length >= plan.goal.count!)) return state
+    if (!refs && plan.goal.mode === 'examples' && state.selectedCandidateRefs.length >= plan.goal.count!) return state
     // 模型每次判断的样本数独立配置，不改变 Agent 的证据窗口与结果提交批次。
     const commitBatchSize = Math.min(this.application.reviewBatchSize, 8)
     const batchSize = this.filterConfig.batchSize ?? commitBatchSize
@@ -491,13 +488,11 @@ export class SemanticOperators {
     const predicate = [state.query.original, ...(state.userFeedback ?? []).map(f =>
       `用户补充：${f.question ? `针对“${f.question}”：` : ''}${f.text}`)].join('\n')
     const metrics = await this.run(agent, this.runInput(agent, state, knowledge, 'sem_filter', predicate,
-      { algorithm, scope_mode: fullScope ? 'full' : 'candidates', ...(recallScope ? { recall_scope_key: recallScope } : {}), options: { ...this.filterConfig.options,
+      { algorithm, scope_mode: 'full', ...(recallScope ? { recall_scope_key: recallScope } : {}), options: { ...this.filterConfig.options,
         ...(execution?.onlineFusion ? { fusion: execution.onlineFusion } : {}),
-        ...(execution?.onlineModels ? { methods: execution.onlineModels } : {}) }, online_feedback_training: !unlabeled && method !== 'direct_teacher' && execution?.onlineLearning !== false, initial_refs: state.candidates.map(c => c.ref),
+        ...(execution?.onlineModels ? { methods: execution.onlineModels } : {}) },
         batch_size: batchSize, require_source: !unlabeled && plan.steps.some(s => s.op === 'sem_filter' && s.params.require_source === true),
         required_fields: requiredFields, replay_saved: true,
-        host_labels: Object.fromEntries((state.judgments ?? []).filter(j => j.basis !== 'proxy').map(j =>
-          [j.candidateRef, j.verdict === 'accept' ? 1 : j.verdict === 'exclude' ? 0 : -1])),
         ...(!unlabeled && !refs && plan.goal.mode === 'examples' ? { example_count: plan.goal.count! - state.selectedCandidateRefs.length } : {}) }),
     async (method, payload) => {
       if (method === 'llm.generate' || method === 'llm.reuse') {
@@ -508,29 +503,20 @@ export class SemanticOperators {
       }
       await flush()
       let now = await current()
-      if (['features.scan', 'features.take', 'features.seeds'].includes(method)) {
+      if (['features.scan', 'features.take'].includes(method)) {
         const p = object(payload), provider = this.ctx.ticketRetrievalProvider
         if (!provider.featureBlock) throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Provider 尚未提供授权数值块；不会退回全库逐条强判。')
         const principal = await this.application.principal(agent, 'detail_read', signal)
         const block = await provider.featureBlock(principal,
           { snapshotId: state.snapshot!.snapshotId, limit: p.page_size ? Math.min(2048, Number(p.page_size)) : Number((p.ids as number[] | undefined)?.length ?? (p.refs as string[] | undefined)?.length ?? 2048),
-            filters: state.query.confirmedConstraints, ...(recallScope ? { recallScope } : {}), ...(method === 'features.seeds' || p.ranked === true ? { rankingQuery: predicate } : {}),
+            filters: state.query.confirmedConstraints, ...(recallScope ? { recallScope } : {}), ...(p.ranked === true ? { rankingQuery: predicate } : {}),
             ...(p.cursor !== null && p.cursor !== undefined ? { cursor: String(p.cursor) } : {}),
             ...(p.ids ? { ids: p.ids as number[] } : {}), ...(p.refs ? { refs: p.refs as TicketCandidateRef[] } : {}) }, signal ? { signal } : {})
-        if (method !== 'features.seeds') return block
-        if (!provider.resolveFeatureIds) throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Provider 尚未提供数值来源映射。')
-        const seedRows = await provider.resolveFeatureIds(principal, { snapshotId: state.snapshot!.snapshotId, ids: block.ids }, signal ? { signal } : {})
-        const strong = new Map((state.judgments ?? []).filter(j => j.basis !== 'proxy').map(j => [j.candidateRef, j.verdict]))
-        // 使用与召回并集扫描相同的原句相关分数；未提供评分时沿用召回顺序。
-        const seedScores = Object.fromEntries(seedRows.map((row, i) => { const candidate = byRef.get(row.ref)
-          return [block.ids[i], block.scores?.[i] ?? (candidate ? 1 / (1 + candidate.rank) : 0)] }))
-        // 种子只传数值 ID、抽样优先级和已有标签，向量随后按块取回。
-        return { ids: block.ids, feature_id: block.feature_id, ...(block.row_groups ? { row_groups: block.row_groups } : {}), scores: seedScores, known_labels: Object.fromEntries(seedRows.flatMap((row, i) => strong.has(row.ref)
-          ? [[block.ids[i], strong.get(row.ref) === 'accept' ? 1 : strong.get(row.ref) === 'exclude' ? 0 : -1]] : [])) }
+        return block
       }
       if (method === 'features.anchor') {
         const p = object(payload), provider = this.ctx.ticketRetrievalProvider
-        if (!unlabeled || !fullScope || !recallScope || !provider.featureAnchors || typeof p.feature_id !== 'string')
+        if (!unlabeled || !recallScope || !provider.featureAnchors || typeof p.feature_id !== 'string')
           throw new RetrievalError('PROVIDER_UNAVAILABLE', '无标签方法需要当前授权召回范围及同模型锚点接口。')
         if (p.method !== algorithm || p.recall_scope_key !== undefined && p.recall_scope_key !== recallScope)
           throw new RetrievalError('INVALID_REQUEST', '锚点请求不属于当前方法或召回范围。')
@@ -604,7 +590,7 @@ export class SemanticOperators {
         for (const [i, c] of batch.entries()) {
           const row = rows[i]!
           const fields = [...new Set([...requiredFields, ...(row.attributes!.required_evidence_fields as string[])])]
-            .filter(f => (fullScope || !row.passages.some(p => p.field === f && p.origin === 'source' && p.text))
+            .filter(f => true
               && now.snapshot!.fieldCatalog.some(field => field.key === f))
           if (!fields.length) continue
           const key = fields.sort().join('\n'), read = reads.get(key) ?? { fields, refs: [] }

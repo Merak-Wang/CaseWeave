@@ -89,3 +89,4 @@ wiki/.staging/
 .DS_Store
 Thumbs.db
 Desktop.ini
+/local.compose.yml

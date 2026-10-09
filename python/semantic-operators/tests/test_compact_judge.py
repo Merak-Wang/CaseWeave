@@ -41,7 +41,7 @@ def test_compact_binary_keeps_actual_evidence_without_second_review(make_runtime
     assert [(c.field, c.quote, c.origin) for c in output[0].citations] == [
         ('title', '设备故障', 'generated'), ('summary', '用户报告路由器频繁掉线。', 'generated')]
     assert rt.model.calls == 1
-    assert [p['review_stage'] for p, _ in requests] == ['initial']
+    assert all('review_stage' not in p for p, _ in requests)
     assert all('citations' not in r['schema']['properties']['rows']['items']['properties'] for _, r in requests)
 
 

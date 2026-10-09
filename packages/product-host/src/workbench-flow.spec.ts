@@ -13,7 +13,6 @@ describe('persistent retrieval workflow', () => {
   })
   it('shows the actual frozen method without inventing feedback model selection', () => {
     const snapshot = (semanticMethod: string) => ({ orchestration: { retrieval: { execution: { onlineLearning: false, semanticMethod } } } })
-    expect(workflowSteps(snapshot('direct_teacher'))[1]!.note).toBe('固定判据逐条判断')
     expect(workflowSteps(snapshot('name_gmm'))[1]!.note).toBe('固定判别 · 未测量候选')
   })
   it('keeps expert work within filtering and does not invent a completed report', () => {
@@ -32,7 +31,6 @@ describe('persistent retrieval workflow', () => {
   })
   it('shows saved selective execution and treats historical teacher mode consistently', () => {
     expect(workflowSteps({ orchestration: { retrieval: { execution: { onlineLearning: true, semanticMethod: 'auto', onlineFusion: 'selective' } } } })[1]!.note).toBe('抽样、领域判断与融合选择')
-    expect(workflowSteps({ orchestration: { retrieval: { execution: { onlineLearning: true, semanticMethod: 'direct_teacher' } } } })[1]!.note).toBe('固定判据逐条判断')
   })
   it('rejects invalid and contradictory sample counts instead of inventing a split', () => {
     const valid = { trainingCount: 34, selectionCount: 256, unresolvedCount: 149, quality: { basis: 'selection', selection_unknown: 119 } }

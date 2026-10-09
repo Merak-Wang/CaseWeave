@@ -5,7 +5,7 @@ export function workflowSteps(snapshot, reportStatus = 'pending') {
   const review = ['review', 'experts', 'synthesis'].includes(o?.stage)
   const execution = o?.retrieval?.execution
   const frozen = typeof execution?.onlineFeedbackTraining === 'boolean' ? !execution.onlineFeedbackTraining
-    : execution?.onlineLearning === false || ['direct', 'direct_teacher', 'dual_description_margin', 'name_gmm', 'kmeans'].includes(execution?.semanticMethod)
+    : execution?.onlineLearning === false || ['dual_description_margin', 'name_gmm', 'kmeans'].includes(execution?.semanticMethod)
   const recalled = o?.fastQueryComplete || snapshot.node?.searchProgress?.channels.some(c => c.status === 'completed')
   const filtered = Boolean(result) && o?.outcome !== 'cancelled' && o?.retrieval?.filterActivity !== 'failed'
   const reportState = !result || unavailable ? 'upcoming' : reportStatus === 'ready' ? 'done'
