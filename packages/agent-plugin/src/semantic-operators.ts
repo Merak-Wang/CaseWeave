@@ -117,7 +117,7 @@ export class SemanticOperators {
     if (!system || input.messages.some(m => !['system', 'user'].includes(m.role))) throw new RetrievalError('PROTOCOL_MISMATCH', '不支持的算子模型消息。')
     const request: GenerateOptions = { provider: config.provider, model: config.model, reasoningEffort: config.reasoningEffort, sessionId: SessionId(`operator-${input.manifest_id}`),
       ...(signal ? { signal } : {}), system,
-      ...(input.operation === 'query_plan' ? { maxTokens: 2048 } : nextTokenDecision ? { maxTokens: 1, temperature: 1 } : compactDecision ? { maxTokens: 1024 } : {}),
+      ...(input.operation === 'query_plan' ? { maxTokens: 2048, temperature: 0 } : nextTokenDecision ? { maxTokens: 1, temperature: 1 } : compactDecision ? { maxTokens: 1024 } : {}),
       tools: nextTokenDecision ? [] : [{ name: 'submit_result', description: compactDecision ? 'Submit yes/no and confidence for every supplied ticket.' : 'Submit the operator result with source citations.', parameters: input.schema }],
       messages: input.messages.filter(m => m.role === 'user').map(m => createUserMessage({ content: [{ type: 'text', text: m.content }],
         source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot', sections: [{ name: input.operation, text: m.content }] } })) }

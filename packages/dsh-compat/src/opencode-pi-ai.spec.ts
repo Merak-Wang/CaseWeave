@@ -60,9 +60,9 @@ describe('pinned pi-ai OpenCode session routing', () => {
         type: 'finish', reason: { kind: 'error', failure: { code: 'INVALID_REQUEST', message: 'OpenCode inference requires a conversation sessionId.' } },
       })
       expect(headers).toHaveLength(sent)
-      const off = await drain(ctx.llm.stream({ ...request(second), model: 'deepseek-v4.1-flash', reasoningEffort: ReasoningEffortId('off'), maxTokens: 64 }))
+      const off = await drain(ctx.llm.stream({ ...request(second), model: 'deepseek-v4.1-flash', reasoningEffort: ReasoningEffortId('off'), maxTokens: 64, temperature: 0 }))
       expect(off.at(-1), JSON.stringify(off)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
-      expect(bodies.at(-1)).toMatchObject({ thinking: { type: 'disabled' } })
+      expect(bodies.at(-1)).toMatchObject({ thinking: { type: 'disabled' }, temperature: 0 })
       await drain(ctx.llm.stream({ ...request(second), model: 'deepseek-v4.1-flash', reasoningEffort: ReasoningEffortId('high') }))
       expect(bodies.at(-1)?.thinking).not.toEqual({ type: 'disabled' })
       await drain(ctx.llm.stream({ ...request(second), provider: 'unrelated-fixture' }))

@@ -170,7 +170,10 @@ async def plan_fixed_query(runtime: Runtime, query: str, confirmed_context: str,
     if canonical_fixed_context(context) is None:
         return await _plan_fixed_legacy_query(runtime, query, confirmed_context, context)
     schema = fixed_custom_query_schema(context)
-    instruction = ("一次生成工单检索计划：keywords是关键词OR宽召回；retrieval_expressions是1到3条语义检索改写。"
+    instruction = ("一次生成工单检索计划：keywords用于跨字段字面匹配的OR宽召回，至少覆盖用户问题中核心领域或实体的独立短词；"
+        "事件或动作另列有辨识度的短词或短语，可以保留少量组合词，但不能只列组合句。"
+        "不要把问题、异常、失败、相关、工单等无辨识度泛词独立作为OR关键词。"
+        "关键词负责宽召回，是否满足完整业务要求由instruction判断。retrieval_expressions是1到3条语义检索改写。"
         "instruction完整保留用户业务对象、状态、纳入与排除条件，不新增硬条件。"
         "工单判断只读取title和summary。structured_conditions仅用于用户明确要求的结构化字段过滤，"
         "必须选search_fields中给出的字段及支持运算，source_text逐字引用query；语义要求放instruction，不能把title/summary当结构化字段，无则[]。"

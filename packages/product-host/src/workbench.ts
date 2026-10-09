@@ -8,11 +8,11 @@ const plus = icon('<path d="M12 5v14M5 12h14"/>')
 const arrow = icon('<path d="M12 19V5m-6 6 6-6 6 6"/>')
 const close = icon('<path d="m6 6 12 12M18 6 6 12"/>')
 const examples = [
-  { title: '工号、系统账号与权限问题', query: '找工作人员工号、业务系统账号及使用权限相关的工单。包含登录、密码重置、身份认证、账号绑定、角色或菜单权限、授权申请；排除客户手机号或宽带账户的普通缴费、资费和密码业务。' },
-  { title: '宽带无法上网', query: '帮我找宽带无法上网的工单。包含宽带不能上网、无法连接或掉线中断，历史故障已解决也包含；排除仅安装、移机或资费咨询，以及仅手机移动数据无法上网。' },
-  { title: '套餐变更办理失败', query: '帮我找套餐变更办理失败的工单。包含更换套餐、改档或套餐变更时不能办理、受理失败、系统报错或受到限制，之后解决也包含；排除仅咨询、比较资费和没有办理异常的正常变更。' },
+  { title: '账号权限异常', query: '帮我找账号权限异常相关工单' },
+  { title: '宽带无法上网', query: '帮我找宽带无法上网相关工单' },
+  { title: '套餐变更失败', query: '帮我找套餐变更失败相关工单' },
 ]
-const exampleHtml = examples.map(example => `<button data-query="${example.query}"><span class="example-icon">${search}</span><span><small>包含纳入与排除条件</small><strong>${example.title}</strong></span><span class="example-arrow">↗</span></button>`).join('')
+const exampleHtml = examples.map(example => `<button data-query="${example.query}"><span class="example-icon">${search}</span><span><small>自然语言检索</small><strong>${example.title}</strong></span><span class="example-arrow">↗</span></button>`).join('')
 const brand = icon('<path d="M5 4h5v6H4V5a1 1 0 0 1 1-1Zm9 0h5a1 1 0 0 1 1 1v5h-6ZM4 14h6v6H5a1 1 0 0 1-1-1Zm10 0h6v5a1 1 0 0 1-1 1h-5ZM10 7h4M7 10v4m10-4v4m-7 3h4"/>', 'brand-mark')
 
 /** All task and source content is inserted as text by the bundled browser client. */
