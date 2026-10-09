@@ -49,7 +49,7 @@ Provider 的 embedding 排名、服务健康状态和工程检查分别反映局
 
 召回范围验收应构造两路有重叠、并集外仍有授权工单的来源，按工单身份核对去重数量。完整召回前允许进度写入，但特征读取与数值学习均未开始；正文页仍有 `nextCursor` 不妨碍完整并集学习。分别检查空并集、单路失败、召回范围变化和旧全库预测结果恢复：空集合不回退全库，失败不以部分结果训练，范围外旧判断不能进入当前报告或下载。Provider 的特征扫描、按 ID 读取和种子读取均须限定同一个 `recallScope`，仅检查页面计数不足以证明隔离。
 
-[`discovery-pipeline.spec.ts`](../packages/agent-plugin/src/discovery-pipeline.spec.ts) 验证召回与学习的先后关系和失败路径；[`semantic-operators.spec.ts`](../packages/agent-plugin/src/semantic-operators.spec.ts) 通过实际 Python 算子验证范围传递。恢复验收使用 [`durable-service.spec.ts`](../packages/agent-plugin/src/durable-service.spec.ts) 的公开 HTTP 入口：停止后提交 `resume`，核对任务 ID、查询条件代次、已确认引用及筛选计数保持，重复命令只产生一次回执；条件修订仍拒收旧作业结果。这些受控用例不代替真实业务集合质量评测。
+[`discovery-pipeline.spec.ts`](../packages/agent-plugin/src/discovery-pipeline.spec.ts) 验证召回与学习的先后关系和失败路径；[`online-consumer.spec.ts`](../packages/agent-plugin/src/online-consumer.spec.ts) 通过实际 Python 算子验证范围传递。恢复验收使用 [`durable-service.spec.ts`](../packages/agent-plugin/src/durable-service.spec.ts) 的公开 HTTP 入口：停止后提交 `resume`，核对任务 ID、查询条件代次、已确认引用及筛选计数保持，重复命令只产生一次回执；条件修订仍拒收旧作业结果。这些受控用例不代替真实业务集合质量评测。
 
 排序标注需检查高 ID 的高分候选仍先读、分页不改变顺序、前排留出候选不会因训练缺类而被搁置、续跑从尚未标注处继续，以及训练/选择角色不重叠。历史标签排名复盘仅说明已知正例提前程度；未标注记录不能当作负例，排序选择集的经验指标不能冒充总体质量。
 
