@@ -47,8 +47,8 @@ function error(e, source = 'action') {
   if (saved(pendingKey).length) target.append(text('span', ' 输入已保留。'), button('重试提交', () => retrySaved()))
 }
 function clearError(source) { for (const id of ['error', 'delivery-error', 'feedback-error']) if (!source || $(id).dataset.source === source) { $(id).hidden = true; $(id).replaceChildren() } }
-async function api(path, body) {
-  const response = await fetch(path, { ...(body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(30000) })
+async function api(path, body, signal) {
+  const response = await fetch(path, { ...(body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}), signal: signal ?? AbortSignal.timeout(30000) })
   let data; try { data = await response.json() } catch { throw new Error('服务响应无法读取，请重试。') }
   if (!response.ok) { const e = new Error(data.message || '请求失败'); e.code = data.code; e.retryable = data.retryable; throw e }
   return data

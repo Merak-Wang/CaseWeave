@@ -312,7 +312,7 @@ CPU/GPU由本地设备配置及app GPU Compose覆盖选择；GPU覆盖路径为 
 | `pnpm exec vitest run packages/agent-plugin/src/service.spec.ts` | 运行指定相邻测试；路径可换成受影响的现有 spec |
 | `pnpm test` | 运行默认行为/边界回归；不加载全量语料做假排名，实库专项需显式启用 |
 | `pnpm model:test` | 通过 uv 运行 Python model-service 测试；环境未就绪时可能同步依赖 |
-| `pnpm operators:test` | 三个核心算子、六模型/召回并集二分类预测、排序前128工单固定S2伪标签、实际请求/重试计量、自动是集合交付、技术失败不fit/缺特征、数值等价；CI 使用同一入口 |
+| `pnpm operators:test` | 三个核心算子、11候选模型/召回并集二分类预测、排序前128工单固定S2伪标签、实际请求/重试计量、自动是集合交付、技术失败不fit/缺特征、数值等价；CI 使用同一入口 |
 | `pnpm eval:self-test` | Python 评测数据与 scorer 自检，不执行真实 Agent 任务 |
 
 跨包导入可能通过 package exports 读取 `lib/`。跨包源码变更后先显式 `pnpm build` 一次，再运行 `pnpm typecheck:code` 和所选行为检查；也可直接用 `pnpm typecheck` 完成构建与类型检查。单独 `--noEmit` 不能证明已有构建产物与源码一致。依赖开发语料的测试和运行入口要求事先显式准备数据，纯代码检查无需此步骤。

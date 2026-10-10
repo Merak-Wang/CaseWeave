@@ -3,7 +3,7 @@ const node = (tag, text, cls = '') => { const e = document.createElement(tag); e
 const names = { 'openai-completions': 'OpenAI 兼容 · Chat Completions', 'openai-responses': 'OpenAI Responses', 'anthropic-messages': 'Anthropic Messages' }
 
 export function createModelUI({ api, getTaskId }) {
-  let data, epoch = 0, source
+  let data, epoch = 0, source, probing
   const path = () => '/api/retrieval-agent/models' + (getTaskId() ? '?task=' + encodeURIComponent(getTaskId()) : '')
   const showError = error => { $('model-error').textContent = error.message; $('model-error').hidden = false }
   const clearError = () => { $('model-error').hidden = true }
@@ -19,6 +19,30 @@ export function createModelUI({ api, getTaskId }) {
     if (current !== epoch) return
     data = next
     label(); renderList()
+  }
+  function busy(value) {
+    for (const id of ['model-save', 'model-reasoning', 'manage-models', 'models-back', 'model-discover']) $(id).disabled = value
+    for (const control of $('model-config-form').querySelectorAll('input, select')) control.disabled = value
+    for (const button of $('model-options').querySelectorAll('button')) button.disabled = value
+    $('model-probe-cancel').hidden = !value
+  }
+  async function choose(body) {
+    if (probing) return false
+    const controller = new AbortController(); probing = controller
+    clearError(); busy(true)
+    const status = $('model-probe-status'); status.hidden = false; status.textContent = `正在检测 ${body.model}…最多等待 30 秒。`
+    try {
+      const next = await api(path(), body, AbortSignal.any([controller.signal, AbortSignal.timeout(40000)]))
+      if (controller.signal.aborted) return false
+      data = next; label(); renderList()
+      status.textContent = `已连接，耗时 ${next.probe.elapsedMs} ms，已选择 ${data.selected.model}。` + (next.probe.finish === 'max-tokens' ? '短输出达到上限；本次仅检测连接。' : next.probe.outputKind === 'reasoning' ? '模型已返回推理响应；本次仅检测连接。' : '')
+      return true
+    } catch (error) {
+      if (controller.signal.aborted) status.textContent = '已取消检测，原模型选择保持不变。'
+      else { status.textContent = '连接检测失败，可以再次点击重试。'; showError(error) }
+      if (body.action === 'save') await load().catch(() => {})
+      return false
+    } finally { probing = undefined; busy(false); renderList() }
   }
   function renderList() {
     const currentModel = chosen()?.models.find(m => m.id === data.selected?.model)
@@ -39,7 +63,8 @@ export function createModelUI({ api, getTaskId }) {
         b.setAttribute('aria-selected', String(selected))
         const copy = node('div', ''); copy.append(node('strong', m.name), node('small', m.contextWindow ? `${m.contextWindow >= 1000000 ? (m.contextWindow / 1000000).toFixed(1).replace('.0', '') + 'M' : Math.round(m.contextWindow / 1000) + 'K'} 上下文` : '容量由供应商提供'))
         b.append(copy, node('span', selected ? '✓' : ''))
-        b.onclick = async () => { b.disabled = true; clearError(); try { data = await api(path(), { action: 'select', provider: p.id, model: m.id, ...(selected && data.selected.reasoningEffort ? { reasoningEffort: data.selected.reasoningEffort } : {}) }); label(); $('model-dialog').close() } catch (e) { showError(e) } finally { b.disabled = false } }
+        b.disabled = Boolean(probing)
+        b.onclick = () => void choose({ action: 'select', provider: p.id, model: m.id, ...(selected && data.selected.reasoningEffort ? { reasoningEffort: data.selected.reasoningEffort } : {}) })
         list.append(b)
       }
     }
@@ -76,7 +101,7 @@ export function createModelUI({ api, getTaskId }) {
     ...($('provider-output').value ? { maxTokens: Number($('provider-output').value) } : {}),
     ...($('provider-id').value.trim() === data.selected?.provider && $('provider-model').value.trim() === data.selected?.model && data.selected.reasoningEffort ? { reasoningEffort: data.selected.reasoningEffort } : {}) })
   async function open(settings = false) {
-    source = document.activeElement; clearError(); $('model-picker-view').hidden = false; $('model-settings-view').hidden = true
+    source = document.activeElement; clearError(); $('model-probe-status').hidden = true; $('model-picker-view').hidden = false; $('model-settings-view').hidden = true
     $('model-options').replaceChildren(node('p', '正在读取模型…', 'shimmer-text')); $('model-dialog').showModal()
     try { await load(); if (settings) edit(); else $('model-search').focus() } catch (e) { showError(e) }
   }
@@ -85,22 +110,18 @@ export function createModelUI({ api, getTaskId }) {
   $('manage-models').onclick = () => edit()
   $('models-back').onclick = () => { $('model-settings-view').hidden = true; $('model-picker-view').hidden = false; clearError(); renderList() }
   $('model-close').onclick = () => $('model-dialog').close()
-  $('model-dialog').onclose = () => { $('provider-key').value = ''; source?.focus({ preventScroll: true }) }
+  $('model-probe-cancel').onclick = () => probing?.abort()
+  $('model-dialog').onclose = () => { probing?.abort(); $('provider-key').value = ''; source?.focus({ preventScroll: true }) }
   $('model-search').oninput = renderList; $('provider-choice').onchange = populate
-  $('model-reasoning').onchange = async () => {
-    $('model-reasoning').disabled = true; clearError()
-    try { data = await api(path(), { action: 'select', ...data.selected, reasoningEffort: $('model-reasoning').value }); label(); renderList() }
-    catch (e) { showError(e) } finally { $('model-reasoning').disabled = false }
-  }
+  $('model-reasoning').onchange = () => void choose({ action: 'select', ...data.selected, reasoningEffort: $('model-reasoning').value })
   $('model-discover').onclick = async () => {
     clearError(); $('model-discover').disabled = true
     try { const result = await api(path(), draft('discover')); $('provider-model-list').replaceChildren(...result.models.map(m => { const o = node('option', m.name || m.id); o.value = m.id; return o })); $('model-discovery-status').textContent = `已发现 ${result.models.length} 个模型，可在模型 ID 中选择。` }
     catch (e) { showError(e) } finally { $('model-discover').disabled = false }
   }
   $('model-config-form').onsubmit = async e => {
-    e.preventDefault(); clearError(); $('model-save').disabled = true
-    try { data = await api(path(), draft('save')); $('provider-key').value = ''; label(); $('model-settings-view').hidden = true; $('model-picker-view').hidden = false; renderList() }
-    catch (err) { showError(err) } finally { $('model-save').disabled = false }
+    e.preventDefault()
+    if (await choose(draft('save'))) { $('provider-key').value = ''; $('model-settings-view').hidden = true; $('model-picker-view').hidden = false }
   }
   void load().catch(() => { /* The chooser presents a retryable error when opened. */ })
   return { refresh: () => load().catch(() => {}) }

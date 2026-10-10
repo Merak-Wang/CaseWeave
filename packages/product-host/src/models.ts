@@ -1,4 +1,6 @@
 import type {} from '@retrieval-agent/dsh-compat'
+import { randomUUID } from 'node:crypto'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -80,7 +82,43 @@ export class WorkbenchModels {
       providers: this.ctx.llm.listConfigurableProviders().map(p => ({ id: p.provider, name: p.displayName })),
       protocols: supportedProtocols() }
   }
-  async update(raw: unknown, agent?: Agent) {
+  private async probe(selection: ModelSelection, callerSignal?: AbortSignal) {
+    const signal = AbortSignal.any([AbortSignal.timeout(30000), ...(callerSignal ? [callerSignal] : [])])
+    const started = Date.now()
+    let finish: string | undefined, outputKind = 'receipt', usage: unknown
+    try {
+      // 只发送固定短提示；探针不创建业务 Agent，不进入工单判断或重试流程。
+      for await (const chunk of this.ctx.llm.stream({ ...selection, sessionId: SessionId(`model-probe-${randomUUID()}`),
+        system: 'Reply only OK.', messages: [createUserMessage({ source: { kind: 'user' },
+          content: [{ type: 'text', text: 'Connection check.' }] })], maxTokens: 16, temperature: 0, signal })) {
+        signal.throwIfAborted()
+        if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') outputKind = chunk.type === 'text-delta' ? 'text' : 'reasoning'
+        if (chunk.type === 'usage') usage = chunk.usage
+        if (chunk.type === 'finish') {
+          if (chunk.reason.kind === 'error') throw chunk.reason.failure ?? { code: 'MODEL_FAILURE' }
+          if (chunk.reason.kind === 'aborted') throw { code: 'ABORTED' }
+          finish = chunk.reason.kind
+        }
+      }
+      signal.throwIfAborted()
+      if (!finish) throw { code: 'TRANSPORT' }
+      if (!['stop', 'max-tokens'].includes(finish)) throw { code: 'UNEXPECTED_FINISH' }
+      return { elapsedMs: Date.now() - started, finish, outputKind, ...(usage ? { usage } : {}) }
+    } catch (error) {
+      const failure = error as { code?: string; status?: number }
+      const code = signal.aborted ? (callerSignal?.aborted ? 'CANCELLED' : 'TIMEOUT') : typeof failure.code === 'string' && /^[A-Z_]{1,48}$/.test(failure.code) ? failure.code : 'MODEL_FAILURE'
+      const status = failure.status
+      const reason = code === 'CANCELLED' || code === 'ABORTED' ? '已取消连接检测。'
+        : code === 'TIMEOUT' ? '连接检测超过 30 秒，请稍后重试。'
+        : /AUTH|CREDENTIAL/.test(code) || status === 401 || status === 403 ? '模型服务拒绝当前凭据，请检查密钥和访问权限。'
+        : status === 404 || code === 'MODEL_NOT_FOUND' ? '模型或服务地址不可用，请检查配置。'
+        : code === 'RATE_LIMIT' || status === 429 ? '模型服务限流，请稍后重试。'
+        : code === 'TRANSPORT' ? '模型连接或响应传输中断，请检查服务状态后重试。'
+        : '模型未返回正常响应，请检查配置和服务状态。'
+      throw new RetrievalError('PROVIDER_UNAVAILABLE', `${reason}（${code}${status ? ` / HTTP ${status}` : ''}）原模型选择保持不变。`)
+    }
+  }
+  async update(raw: unknown, agent?: Agent, signal?: AbortSignal) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) invalid('模型设置需要 JSON 对象。')
     const v = raw as Record<string, unknown>
     if (!['save', 'select', 'discover'].includes(String(v.action))) invalid('未知模型设置操作。')
@@ -130,6 +168,8 @@ export class WorkbenchModels {
     const effort = v.reasoningEffort ? String(v.reasoningEffort) : undefined
     if (effort && !info.reasoning?.efforts.some(e => e.id === effort)) invalid('该模型不支持此推理档位。')
     const selection = { provider, model, ...(effort ? { reasoningEffort: ReasoningEffortId(effort) } : {}) }
+    const probe = await this.probe(selection, signal)
+    signal?.throwIfAborted()
     if (agent) {
       agent.session.append('user/message', createUserMessage({ source: { kind: 'retrieval-agent', plugin: 'retrieval-agent-models', form: 'snapshot',
         sections: [{ name: 'model-selection', text: JSON.stringify(selection) }] },
@@ -137,7 +177,7 @@ export class WorkbenchModels {
       ;(await this.bind(agent)).current = selection
       this.notices.delete(agent)
     } else await this.ctx.agentDefaultModel.saveSelection(selection)
-    return this.view(agent)
+    return { ...await this.view(agent), probe }
   }
 }
 
@@ -157,10 +197,13 @@ export function installWorkbenchModels(ctx: Context, models: WorkbenchModels, ta
       for await (const chunk of req) { const b = Buffer.from(chunk); size += b.length; if (size > 16384) invalid('模型配置过大。'); chunks.push(b) }
       let input: unknown
       try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return send(400, { message: 'JSON 格式无效。' }) }
-      send(200, await models.update(input, agent))
+      const controller = new AbortController()
+      res.once('close', () => { if (!res.writableEnded) controller.abort() })
+      send(200, await models.update(input, agent, controller.signal))
     } catch (e) {
       // Adapter exceptions can contain upstream payloads or draft credentials. They never cross this surface.
       if (!(e instanceof RetrievalError) && e instanceof Error) ctx.logger.warn('model settings failure: %s', e.stack?.split('\n').slice(1, 6).join('\n'))
+      if (res.destroyed) return
       send(400, { message: e instanceof RetrievalError ? e.publicMessage : '模型配置或连接未通过 DSH 校验，请检查地址、协议、模型 ID 和密钥。' })
     }
   } }))
