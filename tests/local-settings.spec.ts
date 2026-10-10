@@ -70,6 +70,28 @@ describe('persistent local DSH settings', () => {
     await expect(readFile(settingsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('keeps both production providers and the selected model when startup has no bootstrap override', async () => {
+    const dshHome = await fixture()
+    const patchPath = join(dshHome, 'cordis.patch.yml')
+    const credentialsPath = join(dshHome, '.credentials.yaml')
+    const patch = JSON.stringify([
+      { id: 'agent-default-model', config: { provider: 'production-qwen', model: 'Qwen3.5-27b' } },
+      { id: 'retrieval-llm-pi-ai', config: { providers: {
+        'production-qwen': { apiKeyEnv: 'QWEN_KEY', models: [{ id: 'Qwen3.5-27b' }] },
+        'production-flash': { apiKeyEnv: 'FLASH_KEY', models: [{ id: 'deepseek-v4.1-flash', reasoningEfforts: { off: null } }] },
+      } } },
+    ])
+    const credentials = 'refs:\n  QWEN_KEY: fixture-qwen\n  FLASH_KEY: fixture-flash\n'
+    await writeFile(patchPath, patch, 'utf8')
+    await writeFile(credentialsPath, credentials, 'utf8')
+    // 配置由 DSH 持久层管理时，启动不再写入单模型种子覆盖目录。
+    for (let restart = 0; restart < 2; restart++) {
+      await expect(settings.seedModelSettings({ dshHome }, {})).resolves.toBe(false)
+      expect(await readFile(patchPath, 'utf8')).toBe(patch)
+      expect(await readFile(credentialsPath, 'utf8')).toBe(credentials)
+    }
+  })
+
   it.each(['custom: [broken', 'custom: 1\ncustom: 2\n', '- array-root\n'])('never overwrites malformed or non-mapping settings: %s', async (original) => {
     const dshHome = await fixture()
     const settingsPath = join(dshHome, 'settings.yaml')
