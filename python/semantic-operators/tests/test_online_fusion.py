@@ -129,7 +129,8 @@ def port(runtime, n=512, *, grouped=True, flipped_holdout=False):
     def teacher(payload, request):
         assert all('group_hashes' not in row['attributes'] for row in payload['records'])
         out=decisions(payload)
-        for row in out['rows']: row['label']='accept' if y[int(row['ref'])] else 'exclude'
+        for row, source in zip(out['rows'], payload['records']):
+            row['label'] = 'yes' if y[int(source['record_ref'])] else 'no'
         return out
     runtime.resources, runtime.model.handler = call, teacher
     return updates, predictions, samples, begin, groups, y

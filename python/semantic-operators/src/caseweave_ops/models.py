@@ -9,11 +9,13 @@ from time import perf_counter
 from typing import Any
 from sklearn.model_selection import StratifiedGroupKFold
 import numpy as np
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import HistGradientBoostingClassifier, ExtraTreesClassifier
+from sklearn.linear_model import LogisticRegression, RidgeClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import LinearSVC
+from sklearn.svm import LinearSVC, SVC
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.utils.class_weight import compute_sample_weight
 from threadpoolctl import threadpool_limits
 
@@ -46,7 +48,7 @@ class Fitted:
 
 
 def model_bank(*, sparse=False, seed=0, methods=None):
-    """Four deliberately different candidates; no online hyperparameter grid."""
+    """互补候选共享同一S2伪标签；固定参数，不做在线网格搜索。"""
     bank = [
         Candidate("dense_lr", "dense", LogisticRegression(C=1., max_iter=400), True),
         Candidate("sparse_svm" if sparse else "dense_svm", "sparse" if sparse else "dense",
@@ -57,17 +59,21 @@ def model_bank(*, sparse=False, seed=0, methods=None):
                   max_leaf_nodes=15, l2_regularization=1., random_state=seed)),
     ]
 
+    if sparse:
+        bank.append(Candidate("dense_svm", "dense", LinearSVC(C=1., dual="auto", max_iter=3000, random_state=seed), True))
+    bank.extend([
+        Candidate("feedback_margin", "dense", FeedbackMargin()),
+        Candidate("relation_logistic", "dense", RelationLogistic(seed)),
+        Candidate("dense_ridge", "dense", RidgeClassifier(alpha=10.), True),
+        Candidate("dense_rbf_svm", "dense", SVC(C=1., kernel="rbf", gamma="scale", probability=False), True),
+        Candidate("dense_extra_trees", "dense", ExtraTreesClassifier(n_estimators=64, max_depth=8, min_samples_leaf=2, n_jobs=1, random_state=seed)),
+        Candidate("dense_gaussian_nb", "dense", GaussianNB(var_smoothing=1e-7)),
+        Candidate("dense_knn", "dense", KNeighborsClassifier(n_neighbors=5, metric="cosine", weights="distance", algorithm="brute")),
+    ])
     if methods is None:
-        return bank  # Historical replay retains the original four candidates.
+        return bank
     if not isinstance(methods, (list, tuple)) or not methods or len(set(methods)) != len(methods):
         raise ValueError("methods must be a nonempty distinct model-name list")
-    # Explicit six-method configurations retain the dense SVM even when an
-    # optional sparse view exists. Missing options keep the old four-view bank.
-    if sparse:
-        bank.append(Candidate("dense_svm", "dense", LinearSVC(C=1., dual="auto",
-            max_iter=3000, random_state=seed), True))
-    bank.extend([Candidate("feedback_margin", "dense", FeedbackMargin()),
-                 Candidate("relation_logistic", "dense", RelationLogistic(seed))])
     lookup = {c.name: c for c in bank}
     if any(name not in lookup for name in methods):
         raise ValueError("Unknown or unavailable online method")
@@ -177,12 +183,15 @@ def _fit(candidate, views, y, *, groups=None):
     scaler = StandardScaler().fit(X) if candidate.scale else None
     Z = scaler.transform(X) if scaler is not None else X
     extra = {"groups": np.asarray(groups)[valid]} if isinstance(candidate.estimator, RelationLogistic) else {}
-    candidate.estimator.fit(Z, labels, sample_weight=compute_sample_weight("balanced", labels), **extra)
+    if isinstance(candidate.estimator, KNeighborsClassifier):
+        candidate.estimator.fit(Z, labels)
+    else:
+        candidate.estimator.fit(Z, labels, sample_weight=compute_sample_weight("balanced", labels), **extra)
     result = Fitted(candidate.name, candidate.view, candidate.estimator, scaler,
                     perf_counter() - started)
-    if isinstance(candidate.estimator, (LogisticRegression, LinearSVC)):
-        w = candidate.estimator.coef_[0].copy()
-        b = float(candidate.estimator.intercept_[0])
+    if isinstance(candidate.estimator, (LogisticRegression, LinearSVC, RidgeClassifier)):
+        w = np.asarray(candidate.estimator.coef_).reshape(-1).copy()
+        b = float(np.asarray(candidate.estimator.intercept_).reshape(-1)[0])
         if scaler is not None:
             w = w / scaler.scale_
             b -= float(scaler.mean_ @ w)

@@ -25,6 +25,7 @@ class ConstantTeacherSelection:
 async def online_group_filter(runtime, instruction, *, options=None, batch_size=8,
         require_source=True, required_fields=(), recall_scope_key=None):
     from .filter import judge_batch
+    batch_size = 8
     cfg = {"block_size": 1024, "pool_size": 4096, "sample_size": 128, "selection_size": 128,
         "workers": 1, "precision_target": .95, "recall_target": .95, "seed": 0, "concurrency": 4,
         "methods": list(DEFAULT_METHODS), "fusion": "single", "exploration_fraction": 0.,
@@ -92,9 +93,7 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
             sampling_requests=runtime.store.sampling_calls(runtime.scope), **extra)
         save()  # Labels and validated model snapshots survive stop/cancel/restart.
         await runtime.scope.check()
-        await call("learning.update", {**stats, 'sampling_record_limit': 128,
-            'judge_mode': getattr(runtime, 'judge_mode', 'compact_binary'),
-            'judge_readout': getattr(runtime, 'judge_metrics', {}), "_usage": runtime.store.metrics(runtime.scope.task_id)})
+        await call("learning.update", {**stats, 'sampling_record_limit': 128})
     async def scan(discovery=False):
         cursor, seen, cursors, population = None, set(), set(), None
         started = perf_counter()

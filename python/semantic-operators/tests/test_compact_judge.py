@@ -14,11 +14,9 @@ def test_compact_short_refs_restore_identity_and_do_not_guess_unknown_ref(make_r
         return {'rows': [{'ref': '@r2', 'label': 'no', 'confidence': .9},
                          {'ref': '@r1', 'label': 'yes', 'confidence': .8}]}
     rt = make_runtime(handler)
-    rt.judge_mode = 'compact_binary'
     output = asyncio.run(judge_batch(rt, rows, '账号权限异常', require_source=False))
     assert [(d.ref, d.label) for d in output] == [(rows[0].ref, 'accept'), (rows[1].ref, 'exclude')]
     rt = make_runtime(lambda p, r: {'rows': [{'ref': '@r9', 'label': 'yes', 'confidence': .8}]})
-    rt.judge_mode = 'compact_binary'
     output = asyncio.run(judge_batch(rt, rows[:1], '账号权限异常', require_source=False))
     assert output[0].label == 'undetermined' and output[0].reason == 'missing_or_duplicate_output'
 
@@ -55,17 +53,16 @@ def test_compact_negative_needs_one_call_and_cache_does_not_consume_budget(make_
     assert rt.store.sampling_calls(rt.scope) == 1
 
 
-def test_explicit_required_fields_keep_model_selected_source_quotes(make_runtime):
+def test_explicit_required_fields_use_compact_source_input(make_runtime):
     rt = make_runtime()
     result = asyncio.run(judge_batch(rt, [record()], '解绑失败',
         require_source=False, required_fields=('source.raw_dialogue',)))
     assert result[0].label == 'accept' and result[0].citations[0].field == 'source.raw_dialogue'
-    assert 'citations' in rt.store.request(result[0].manifest_id)['schema']['properties']['rows']['items']['properties']
+    assert 'citations' not in rt.store.request(result[0].manifest_id)['schema']['properties']['rows']['items']['properties']
 
 
 def test_production_compact_source_requirements_do_not_restore_verbose_protocol(make_runtime):
     rt = make_runtime()
-    rt.judge_mode = 'compact_binary'
     result = asyncio.run(judge_batch(rt, [record()], '解绑失败',
         require_source=True, required_fields=('source.raw_dialogue',)))
     assert result[0].label == 'accept'

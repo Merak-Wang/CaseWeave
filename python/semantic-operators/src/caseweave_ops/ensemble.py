@@ -16,7 +16,8 @@ from .types import digest
 
 GROUP_PROJECTION = "business-and-canonical-nfkc-whitespace-v1"
 DEFAULT_METHODS = ("dense_lr", "dense_svm", "dense_mlp", "dense_hgb",
-                   "feedback_margin", "relation_logistic")
+                   "feedback_margin", "relation_logistic", "dense_ridge", "dense_rbf_svm",
+                   "dense_extra_trees", "dense_gaussian_nb", "dense_knn")
 
 
 def validate_group_metadata(value):

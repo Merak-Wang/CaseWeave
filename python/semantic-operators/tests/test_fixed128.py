@@ -14,7 +14,8 @@ def test_default_online_options_use_fixed128_without_legacy_gate(make_runtime):
     assert updates[-1]['teacher_unique_records'] == 128
     assert updates[-1]['training_records'] == 128
     assert updates[-1]['sampling_method'] == 'ranked_top128'
-    assert updates[-1]['candidate_models'] == ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic']
+    from caseweave_ops.ensemble import DEFAULT_METHODS
+    assert updates[-1]['candidate_models'] == list(DEFAULT_METHODS)
     assert len(predicted) == 512 and rt.model.calls == 16
 
 
@@ -65,3 +66,25 @@ def test_only_teacher_labels_train_without_host_seed_import(make_runtime):
     asyncio.run(collect(learned_filter(rt, "synthetic predicate", require_source=False)))
     assert len(samples) == 128
     assert updates[-1]["training_records"] == 128
+
+
+def test_raw_ridge_margin_and_oof_threshold_publish_without_probability_clamp(make_runtime):
+    from caseweave_ops.filter import learned_filter
+    from conftest import collect
+    rt = make_runtime()
+    _, predicted, _, begin, _, _ = port(rt)
+    original = rt.resources
+    writes = []
+    async def resources(method, payload):
+        if method == "predictions.write":
+            writes.append(payload)
+        return await original(method, payload)
+    rt.resources = resources
+    asyncio.run(collect(learned_filter(rt, "synthetic predicate", require_source=False,
+        options={"methods": ["dense_ridge"], "fusion": "single"})))
+    assert begin[-1]["model"] == "dense_ridge"
+    threshold = begin[-1]["threshold"]
+    scores = {i: score for block in writes for i, score in zip(block["ids"], block["scores"])}
+    assert min(scores.values()) < 0
+    # 样本票沿教师保留；其余工单只按本模型OOF阈值判断，不用统一0.5。
+    assert all(predicted[i] == int(score >= threshold) for i, score in scores.items() if i >= 128)

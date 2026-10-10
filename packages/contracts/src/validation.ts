@@ -6,9 +6,7 @@ import type { TicketFilter, TicketRetrievalRequest, TrustedPrincipalContext } fr
 export function assertSemanticExecutionOptions(value: unknown): asserts value is import('./types.js').SemanticExecutionOptions {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RetrievalError('INVALID_REQUEST', '语义执行设置必须是对象。')
   const v = value as Record<string, unknown>
-  if (Object.keys(v).some(key => !['onlineLearning', 'semanticMethod', 'orchestration', 'onlineFusion', 'onlineModels', 'judgeMode', 'judgePrior'].includes(key))
-    || v.judgeMode !== undefined && !['compact_binary', 'anyjev_l0'].includes(String(v.judgeMode))
-    || v.judgePrior !== undefined && !['none', 'batch', 'content_free'].includes(String(v.judgePrior))
+  if (Object.keys(v).some(key => !['onlineLearning', 'semanticMethod', 'orchestration', 'onlineFusion', 'onlineModels'].includes(key))
     || typeof v.onlineLearning !== 'boolean' || !['auto', 'dual_description_margin', 'name_gmm', 'kmeans'].includes(String(v.semanticMethod))
     || v.orchestration !== undefined && !['fixed', 'agent'].includes(String(v.orchestration))
     || v.onlineLearning === true && ['dual_description_margin', 'name_gmm', 'kmeans'].includes(String(v.semanticMethod))

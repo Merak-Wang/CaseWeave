@@ -21,7 +21,6 @@ import { readTaskKnowledge } from './knowledge-view.js'
 import { installSessionMetrics } from './metrics/session.js'
 import { ModelCallMetrics } from './metrics/model-call.js'
 import { assertLearnedResultAdmission } from './learned-admission.js'
-import { readLabelLogprobs } from './label-logprobs.js'
 import { canonicalSourceRequirements, canonicalSourceRequirementsMatch, assertCanonicalSourceRequirements } from './canonical-source-requirements.js'
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -115,12 +114,11 @@ export class SemanticOperators {
     const config = this.config(agent), input = scope.input
     const system = input.messages.find(m => m.role === 'system')?.content
     const compactDecision = input.operation === 'sem_filter' && object(JSON.parse(input.messages.find(m => m.role === 'user')!.content)).decision_format === 'compact_binary'
-    const nextTokenDecision = input.operation === 'sem_filter' && object(JSON.parse(input.messages.find(m => m.role === 'user')!.content)).decision_format === 'next_token_binary'
     if (!system || input.messages.some(m => !['system', 'user'].includes(m.role))) throw new RetrievalError('PROTOCOL_MISMATCH', '不支持的算子模型消息。')
     const request: GenerateOptions = { provider: config.provider, model: config.model, ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}), sessionId: SessionId(`operator-${input.manifest_id}`),
       ...(signal ? { signal } : {}), system,
-      ...(input.operation === 'query_plan' ? { maxTokens: 2048, temperature: 0 } : nextTokenDecision ? { maxTokens: 1, temperature: 1 } : compactDecision ? { maxTokens: 1024 } : {}),
-      tools: nextTokenDecision ? [] : [{ name: 'submit_result', description: compactDecision ? 'Submit yes/no and confidence for every supplied ticket.' : 'Submit the operator result with source citations.', parameters: input.schema }],
+      ...(input.operation === 'query_plan' ? { maxTokens: 2048, temperature: 0 } : compactDecision ? { maxTokens: 1024 } : {}),
+      tools: [{ name: 'submit_result', description: compactDecision ? 'Submit yes/no and confidence for every supplied ticket.' : 'Submit the operator result with source citations.', parameters: input.schema }],
       messages: input.messages.filter(m => m.role === 'user').map(m => createUserMessage({ content: [{ type: 'text', text: m.content }],
         source: { kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot', sections: [{ name: input.operation, text: m.content }] } })) }
     const contextWindow = agent.session.requestContext()?.contextWindow
@@ -133,15 +131,6 @@ export class SemanticOperators {
     let aggregateReceipt: unknown
     let callMetrics: ModelCallMetrics | undefined
     try {
-      if (nextTokenDecision) {
-        scope.manifests.push(this.manifest(scope, request))
-        const result = await readLabelLogprobs(this.ctx, config.provider, config.model, input.messages, input.manifest_id, signal)
-        payload = result.payload; finished = true
-        usage = 'prompt_tokens' in result.usage && typeof result.usage.prompt_tokens === 'number' && typeof result.usage.completion_tokens === 'number' ? {
-          inputTokens: result.usage.prompt_tokens, outputTokens: result.usage.completion_tokens,
-          ...(typeof result.usage.cached_prompt_tokens === 'number' ? { cacheReadTokens: result.usage.cached_prompt_tokens } : {}) } : undefined
-        return result
-      }
       if (input.operation === 'sem_agg') {
         const data = object(JSON.parse(input.messages.find(m => m.role === 'user')!.content))
         for (const source of data.sources as Record<string, unknown>[]) {
@@ -262,11 +251,8 @@ export class SemanticOperators {
     params: Record<string, unknown> = {}): PythonOperatorRun {
     if (!state.snapshot || state.accessValidation === 'required') throw new RetrievalError('UNAUTHORIZED', '算子需要当前授权快照。')
     const config = this.config(agent)
-    const judgeMode = state.query.contract?.semanticExecution?.judgeMode
-      ?? (process.env.RETRIEVAL_AGENT_SEMANTIC_JUDGE_MODE === 'anyjev_l0' ? 'anyjev_l0' : 'compact_binary')
-    const judgePrior = state.query.contract?.semanticExecution?.judgePrior ?? 'none'
     return { scope: { task_id: state.retrievalId, input_revision: state.inputGeneration ?? 0, snapshot: state.snapshot.snapshotId,
-      authorization: hash([state.principalBindingHash, state.snapshot.authorizationVersion]) }, model_identity: hash([config, judgeMode, judgePrior]), judge_mode: judgeMode, judge_prior: judgePrior, knowledge, op, instruction, params, source_handle: 'current-candidates' }
+      authorization: hash([state.principalBindingHash, state.snapshot.authorizationVersion]) }, model_identity: hash(config), knowledge, op, instruction, params, source_handle: 'current-candidates' }
   }
   async plan(agent: Agent, state: RetrievalState, signal?: AbortSignal): Promise<{ plan: SemanticQueryPlan; manifests: ContextManifest[] }> {
     const fixed = state.query.contract?.semanticExecution?.orchestration === 'fixed'

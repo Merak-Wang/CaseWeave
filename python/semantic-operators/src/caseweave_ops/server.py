@@ -68,8 +68,6 @@ class Bridge:
                 return ModelReply(response["payload"], Usage(**response.get("usage", {})), response.get("provider_request_id"))
         # Runtime 将宿主提供的作用域、模型身份和知识版本绑定成同一执行上下文。
         runtime = Runtime(scope, HostModel(), self.store, Knowledge(value["knowledge"]["release"], tuple(value["knowledge"].get("entries", []))))
-        runtime.judge_mode = value.get('judge_mode', 'compact_binary')
-        runtime.judge_prior = value.get('judge_prior', 'none')
         runtime.resources = lambda method, payload: bridge.exchange(job, method, payload)
         source = self.row_source(job, value.get("source_handle", "$source"), scope)
         op, params = value["op"], value.get("params", {})

@@ -289,7 +289,7 @@ function renderPage() {
     meta.append(text('span', String(page.offset + index + 1).padStart(2, '0'), 'ticket-index'), text('span', c.displayId, 'ticket-id'))
     if (predicted) meta.append(text('span', '候选 · 未校准模型预测', 'badge'), text('span', ({ accept: '是（模型预测）', exclude: '否（模型预测）', undetermined: '执行失败／待重试' }[j?.operatorInference?.proposed_label] || '待判定候选') + ' · ' + (j?.operatorInference?.algorithm ?? '') + (typeof j?.operatorInference?.score === 'number' ? ' · 分数 ' + j.operatorInference.score.toPrecision(4) : ''), 'muted'))
     if (j?.basis === 'proxy') meta.append(text('span', '模型筛选', 'badge'), text('span', (j.operatorInference?.algorithm ?? '') + (typeof j.operatorInference?.score === 'number' ? ' · 模型分数 ' + j.operatorInference.score.toPrecision(4) : '') + ' · 未人工评测', 'muted'))
-    if (typeof j?.confidence === 'number') meta.append(text('span', '判断置信度 ' + (j.confidence * 100).toFixed(1) + '%', 'muted'))
+    if (typeof j?.confidence === 'number') meta.append(text('span', '教师自报置信度 ' + (j.confidence * 100).toFixed(1) + '%', 'muted'))
     if (page.view !== 'confirmed') { const badge = text('span', history ? '历史线索' : snapshot?.orchestration?.terminal && (!j || j.verdict === 'undetermined') ? '未确认' : verdict(j?.verdict), 'badge'); badge.dataset.verdict = j?.verdict || ''; meta.append(badge) }
     card.append(meta, text('h3', ''))
     card.querySelector('h3').append(readable.has(c.ref) ? button(c.title, () => detail(c), 'link ticket-title') : text('span', c.title, 'ticket-title'))
@@ -474,10 +474,6 @@ function updateExecutionControls() {
   $('semantic-method').disabled = online || $('start').disabled
   $('online-model-controls').hidden = !online
   $('online-fusion').disabled = !online || $('start').disabled
-  $('judge-mode').disabled = $('start').disabled
-  $('judge-mode-note').textContent = $('judge-mode').value === 'anyjev_l0'
-    ? '读取真实 token 概率；固定最多 128 条教师样本，每条 2 次请求。若服务不支持，页面会说明实际降级方式。'
-    : '简洁判断默认每批 8 条；固定判断排序前最多 128 条工单，自动重试另计。'
   for (const checkbox of $('online-models').querySelectorAll('input')) checkbox.disabled = !online || $('start').disabled
   const modelCount = $('online-models').querySelectorAll('input:checked').length
   $('online-model-count').textContent = '候选模型（' + modelCount + ' 种）'
@@ -489,14 +485,13 @@ function updateExecutionControls() {
 $('online-learning').onchange = updateExecutionControls
 $('semantic-method').onchange = updateExecutionControls
 $('online-fusion').onchange = updateExecutionControls
-$('judge-mode').onchange = updateExecutionControls
 $('online-models').onchange = updateExecutionControls
 updateExecutionControls()
 $('query-form').onsubmit = async event => {
   event.preventDefault(); if ($('start').disabled) return
   const online = $('online-learning').checked, models = [...$('online-models').querySelectorAll('input:checked')].map(input => input.value)
   if (online && models.length === 0) { error(new Error('请至少选择一种在线候选模型。')); return }
-  const execution = { onlineLearning: online, semanticMethod: online ? 'auto' : $('semantic-method').value, orchestration: 'fixed', judgeMode: $('judge-mode').value,
+  const execution = { onlineLearning: online, semanticMethod: online ? 'auto' : $('semantic-method').value, orchestration: 'fixed',
     ...(online ? { onlineFusion: $('online-fusion').value, onlineModels: models } : {}) }
   $('start').disabled = true; $('online-learning').disabled = true; updateExecutionControls()
   try { const r = await command(endpoint, { kind: 'query', text: $('query').value.trim(), execution }); await enterTask(r.taskId) }

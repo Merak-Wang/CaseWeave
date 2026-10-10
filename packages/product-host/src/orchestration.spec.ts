@@ -21,7 +21,7 @@ describe('public orchestration facts', () => {
       onlineLearning: false, semanticMethod: method, orchestration: 'fixed',
     } } } } as unknown as RetrievalState)
     expect(projected.retrieval.execution).toEqual({ onlineLearning: false, semanticMethod: method,
-      onlineFeedbackTraining: false, regime, orchestration: 'fixed', judgeMode: 'compact_binary' })
+      onlineFeedbackTraining: false, regime, orchestration: 'fixed' })
     expect(projected.retrieval.learning?.quality).toBeUndefined()
   })
   it('does not treat a returned expert as delivery while filtering or reviewing', () => {

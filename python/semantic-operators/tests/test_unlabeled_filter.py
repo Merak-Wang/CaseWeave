@@ -156,9 +156,8 @@ def test_empty_scope_publishes_empty_complete_collection_without_fit(make_runtim
 def test_public_dispatch_publishes_same_numeric_collection_without_teacher(make_runtime,method):
     rt=make_runtime();port=SyntheticPort(rt,vectors())
     events=asyncio.run(collect(invoke_rows("sem_filter",rt,source([]),"synthetic explicit predicate",{
-        "algorithm":method,"scope_mode":"full","online_feedback_training":False,
-        "recall_scope_key":"synthetic-recall-scope","options":{"block_size":7,"seed":7},
-        "host_labels":{"0":"exclude","1":"accept"}})))
+        "algorithm":method,"scope_mode":"full",
+        "recall_scope_key":"synthetic-recall-scope","options":{"block_size":7,"seed":7}})))
     assert events==[] and rt.model.calls==0 and not port.read_counts
     finish=next(p for name,p in port.calls if name=="predictions.finish")
     assert finish["passed"] is True and finish["scope_count"]==24

@@ -96,7 +96,6 @@ function renderLearningDetails(learning, failed, execution) {
     table.append(body); nodes.push(table)
   }
   nodes.push(el('p', `判断请求 ${l.samplingRequests ?? 0} 次；教师样本 ${l.sampledCount ?? 0} 条（最多排序前 128 条，自动重试另计）`, 'muted'))
-  if (l.judgeMetrics) nodes.push(el('p', `实际判断：L0概率 ${l.judgeMetrics.l0_records ?? 0} 条，旋转概率 ${l.judgeMetrics.rotation_only_records ?? 0} 条，降级简洁判断 ${l.judgeMetrics.compact_fallback_records ?? 0} 条。`, 'muted'))
   if (failed) nodes.push(el('p', l.status ? '执行中断' : '筛选算子失败', 'notice'))
   if (l.precisionTarget && l.recallTarget) nodes.push(el('p', `${l.quality?.basis === 'training_group_crossfit' ? '训练组交叉拟合教师一致率目标' : '模型选择集目标'}：查准率 ≥ ${qualityValue(l.precisionTarget)}，召回率 ≥ ${qualityValue(l.recallTarget)}。`, 'muted'))
   if (l.quality?.basis === 'training_group_crossfit') nodes.push(el('p', trainingCrossfitNote, 'muted'))

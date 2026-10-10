@@ -90,7 +90,6 @@ export function projectOrchestration(state: RetrievalState, runtime?: TaskRuntim
     retrieval: {
       ...(execution ? { execution: { onlineLearning, semanticMethod, onlineFeedbackTraining, regime,
         orchestration: execution.orchestration ?? 'agent',
-        judgeMode: execution.judgeMode ?? 'compact_binary',
         ...(execution.onlineFusion ? { onlineFusion: execution.onlineFusion } : {}),
         ...(execution.onlineModels ? { onlineModels: execution.onlineModels } : {}) } } : {}),
       filterActivity: activity?.operation === 'sem_filter' ? activity.status : undefined,
@@ -104,8 +103,6 @@ export function projectOrchestration(state: RetrievalState, runtime?: TaskRuntim
         scopeRecords: currentLearning.scope_records, completionBasis: currentLearning.completion_basis,
         samplingRequests: currentLearning.sampling_requests,
         samplingRequestLimit: currentLearning.sampling_request_limit,
-        judgeMode: currentLearning.judge_mode,
-        judgeMetrics: currentLearning.judge_readout,
         message: currentLearning.message,
         reusedTrainingCount: currentLearning.reused_training_records, reusedLabelCount: currentLearning.reused_label_records,
         reusedUnresolvedCount: currentLearning.reused_unresolved_records,

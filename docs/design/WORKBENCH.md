@@ -55,6 +55,8 @@
 
 `GET /api/retrieval-agent/tasks/:id/knowledge` 返回此任务固定的知识目录；`/knowledge/:entryId` 返回允许条目的正文。身份/来源在读取前后重新验证，输入代次或知识发布变化时拒绝迟到结果；浏览器不能指定发布版本、文件路径或读取发布目录之外的材料。
 
+发起检索时可选择在线学习、11种候选分类模型及最佳单模型／多数投票融合，默认11种全部勾选；关闭在线学习则选择双描述匹配、GMM或KMeans。S2判断统一为每批8条的结构化是／否＋confidence，页面不再提供标签token概率判断或概率校准选项。confidence是教师自报值，不是人工准确率。请求执行参数使用`onlineLearning`、`semanticMethod`、`orchestration`、`onlineFusion`、`onlineModels`，不再发送`judgeMode`或`judgePrior`。
+
 ## 2. 即时结果与证据状态
 
 搜索首批先显示“已检索到候选，正在核实”，不要立即把所有命中称为相关。逐步显示可核对事件，例如“关键词已枚举完”“发现仅处理记录提到跨域的工单”“正在核对套餐原因”；只有真实状态变化才播报，不用重复动画或伪造思考充当进展。

@@ -2,9 +2,9 @@
 from __future__ import annotations
 import asyncio
 from uuid import uuid4
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from typing import Any, AsyncIterable
-from .runtime import Runtime, CITATION_SCHEMA
+from .runtime import Runtime
 from .types import Decision, ProtocolError, Record, verify_citations
 
 async def sem_filter(runtime: Runtime, source: AsyncIterable[Record], instruction: str, *,
@@ -29,15 +29,6 @@ async def learned_filter(runtime, instruction, *, options=None, batch_size=8,
         batch_size=batch_size, require_source=require_source, required_fields=required_fields, recall_scope_key=recall_scope_key):
         yield event
 
-
-DECISION_SCHEMA = {"type": "object", "additionalProperties": False,
-    "required": ["rows"], "properties": {"rows": {"type": "array", "items": {
-    "type": "object",
-    "required": ["ref", "label", "confidence", "citations", "knowledge_ids", "reason"],
-    "properties": {"ref": {"type": "string"}, "label": {"enum": ["accept", "exclude"]},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "citations": {"type": "array", "items": CITATION_SCHEMA},
-        "knowledge_ids": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}}}}}}
 
 COMPACT_DECISION_SCHEMA = {"type": "object", "additionalProperties": False,
     "required": ["rows"], "properties": {"rows": {"type": "array", "items": {
@@ -74,47 +65,33 @@ async def judge_batch(runtime: Runtime, records: list[Record], instruction: str,
 
 async def _judge_ready(runtime: Runtime, records: list[Record], instruction: str,
                        *, require_source: bool, required_fields: tuple[str, ...], use_cache: bool | None,
-                       sampling: bool = False, force_compact: bool = False) -> list[Decision]:
+                       sampling: bool = False) -> list[Decision]:
     if not records:
         return []
     if len({r.ref for r in records}) != len(records):
         raise ValueError("A judgment batch must have distinct record refs")
     key = runtime.predicate_key(instruction)
-    compact = getattr(runtime, 'judge_mode', None) in {'compact_binary', 'anyjev_l0'} or (not require_source and not required_fields and not any(
-        r.attributes.get('required_evidence_fields') for r in records) and all(
-        p.field in {'title', 'summary', 'displayId'} for r in records for p in r.passages))
     # 短别名只用于本批输出；原始身份仍随正文送达并记入宿主回执。
     model_rows = [r.model_payload() for r in records]
-    aliases, passage_aliases = {}, {}
+    aliases = {}
     for i, row in enumerate(model_rows):
         # 要求原文判断时只发送来源片段，避免模型用生成摘要代替已读对话。
         if require_source or required_fields or row['attributes'].get('required_evidence_fields'):
             row['passages'] = [p for p in row['passages'] if p['origin'] == 'source']
         row["alias"] = f"@r{i + 1}"
         aliases[row["alias"]] = row["ref"]
-        for j, passage in enumerate(row["passages"]):
-            passage["alias"] = f"@p{j + 1}"
-            passage_aliases[row["ref"], passage["alias"]] = passage["id"]
 
     def resolved_rows(payload):
         # 严格按本批映射还原，不移动引文、不猜测段落、不修改模型标签。
         for item in payload["rows"]:
-            if compact:
-                ref = aliases.get(item["ref"], item["ref"])
-                record = next((r for r in records if r.ref == ref), None)
-                # 短输出只决定标签；引用绑定本次完整送达的正文，明确保留生成来源。
-                yield {**item, "ref": ref, "label": "accept" if item["label"] == "yes" else "exclude",
-                    "citations": [{"ref": ref, "passage_id": p.id, "quote": p.text}
-                        for p in record.passages if p.text and p.field != 'displayId'
-                        and (not (require_source or required_fields or record.attributes.get('required_evidence_fields')) or p.origin == 'source')] if record else [],
-                    "knowledge_ids": [], "reason": "依据本次提供的工单正文完成二选一判断。"}
-                continue
-            citations = []
-            for citation in item["citations"]:
-                ref = aliases.get(citation["ref"], citation["ref"])
-                citations.append({**citation, "ref": ref, "passage_id":
-                    passage_aliases.get((ref, citation["passage_id"]), citation["passage_id"])})
-            yield {**item, "ref": aliases.get(item["ref"], item["ref"]), "citations": citations}
+            ref = aliases.get(item["ref"], item["ref"])
+            record = next((r for r in records if r.ref == ref), None)
+            # 短输出只决定标签；引用绑定本次完整送达的正文，明确保留生成来源。
+            yield {**item, "ref": ref, "label": "accept" if item["label"] == "yes" else "exclude",
+                "citations": [{"ref": ref, "passage_id": p.id, "quote": p.text}
+                    for p in record.passages if p.text and p.field != 'displayId'
+                    and (not (require_source or required_fields or record.attributes.get('required_evidence_fields')) or p.origin == 'source')] if record else [],
+                "knowledge_ids": [], "reason": "依据本次提供的工单正文完成二选一判断。"}
 
     def cacheable(payload):
         # Cache only complete, reusable decisions; per-row invalid output is
@@ -138,33 +115,19 @@ async def _judge_ready(runtime: Runtime, records: list[Record], instruction: str
                    for f in (*required_fields, *row.attributes.get("required_evidence_fields", []))):
                 return False
         return True
-    if compact and not force_compact and getattr(runtime, 'judge_mode', 'compact_binary') == 'anyjev_l0':
-        from .binary_readout import judge_readout
-        async def fallback(rows):
-            # 局部切换输出协议，避免并发修改Runtime的模式。
-            return await _judge_ready(runtime, rows, instruction, require_source=require_source,
-                required_fields=required_fields, use_cache=use_cache, sampling=sampling,
-                force_compact=True)
-        readout_records = [replace(r, passages=tuple(p for p in r.passages if p.origin == 'source'))
-            if require_source or required_fields or r.attributes.get('required_evidence_fields') else r for r in records]
-        return await judge_readout(runtime, readout_records, instruction, key, fallback, use_cache, sampling)
-    return await _call_judge(runtime, records, instruction, model_rows, compact,
+    return await _call_judge(runtime, records, instruction, model_rows,
         require_source, required_fields, cacheable, resolved_rows, use_cache, sampling, key)
 
 
-async def _call_judge(runtime, records, instruction, model_rows, compact,
+async def _call_judge(runtime, records, instruction, model_rows,
         require_source, required_fields, cacheable, resolved_rows, use_cache, sampling, key):
     # 紧凑判断只复制批内短引用；收到后由既有映射还原工单身份，不按返回位置猜测。
-    if compact:
-        model_rows = [{**row, 'record_ref': row['ref'], 'ref': row['alias']} for row in model_rows]
+    model_rows = [{**row, 'record_ref': row['ref'], 'ref': row['alias']} for row in model_rows]
     result = await runtime.call("sem_filter", instruction,
         {"records": model_rows,
-         **({"decision_format": "compact_binary"} if compact else {}),
-         "output_instructions": "逐条从 accept（相关）与 exclude（不相关）中选择最贴近查询的一项。查询是唯一业务标准；综合本条工单实际内容判断，不因关键词相似就判相关。"
-             "缺少支持相关的事实时选择 exclude，并降低 confidence；必须提交一个二选一标签。confidence 是对所选标签的0到1自报确信程度，不是校准概率，也不作为硬门槛。reason 用一句话说明决定性事实或缺失点。"
-             "引用必须使用本条已提供的记录/段落 alias（@r1/@p1）及原文连续短句；required_fields 必须有对应 source 引用。knowledge_ids 只填实际使用的知识。仅调用 submit_result 一次，不输出思考过程。"
-             if not compact else "按查询判断工单是否直接满足业务条件，不能仅由关键词相似判相关。每条只返回ref、label（yes或no）、confidence（0到1对所选标签的自报确信程度）。禁止理由、引文和其他字段；确信程度不是校准概率。只调用submit_result一次。",
-         "require_source": require_source, "required_fields": required_fields}, COMPACT_DECISION_SCHEMA if compact else DECISION_SCHEMA,
+         "decision_format": "compact_binary",
+         "output_instructions": "按查询判断工单是否满足全部业务条件。每条只返回ref、label（yes或no）、confidence（0到1模型自报确信程度）。不输出理由、引文、概率读出或其他字段，只调用submit_result一次。",
+         "require_source": require_source, "required_fields": required_fields}, COMPACT_DECISION_SCHEMA,
         cache_if=cacheable, use_cache=use_cache, sampling=sampling)
     # 保留每个 ref 的全部返回项，用数量检查识别缺失和重复，而不是静默覆盖。
     by_ref: dict[str, list[dict[str, Any]]] = {}

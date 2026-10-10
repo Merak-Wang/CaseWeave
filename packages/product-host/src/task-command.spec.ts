@@ -12,8 +12,8 @@ it('admits explicit no-feedback execution only on the query command', () => {
   }
   expect(() => parseTaskCommand({ operationId: 'bad-2', kind: 'resume', execution })).toThrow()
   expect(parseTaskCommand({ operationId: 'legacy-1', kind: 'query', text: '副卡' }).command)
-    .toMatchObject({ kind: 'query', text: '副卡', execution: { onlineLearning: true, onlineFusion: 'selective', judgeMode: 'compact_binary',
-      onlineModels: ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic'] } })
+    .toMatchObject({ kind: 'query', text: '副卡', execution: { onlineLearning: true, onlineFusion: 'selective',
+      onlineModels: ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic', 'dense_ridge', 'dense_rbf_svm', 'dense_extra_trees', 'dense_gaussian_nb', 'dense_knn'] } })
 })
 
 
@@ -27,4 +27,12 @@ it('persists explicit online bank and rejects unknown, duplicated, empty or offl
     { ...execution, onlineModels: ['unregistered'] }, { ...execution, onlineFusion: 'average_all' },
     { ...execution, onlineLearning: false }, { ...execution, semanticMethod: 'direct_teacher' },
   ]) expect(() => parseTaskCommand({ operationId: 'bad-bank', kind: 'query', text: '合成查询', execution: bad })).toThrow()
+})
+
+it('rejects retired probability and calibration execution controls', () => {
+  const execution = { onlineLearning: true, semanticMethod: 'auto' }
+  for (const retired of [{ judgeMode: 'anyjev_l0' }, { judgeMode: 'compact_binary' }, { judgePrior: 'none' }]) {
+    expect(() => parseTaskCommand({ operationId: 'retired-judge', kind: 'query', text: '账号权限',
+      execution: { ...execution, ...retired } })).toThrow()
+  }
 })

@@ -8,8 +8,6 @@ import { modelFailure, type ModelFailureCause } from './model-failure.js'
 export interface PythonOperatorRun {
   readonly scope: { task_id: string; input_revision: number; snapshot: string; authorization: string }
   readonly model_identity: string
-  readonly judge_mode?: 'compact_binary' | 'anyjev_l0'
-  readonly judge_prior?: 'none' | 'batch' | 'content_free'
   readonly knowledge: { release: string; entries: readonly Record<string, unknown>[] }
   readonly op: string; readonly instruction: string; readonly source_handle?: string
   readonly params?: Readonly<Record<string, unknown>>

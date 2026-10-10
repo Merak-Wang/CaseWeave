@@ -1,8 +1,8 @@
 import type { SemanticExecutionOptions, TicketRetrievalRequest } from '@retrieval-agent/contracts'
 
 export const DEFAULT_SEMANTIC_EXECUTION: SemanticExecutionOptions = {
-  onlineLearning: true, semanticMethod: 'auto', orchestration: 'fixed', judgeMode: 'compact_binary',
-  onlineFusion: 'selective', onlineModels: ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic'],
+  onlineLearning: true, semanticMethod: 'auto', orchestration: 'fixed',
+  onlineFusion: 'selective', onlineModels: ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic', 'dense_ridge', 'dense_rbf_svm', 'dense_extra_trees', 'dense_gaussian_nb', 'dense_knn'],
 }
 
 /** 规划和向量搜索都接收用户原句；仅内部比较视图折叠空白。 */

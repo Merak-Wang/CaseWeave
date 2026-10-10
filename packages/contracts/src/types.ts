@@ -136,16 +136,14 @@ export type TicketFastQueryPlan =
  * before Provider access so a retrieval can explain exactly which task,
  * language, domain, entities, constraints, and result-set policy it used.
  */
-export const ONLINE_MODEL_NAMES = ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic'] as const
+export const ONLINE_MODEL_NAMES = ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic', 'dense_ridge', 'dense_rbf_svm', 'dense_extra_trees', 'dense_gaussian_nb', 'dense_knn'] as const
 export type OnlineModelName = typeof ONLINE_MODEL_NAMES[number]
 
 export interface SemanticExecutionOptions {
-  readonly judgeMode?: 'compact_binary' | 'anyjev_l0'
-  readonly judgePrior?: 'none' | 'batch' | 'content_free'
-  /** False runs a frozen per-ticket teacher with zero feedback-based fitting. */
+  /** False uses the selected unsupervised method without teacher labeling. */
   readonly onlineLearning: boolean
   readonly orchestration?: 'fixed' | 'agent'
-  /** Missing settings preserve the historical single-model bank. */
+  /** Select a single model or voting from the chosen candidate bank. */
   readonly onlineFusion?: 'single' | 'selective'
   readonly onlineModels?: readonly OnlineModelName[]
   readonly semanticMethod: 'auto' | 'dual_description_margin' | 'name_gmm' | 'kmeans'

@@ -6,7 +6,7 @@ from caseweave_ops.types import Scope, Knowledge
 from caseweave_ops import invoke_rows
 from conftest import source, collect
 from test_online_fusion import port as numeric_port
-from caseweave_ops.filter import DECISION_SCHEMA
+from caseweave_ops.filter import COMPACT_DECISION_SCHEMA
 
 
 class Port:
@@ -104,7 +104,7 @@ def test_filter_cancels_and_settles_sibling_requests_after_retry_exhaustion(make
     failing_ref = None
     async def fail(payload, request):
         nonlocal failing_ref
-        ref = payload["records"][0]["ref"]
+        ref = payload["records"][0]["record_ref"]
         if failing_ref is None: failing_ref = ref
         if ref == failing_ref: raise ModelRequestError("TRANSPORT", "unavailable", True)
         await asyncio.Event().wait()
@@ -119,24 +119,16 @@ def test_filter_cancels_and_settles_sibling_requests_after_retry_exhaustion(make
     assert metrics["cancelled_attempts"] > 0
 
 
-def test_missing_knowledge_ids_in_three_of_four_rows_retries_under_one_sampling_slot(tmp_path, monkeypatch):
+def test_missing_confidence_in_compact_rows_retries_with_actual_metering(tmp_path, monkeypatch):
     no_delay(monkeypatch)
-    malformed = {"rows": [
-        {"ref": "@r1", "label": "accept", "confidence": .9, "citations": [], "knowledge_ids": [], "reason": "ok"},
-        {"ref": "@r2", "label": "exclude", "confidence": .4, "citations": [], "reason": "missing knowledge_ids"},
-        {"ref": "@r3", "label": "exclude", "confidence": .3, "citations": [], "reason": "missing knowledge_ids"},
-        {"ref": "@r4", "label": "accept", "confidence": .8, "citations": [], "reason": "missing knowledge_ids"},
-    ]}
-    corrected = {"rows": [
-        {"ref": f"@r{i}", "label": "exclude", "confidence": .5, "citations": [], "knowledge_ids": [], "reason": "ok"}
-        for i in range(1, 5)
-    ]}
+    malformed = {"rows": [{"ref": f"@r{i}", "label": "yes", **({"confidence": .9} if i == 1 else {})} for i in range(1, 5)]}
+    corrected = {"rows": [{"ref": f"@r{i}", "label": "no", "confidence": .5} for i in range(1, 5)]}
     port = Port([malformed, corrected])
     store = ArtifactStore(tmp_path / "output-schema.sqlite")
     scope = Scope("t", 123, "s", "a")
     runtime = Runtime(scope, port, store, Knowledge("w"))
 
-    result = asyncio.run(runtime.call("sem_filter", "predicate", {"records": [1, 2, 3, 4]}, DECISION_SCHEMA,
+    result = asyncio.run(runtime.call("sem_filter", "predicate", {"records": [1, 2, 3, 4]}, COMPACT_DECISION_SCHEMA,
         sampling=True, use_cache=False))
 
     calls = store.db.execute("select id,status,request_json,prompt,completion,cached from calls order by started").fetchall()
@@ -152,16 +144,14 @@ def test_missing_knowledge_ids_in_three_of_four_rows_retries_under_one_sampling_
 
 def test_three_output_schema_failures_settle_with_usage_and_one_quota_slot(tmp_path, monkeypatch):
     no_delay(monkeypatch)
-    malformed = {"rows": [
-        {"ref": "@r1", "label": "accept", "confidence": .9, "citations": [], "reason": "missing knowledge_ids"},
-    ]}
+    malformed = {"rows": [{"ref": "@r1", "label": "yes"}]}
     port = Port([malformed, malformed, malformed])
     store = ArtifactStore(tmp_path / "output-schema-exhausted.sqlite")
     scope = Scope("t", 123, "s", "a")
     runtime = Runtime(scope, port, store, Knowledge("w"))
 
     with pytest.raises(ModelRequestError) as captured:
-        asyncio.run(runtime.call("sem_filter", "predicate", {"records": [1]}, DECISION_SCHEMA,
+        asyncio.run(runtime.call("sem_filter", "predicate", {"records": [1]}, COMPACT_DECISION_SCHEMA,
             sampling=True, use_cache=False))
 
     error = captured.value
