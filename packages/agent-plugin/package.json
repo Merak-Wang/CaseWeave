@@ -25,6 +25,7 @@
     "@retrieval-agent/contracts": "workspace:*",
     "@retrieval-agent/domain": "workspace:*",
     "@retrieval-agent/dsh-compat": "workspace:*",
+    "@retrieval-agent/model-service-client": "workspace:*",
     "@retrieval-agent/query-understanding": "workspace:*",
     "mysql2": "3.14.5"
   },

@@ -209,6 +209,9 @@ importers:
       '@retrieval-agent/dsh-compat':
         specifier: workspace:*
         version: link:../dsh-compat
+      '@retrieval-agent/model-service-client':
+        specifier: workspace:*
+        version: link:../model-service-client
       '@retrieval-agent/query-understanding':
         specifier: workspace:*
         version: link:../query-understanding

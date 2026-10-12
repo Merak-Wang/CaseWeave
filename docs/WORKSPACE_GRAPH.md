@@ -20,6 +20,7 @@ flowchart LR
   agent_plugin --> contracts
   agent_plugin --> domain
   agent_plugin --> dsh_compat
+  agent_plugin --> model_service_client
   agent_plugin --> query_understanding
   bundle --> agent_plugin
   bundle --> contracts
@@ -56,7 +57,7 @@ flowchart LR
 
 | 包 | 角色 | 职责 | 已声明的一方依赖 |
 | --- | --- | --- | --- |
-| `@retrieval-agent/agent-plugin` | application | DSH 工具、上下文与领域控制器编排，MySQL 权威任务、租约和事件提交、Session 镜像恢复；不拥有 Provider 算法。 | `@retrieval-agent/contracts`<br>`@retrieval-agent/domain`<br>`@retrieval-agent/dsh-compat`<br>`@retrieval-agent/query-understanding` |
+| `@retrieval-agent/agent-plugin` | application | DSH 工具、上下文与领域控制器编排，MySQL 权威任务、租约和事件提交、Session 镜像恢复；不拥有 Provider 算法。 | `@retrieval-agent/contracts`<br>`@retrieval-agent/domain`<br>`@retrieval-agent/dsh-compat`<br>`@retrieval-agent/model-service-client`<br>`@retrieval-agent/query-understanding` |
 | `@retrieval-agent/bundle` | composition | 固定产品 preset、Cordis patch、默认 Provider 与发布闭包装配；不含业务策略。 | `@retrieval-agent/agent-plugin`<br>`@retrieval-agent/contracts`<br>`@retrieval-agent/domain`<br>`@retrieval-agent/dsh-compat`<br>`@retrieval-agent/model-service-client`<br>`@retrieval-agent/product-api`<br>`@retrieval-agent/product-host`<br>`@retrieval-agent/provider-database`<br>`@retrieval-agent/provider-local`<br>`@retrieval-agent/query-understanding`<br>`@retrieval-agent/ui-ticket-results` |
 | `@retrieval-agent/contracts` | definition | 跨进程与跨层共享的领域类型、事件和 Provider 端口；不含实现策略。 | — |
 | `@retrieval-agent/domain` | domain | 领域状态、条件与证据约束，以及共享的结果投影和重放；result/replay 子路径不依赖 Node 或 DSH。 | `@retrieval-agent/contracts` |
