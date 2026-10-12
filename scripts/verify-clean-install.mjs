@@ -27,6 +27,7 @@ const manager = packageManager()
 const pinnedDshVersion = '0.2.0-rc.2'
 const tempRoot = mkdtempSync(join(tmpdir(), 'retrieval-agent-clean-install-'))
 const browserReview = process.env.RETRIEVAL_AGENT_BROWSER_REVIEW === '1'
+let verified = false
 
 async function seedBrowserReviewModelSettings(home) {
   if (!browserReview) return
@@ -97,6 +98,7 @@ async function verifyWebStartup(dshBin, home, cwd) {
     let routeError
     let stdout = ''
     let stderr = ''
+    const safeOutput = text => text.replace(/([?&]token=)[^\s]+/g, '$1[redacted]')
     const child = spawn(process.execPath, [dshBin, '--profile', 'retrieval-agent', '--no-open', '--port', String(port)], {
       cwd,
       env: { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
@@ -124,18 +126,30 @@ async function verifyWebStartup(dshBin, home, cwd) {
     }
     const timer = setTimeout(() => {
       child.kill('SIGTERM')
-      rejectPromise(new Error(`clean DSH Web startup timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`))
-    }, 30_000)
+      rejectPromise(new Error(`clean DSH Web startup timed out\nstdout:\n${safeOutput(stdout)}\nstderr:\n${safeOutput(stderr)}`))
+    }, 60_000)
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', chunk => {
       stdout += chunk
-      if (!ready && stdout.includes(`http://127.0.0.1:${port}`)) {
+      const launchUrl = stdout.match(new RegExp(`http://127\\.0\\.0\\.1:${port}/[?]token=[^\\s]+(?=\\s)`))?.[0]
+      if (!ready && launchUrl) {
         ready = true
+        // 本次临时DSH的启动token只用于根页面换取cookie；产品POST仍经过真实鉴权。
         void fetch(`http://127.0.0.1:${port}/api/retrieval-agent/export`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+          method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
           body: JSON.stringify({ sessionId: 'missing-session', retrievalId: 'missing-retrieval', resultRevision: 'missing-result' }),
+        }).then(async anonymous => {
+          console.log(`isolated Product Host anonymous status observed: ${anonymous.status}`)
+          return fetch(launchUrl, { redirect: 'manual' })
+        }).then(async authentication => {
+          const cookie = authentication.headers.get('set-cookie')?.split(';')[0]
+          if (authentication.status !== 303 || !cookie) throw new Error('temporary DSH launch-token exchange did not issue a browser cookie')
+          return fetch(`http://127.0.0.1:${port}/api/retrieval-agent/export`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, cookie },
+          body: JSON.stringify({ sessionId: 'missing-session', retrievalId: 'missing-retrieval', resultRevision: 'missing-result' }),
+          })
         }).then(async response => {
           const body = await response.text()
           if (response.status !== 409 || !body.includes('SESSION_NOT_ACTIVE')) {
@@ -164,9 +178,9 @@ async function verifyWebStartup(dshBin, home, cwd) {
     child.on('exit', (code, signal) => {
       clearTimeout(timer)
       removeSignalHandlers()
-      if (routeError !== undefined) rejectPromise(routeError)
+      if (routeError !== undefined) rejectPromise(new Error(`${routeError.message}\nstartup stderr:\n${safeOutput(stderr)}`))
       else if (ready && routeVerified) resolvePromise(undefined)
-      else rejectPromise(new Error(`clean DSH Web exited before readiness (code=${String(code)}, signal=${String(signal)})\nstdout:\n${stdout}\nstderr:\n${stderr}`))
+      else rejectPromise(new Error(`clean DSH Web exited before readiness (code=${String(code)}, signal=${String(signal)})\nstdout:\n${safeOutput(stdout)}\nstderr:\n${safeOutput(stderr)}`))
     })
   })
 }
@@ -218,7 +232,7 @@ try {
   const version = run(process.execPath, [dshBin, '--version'], { cwd: root }).trim()
   if (version !== pinnedDshVersion) throw new Error(`unexpected clean DSH version ${version}`)
   const config = run(process.execPath, [dshBin, '--profile', 'retrieval-agent', '--dump-config'], {
-    cwd: root,
+    cwd: profile,
     env: { ...process.env, DSH_HOME: home },
   })
   if (!config.includes('@retrieval-agent/ui-ticket-results')) throw new Error('composed DSH config is missing the candidate UI row')
@@ -277,9 +291,13 @@ if (records.some(record => record.rawSource?.datasetId !== 'deepseek-ai/ESFT')) 
 const dimensions = 32
 function fakeEmbedding(text) {
   const vector = Array.from({ length: dimensions }, () => 0)
-  for (const character of text.normalize('NFKC').toLocaleLowerCase()) {
+  // 安装验收使用确定性的主题轴；长对话的字符频次不能冒充语义相似度。
+  const normalized = text.normalize('NFKC').toLocaleLowerCase()
+  const topics = [/副卡/u, /解绑|解除绑定/u, /共享/u, /流量/u]
+  topics.forEach((topic, index) => { vector[index] = topic.test(normalized) ? 1 : 0 })
+  for (const character of normalized) {
     const point = character.codePointAt(0)
-    if (point !== undefined && !/\s/u.test(character)) vector[point % dimensions] += 1
+    if (point !== undefined && !/\\s/u.test(character)) vector[4 + point % (dimensions - 4)] = 0.05
   }
   const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0))
   return norm === 0 ? [1, ...Array.from({ length: dimensions - 1 }, () => 0)] : vector.map(value => value / norm)
@@ -292,16 +310,22 @@ function stable(value) {
   }
   return JSON.stringify(value)
 }
+const fixtureQueryVector = fakeEmbedding('主副卡解绑后仍共享流量')
+const fixtureCosine = text => fakeEmbedding(text).reduce((sum, value, index) => sum + value * fixtureQueryVector[index], 0)
+assert.ok(fixtureCosine('副卡解绑后仍共享流量') >= 0.75, 'fixture failed to represent its related query')
+assert.ok(fixtureCosine('用户反映收到骚扰短信，请核实短信来源') < 0.75, 'fixture incorrectly recalls unrelated tickets')
 function rankingProfileVersion(profile) {
   const identity = {
-    version: 'quick-hybrid-v1', embeddingIdentity: profile.embeddingIdentity ?? null,
+    version: 'quick-hybrid-v2', denseRecallPolicy: 'cosine-gte-threshold-v1',
+    ...(profile.documentProjection === undefined || profile.documentProjection === 'ticket-search-projection-v1' ? {} : { documentProjection: profile.documentProjection }),
+    embeddingIdentity: profile.embeddingIdentity ?? null,
     rerankerIdentity: profile.rerankerIdentity ?? null, embeddingInstruction: profile.embeddingInstruction,
     rerankerInstruction: profile.rerankerInstruction, embeddingBatchSize: profile.embeddingBatchSize,
     minimumDenseScore: profile.minimumDenseScore, denseTopK: profile.denseTopK,
     fusion: profile.fusion, bm25f: profile.bm25f,
     rerankerEnabled: profile.rerankerEnabled, rerankTopN: profile.rerankTopN,
   }
-  return 'quick-hybrid-v1:' + createHash('sha256').update(stable(identity)).digest('hex').slice(0, 16)
+  return 'quick-hybrid-v2:' + createHash('sha256').update(stable(identity)).digest('hex').slice(0, 16)
 }
 async function requestBody(request) {
   const chunks = []
@@ -504,7 +528,7 @@ const provider = new LocalTicketProvider(records, {
   ranker: new HybridRankingEngine({
     baseUrl: modelServiceBaseUrl,
     embeddingIdentity: { model: 'clean-install-embedding', revision: 'clean-install-revision-v1', dimensions },
-    minimumDenseScore: -1,
+    minimumDenseScore: 0.75,
   }),
 })
 let serial = 0
@@ -545,25 +569,28 @@ if (JSON.stringify(replayedState) !== JSON.stringify(state)) {
     throw new Error('installed ESFT-only development corpus is incomplete')
   }
 
-  await verifyWebStartup(dshBin, home, root)
+  // 在独立profile内启动，避免工作区生产.env的容器路径/私有transport污染干净安装。
+  await verifyWebStartup(dshBin, home, profile)
 
   const packageNames = releaseEntries.map(entry => entry.name)
   run(process.execPath, [uninstaller, '--home', home], { cwd: profile })
   if (existsSync(join(home, '.agent-presets', 'retrieval-agent'))) throw new Error('preset assets remained after uninstall')
   if (existsSync(join(home, 'retrieval-agent'))) throw new Error('fixture assets remained after uninstall')
   run(process.execPath, [dshBin, 'plugin', '--profile', 'retrieval-agent', 'remove', ...packageNames], {
-    cwd: root,
+    cwd: profile,
     env: { ...process.env, DSH_HOME: home },
   })
   const afterRemove = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8'))
   if (afterRemove.dsh.profile.bundles.includes('@retrieval-agent/bundle')) throw new Error('bundle remained active after plugin removal')
 
   console.log(`clean install verified against published @deepseek-ai/dsh ${pinnedDshVersion}: pack, install, compose, Web startup, Host route, 19,587-record ESFT corpus search, Session replay, assets, remove`)
+  verified = true
 } finally {
   const resolvedTemp = resolve(tempRoot)
   const resolvedOsTemp = resolve(tmpdir())
   if (resolvedTemp.startsWith(`${resolvedOsTemp}${sep}`) && basename(resolvedTemp).startsWith('retrieval-agent-clean-install-')) {
-    recycleTemporaryDirectory(resolvedTemp, resolvedOsTemp, 'retrieval-agent-clean-install-')
+    if (verified) recycleTemporaryDirectory(resolvedTemp, resolvedOsTemp, 'retrieval-agent-clean-install-')
+    else console.warn(`安装验收未完成，保留临时目录供复现：${resolvedTemp}`)
   } else {
     throw new Error(`refusing to clean unexpected temporary directory ${resolvedTemp}; relative=${relative(resolvedOsTemp, resolvedTemp)}`)
   }

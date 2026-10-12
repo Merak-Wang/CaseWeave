@@ -25,14 +25,17 @@ describe('dataset workbench mapping', () => {
     expect(datasetPayload(input)).toEqual({ name: '测试工单', connection: { uri: 'mongodb://private', database: 'xciopdfs', collection: 'output_fields_date' }, time: { field: 'create_time', type: 'string', start: '2026-09-09T00:00:00+08:00', end: '2026-10-10T08:00:00+08:00', timezone: 'Asia/Shanghai' }, source: { field: 'user_business_line_two', value: '运保中心' }, fields: { id: '_id', title: 'large_model_title', abstract: 'large_model_abstract' }, limit: 10000, timeoutSeconds: 60 })
     expect(() => datasetPayload({ ...input, end: input.start })).toThrow('结束时间必须晚于开始时间')
   })
-  it('keeps missing bounds open and reports actual pipeline counts without invented completion', () => {
-    expect(datasetPayload({ ...input, start: '', end: '' }).time).toMatchObject({ start: null, end: null })
-    expect(datasetProgressText({ counts: { read: 100, valid: 90, duplicate: 3, skipped: 7, embeddedChunks: 50, indexedChunks: 20, totalChunks: 90 } })).toBe('读取 100 · 有效 90 · 重复 3 · 跳过 7 · 向量 50/90 · 已索引 20')
+  it('reports ready index counts and current build counts without invented completion', () => {
+    expect(datasetProgressText({ stage: 'ready', counts: { read: 0, valid: 10000, embeddedChunks: 0, indexedChunks: 10000, totalChunks: 10000 } })).toBe('既有发布 · 有效 10000 · 已建向量索引 10000/10000')
+    expect(datasetProgressText({ counts: { read: 100, valid: 90, duplicate: 3, skipped: 7, embeddedChunks: 50, indexedChunks: 20, totalChunks: 90 } })).toBe('读取 100 · 有效 90 · 重复 3 · 跳过 7 · 本次新增向量 50 · 已索引 20/90')
   })
   it('uses a private URI input, configurable collection and ready dataset selector', () => {
     expect(DATASET_SETTINGS_HTML).toContain('id="mongo-uri" type="password"')
     expect(DATASET_SETTINGS_HTML).toContain('id="dataset-id-field" value="_id"')
     expect(DATASET_SETTINGS_HTML).toContain('结束时间（不含）')
+    expect(DATASET_SETTINGS_HTML).toContain('id="dataset-start" type="datetime-local" step="1" required')
+    expect(DATASET_SETTINGS_HTML).toContain('id="dataset-end" type="datetime-local" step="1" required')
+    expect(DATASET_SETTINGS_HTML).not.toContain('留空表示')
     expect(DATASET_SELECTOR_HTML).toContain('id="dataset-selector"')
     expect(DATASET_SETTINGS_HTML).not.toContain('origin_conversation')
   })

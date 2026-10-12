@@ -24,7 +24,8 @@ export function datasetPayload(values) {
 
 export function datasetProgressText(row) {
   const c = row.counts ?? {}
-  return `读取 ${c.read ?? 0} · 有效 ${c.valid ?? 0} · 重复 ${c.duplicate ?? 0} · 跳过 ${c.skipped ?? 0} · 向量 ${c.embeddedChunks ?? 0}/${c.totalChunks ?? 0} · 已索引 ${c.indexedChunks ?? 0}`
+  if (row.stage === 'ready') return `${c.read ? '读取 ' + c.read : '既有发布'} · 有效 ${c.valid ?? 0} · 已建向量索引 ${c.indexedChunks ?? 0}/${c.totalChunks ?? 0}`
+  return `读取 ${c.read ?? 0} · 有效 ${c.valid ?? 0} · 重复 ${c.duplicate ?? 0} · 跳过 ${c.skipped ?? 0} · 本次新增向量 ${c.embeddedChunks ?? 0} · 已索引 ${c.indexedChunks ?? 0}/${c.totalChunks ?? 0}`
 }
 
 export function preferredDataset(rows, selected, defaultDatasetId) {

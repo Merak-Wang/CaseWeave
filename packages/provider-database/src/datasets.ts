@@ -31,12 +31,14 @@ export class DatasetService {
     const rows = await this.options.db.rows<{ progress_json: DatasetProgress }>('SELECT progress_json FROM ra_dataset ORDER BY created_at DESC')
     const datasets = rows.map(r => r.progress_json)
     // 既有发布无需新目录迁移，继续作为可选数据集显示。
-    const publications = await this.options.db.rows<{ dataset_id: string; generation: string; index_id: string; record_count: number; created_at: Date | string }>(
-      "SELECT p.dataset_id,p.generation,p.index_id,g.record_count,g.created_at FROM ra_publication p JOIN ra_generation g ON g.id=p.generation JOIN ra_index i ON i.id=p.index_id WHERE g.status='ready' AND i.status='ready' AND i.generation=g.id AND i.completed_chunks=i.total_chunks AND i.watermark=g.source_watermark")
+    const publications = await this.options.db.rows<{ dataset_id: string; generation: string; index_id: string; record_count: number; completed_chunks: number; total_chunks: number; created_at: Date | string }>(
+      "SELECT p.dataset_id,p.generation,p.index_id,g.record_count,i.completed_chunks,i.total_chunks,g.created_at FROM ra_publication p JOIN ra_generation g ON g.id=p.generation JOIN ra_index i ON i.id=p.index_id WHERE g.status='ready' AND i.status='ready' AND i.generation=g.id AND i.completed_chunks=i.total_chunks AND i.watermark=g.source_watermark")
+    const publishedIds = new Set(publications.map(p => p.dataset_id))
+    for (let i = 0; i < datasets.length; i++) if (datasets[i]!.stage === 'ready' && !publishedIds.has(datasets[i]!.datasetId)) datasets[i] = { ...datasets[i]!, stage: 'failed', error: '未有完整已发布索引，请重新构建。' }
     for (const p of publications) {
       const at = datasets.findIndex(d => d.datasetId === p.dataset_id), previous = datasets[at]
       const ready: DatasetProgress = { ...(previous ?? { id: p.dataset_id, datasetId: p.dataset_id, name: p.dataset_id, createdAt: new Date(p.created_at).toISOString() }), stage: 'ready',
-        counts: { ...(previous?.counts ?? emptyDatasetCounts()), valid: p.record_count }, sourceVersion: p.generation, indexVersion: p.index_id }
+        counts: { ...(previous?.counts ?? emptyDatasetCounts()), valid: p.record_count, indexedChunks: p.completed_chunks, totalChunks: p.total_chunks }, sourceVersion: p.generation, indexVersion: p.index_id }
       delete ready.error
       if (at < 0) datasets.push(ready); else datasets[at] = ready
     }

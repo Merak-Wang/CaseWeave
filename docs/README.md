@@ -16,6 +16,7 @@
 | Wiki 版本、知识增量与自动学习 | [知识设计](design/KNOWLEDGE.md)、[Wiki 接口](../wiki/INTEGRATION.md) |
 | 可用领域知识与适用边界 | [业务 Wiki](../wiki/README.md) |
 | 示例数据、字段与来源版本 | [数据说明](../data/README.md) |
+| 连接 Mongo、按时间与来源下载、构建并选择检索数据集 | [数据管理](DEVELOPMENT.md#浏览器连接-mongo-并准备检索数据) |
 | 测试范围、质量指标与对照方法 | [评测与验收](EVALUATION_STRATEGY.md) |
 | Workspace 包与依赖关系 | [生成依赖图](WORKSPACE_GRAPH.md) |
 

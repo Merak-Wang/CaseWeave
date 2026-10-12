@@ -20,7 +20,7 @@ function fixture() {
     if (sql.startsWith('UPDATE ra_dataset')) catalog.set(String(args[2]), JSON.parse(String(args[1])))
   })
   const db = { migrate: async () => {}, pool: { query }, rows: async (sql: string) => sql.includes('FROM ra_publication') ? publications : sql.includes('stage NOT') ? [] : [...catalog.values()].map(progress_json => ({ progress_json })),
-    importRecords: vi.fn(async (id: string) => `generation-${id}`), buildGrams: vi.fn(async () => {}), publish: vi.fn(async () => {}) } as unknown as TicketDatabase
+    importRecords: vi.fn(async (id: string) => `generation-${id}`), buildGrams: vi.fn(async () => {}), publish: vi.fn(async (dataset_id: string, generation: string, index_id: string) => { publications.push({ dataset_id, generation, index_id, record_count: 1, completed_chunks: 1, total_chunks: 1, created_at: new Date() }) }) } as unknown as TicketDatabase
   const model = { ready: async () => ({ ready: true, models: [{ kind: 'embedding', loaded: true, model: 'actual-ready', revision: 'actual-revision', dimensions: 1024, pooling: 'last_token', normalization: 'l2' }] }),
     embed: async (input: { signal?: AbortSignal }) => { state.embeddingStarted = true; if (state.cancelEmbedding) await new Promise<void>(resolve => input.signal!.addEventListener('abort', () => resolve(), { once: true })); input.signal?.throwIfAborted(); return [[1]] }, rerank: async () => [] } as unknown as RetrievalModelGateway
   return { service: new DatasetService({ db, milvus: {} as MilvusClient, model, tenantId: async () => 'authorized-tenant' }), db, catalog, publications }
@@ -52,8 +52,15 @@ it('cancels the active embedding through its native signal and does not publish'
 it('published identity wins over stale failed catalog after restart and lists existing publications', async () => {
   const { service, catalog, publications } = fixture()
   catalog.set('new', { id: 'new', datasetId: 'new', name: 'kept name', stage: 'failed', createdAt: new Date().toISOString(), counts: { read: 1, valid: 1, duplicate: 0, skipped: 0, embeddedChunks: 0, indexedChunks: 0, totalChunks: 0 }, error: 'restart' })
-  publications.push(...['new', 'existing'].map(dataset_id => ({ dataset_id, generation: `generation-${dataset_id}`, index_id: `index-${dataset_id}`, record_count: 1, created_at: new Date() })))
+  publications.push(...['new', 'existing'].map(dataset_id => ({ dataset_id, generation: `generation-${dataset_id}`, index_id: `index-${dataset_id}`, record_count: 10000, completed_chunks: 10000, total_chunks: 10000, created_at: new Date() })))
   const rows = (await service.list()).datasets
   expect(rows.find(r => r.id === 'new')).toMatchObject({ stage: 'ready', name: 'kept name', sourceVersion: 'generation-new' }); expect(rows.find(r => r.id === 'new')?.error).toBeUndefined()
-  expect(rows.find(r => r.id === 'existing')?.stage).toBe('ready'); await service.close()
+  expect(rows.find(r => r.id === 'existing')).toMatchObject({ stage: 'ready', counts: { valid: 10000, totalChunks: 10000, indexedChunks: 10000, embeddedChunks: 0 } }); await service.close()
+})
+it('does not expose a former ready catalog when its complete publication is absent', async () => {
+  const { service, catalog } = fixture()
+  catalog.set('old-ready', { id: 'old-ready', datasetId: 'old-ready', name: '旧发布', stage: 'ready', createdAt: new Date().toISOString(), counts: { read: 1, valid: 1, duplicate: 0, skipped: 0, embeddedChunks: 1, indexedChunks: 1, totalChunks: 1 } })
+  expect((await service.get('old-ready'))).toMatchObject({ stage: 'failed', error: '未有完整已发布索引，请重新构建。' })
+  expect(catalog.get('old-ready')?.stage).toBe('ready')
+  await service.close()
 })

@@ -1,5 +1,7 @@
 import { createRequire } from 'node:module'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { Context } from '@deepseek-ai/cordis'
+import { recycleDirectory } from '../../bundle/src/recycle.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -35,16 +37,18 @@ describe('DSH Session compatibility boundary', () => {
     expect(KNOWN_SESSION_EVENT_TYPES.has(RETRIEVAL_PRESENTATION_EVENT_TYPE)).toBe(true)
   })
 
-  it('startup plugin restores the vocabulary for a harness that never composed the preset', () => {
+  it('startup plugin restores the vocabulary for a harness that never composed the preset', async () => {
     const all = [...REQUIRED_RETRIEVAL_EVENT_TYPES, RETRIEVAL_PRESENTATION_EVENT_TYPE]
     const registry = KNOWN_SESSION_EVENT_TYPES as Set<string>
+    const ctx = new Context()
     for (const type of all) registry.delete(type)
     try {
       // The cold-start refusal: persistence rejects every retrieval event as unknown.
       expect(all.every(type => !KNOWN_SESSION_EVENT_TYPES.has(type))).toBe(true)
-      apply()
+      apply(ctx)
       expect(all.every(type => KNOWN_SESSION_EVENT_TYPES.has(type))).toBe(true)
     } finally {
+      await ctx.fiber.dispose()
       installDshSessionCompatibility()
     }
   })
@@ -73,7 +77,7 @@ describe('DSH Session compatibility boundary', () => {
       expect(REQUIRED_RETRIEVAL_EVENT_TYPES.every(type => runtime.KNOWN_SESSION_EVENT_TYPES.has(type))).toBe(true)
       expect(runtime.KNOWN_SESSION_EVENT_TYPES.has(RETRIEVAL_PRESENTATION_EVENT_TYPE)).toBe(true)
     } finally {
-      await rm(root, { recursive: true, force: true })
+      recycleDirectory(root)
     }
   })
 

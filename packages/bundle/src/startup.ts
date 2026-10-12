@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { appendFile, cp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, cp, mkdir, writeFile } from 'node:fs/promises'
+import { recycleDirectory } from './recycle.js'
 import { dirname, isAbsolute, parse, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -161,10 +162,10 @@ export async function installLocalProductAssets(
   return { presetRoot, dataPath, dataRoot, workspacePath, profileScope, dataInstalled: true }
 }
 
-/** Remove only the two exact product-owned asset directories under an explicit DSH home. */
+/** 仅将明确DSH home内两个产品目录移入回收站；失败保留原项并报告原因。 */
 export async function uninstallLocalProductAssets(dshHome: string): Promise<UninstallReceipt> {
   const { presetPath, productRoot } = localAssetTargets(dshHome)
-  await rm(presetPath, { recursive: true, force: true })
-  await rm(productRoot, { recursive: true, force: true })
+  recycleDirectory(presetPath)
+  recycleDirectory(productRoot)
   return { presetPath, productRoot }
 }

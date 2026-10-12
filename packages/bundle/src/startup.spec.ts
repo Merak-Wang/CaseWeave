@@ -1,4 +1,5 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { recycleDirectory } from './recycle.js'
 import { tmpdir } from 'node:os'
 import { dirname, join, parse, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -12,7 +13,7 @@ const temporaryRoots: string[] = []
 afterEach(async () => {
   for (const root of temporaryRoots.splice(0)) {
     if (!root.startsWith(tmpdir())) throw new Error(`refusing to remove non-temporary path: ${root}`)
-    await rm(root, { recursive: true, force: true })
+    recycleDirectory(root)
   }
 })
 
@@ -126,7 +127,7 @@ describe('installLocalProductAssets', () => {
     expect(hostRow).toBeGreaterThan(compatRow)
   })
 
-  it('removes only product-owned preset and fixture directories', async () => {
+  it('recycles only product-owned preset and fixture directories', async () => {
     const root = await mkdtemp(join(tmpdir(), 'retrieval-agent-assets-'))
     temporaryRoots.push(root)
     await installLocalProductAssets(root, false, await esftDataRoot(root))
