@@ -14,6 +14,7 @@ import type {
 } from './types.js'
 
 export interface ProviderCallOptions {
+  readonly datasetId?: string
   readonly signal?: AbortSignal
   readonly deadlineMs?: number
   readonly traceId?: string

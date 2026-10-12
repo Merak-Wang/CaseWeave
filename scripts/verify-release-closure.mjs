@@ -1,6 +1,7 @@
 import { packageManager } from './package-manager.mjs'
+import { recycleTemporaryDirectory } from './recycle-directory.mjs'
 import { execFileSync } from 'node:child_process'
-import { readFile, rm } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
@@ -103,7 +104,7 @@ try {
   const resolvedTemp = resolve(tempRoot)
   const resolvedOsTemp = resolve(tmpdir())
   if (resolvedTemp.startsWith(`${resolvedOsTemp}${sep}`) && basename(resolvedTemp).startsWith('retrieval-agent-release-')) {
-    await rm(resolvedTemp, { recursive: true, force: true })
+    recycleTemporaryDirectory(resolvedTemp, resolvedOsTemp, 'retrieval-agent-release-')
   } else {
     failures.push(`refusing to clean unexpected temporary pack directory ${resolvedTemp}`)
   }

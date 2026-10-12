@@ -6,6 +6,7 @@ import { fieldCapabilities, grams, queryDocument } from './projection.js'
 import { compileSql, necessaryGrams } from './sql.js'
 
 const DDL = [
+  `CREATE TABLE IF NOT EXISTS ra_dataset (id VARCHAR(191) PRIMARY KEY, name VARCHAR(191) NOT NULL, stage VARCHAR(20) NOT NULL, spec_json JSON NOT NULL, progress_json JSON NOT NULL, created_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3))`,
   `CREATE TABLE IF NOT EXISTS ra_numeric_feature (index_id CHAR(64) NOT NULL, ordinal BIGINT NOT NULL, ticket_id VARCHAR(191) NOT NULL, vector_blob MEDIUMBLOB NULL, PRIMARY KEY(index_id,ordinal), UNIQUE KEY feature_ticket(index_id,ticket_id))`,
   ...QUERY_DDL,
   `CREATE TABLE IF NOT EXISTS ra_provider_snapshot (id VARCHAR(191) PRIMARY KEY, dataset_id VARCHAR(191) NOT NULL, generation CHAR(64) NOT NULL, index_id CHAR(64) NULL, snapshot_json JSON NOT NULL)`,

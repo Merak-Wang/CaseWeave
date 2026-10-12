@@ -131,7 +131,7 @@ export class RetrievalController {
       completenessRequirement: spec.countPolicy === 'exhaustive' ? 'exhaustive' as const : 'top_k' as const,
     }
     const contracted = this.#journal.append(retrievalId, 'retrieval/query-contracted', { contract: task, queryContract, spec })
-    const snapshot = await this.#provider.openSnapshot(principal, { ...(signal === undefined ? {} : { signal }) })
+    const snapshot = await this.#provider.openSnapshot(principal, { ...(request.datasetId ? { datasetId: request.datasetId } : {}), ...(signal === undefined ? {} : { signal }) })
     const queryFields = snapshot.queryFields ?? snapshot.fieldCatalog.flatMap(f => f.capability ? [f.capability] : [])
     if (spec.queryPlan && queryFields.length) {
       spec = { ...spec, queryPlan: { ...spec.queryPlan, fields: queryFields } }

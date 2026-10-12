@@ -36,3 +36,11 @@ it('rejects retired probability and calibration execution controls', () => {
       execution: { ...execution, ...retired } })).toThrow()
   }
 })
+
+it('binds a dataset only on a new query and accepts existing publication names', () => {
+  expect(parseTaskCommand({ operationId: 'dataset-task', kind: 'query', text: '账号权限', datasetId: '运保.2026-10' }).command)
+    .toMatchObject({ kind: 'query', datasetId: '运保.2026-10' })
+  for (const datasetId of ['', ' ', 12, 'a'.repeat(192)]) expect(() => parseTaskCommand({
+    operationId: 'bad-dataset', kind: 'query', text: '账号权限', datasetId })).toThrow()
+  expect(() => parseTaskCommand({ operationId: 'change-dataset', kind: 'supplement', text: '补充条件', datasetId: 'other' })).toThrow()
+})

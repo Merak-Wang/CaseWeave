@@ -1,6 +1,7 @@
 import { readTicketDetail, detailFailureMessage } from '@retrieval-agent/product-api/detail-client'
 import { displayFieldPart } from './workbench-content.js'
 import { createOrchestrationUI, revealText } from './workbench-orchestration.js'
+import { createDatasetUI } from './workbench-datasets.js'
 import { createModelUI } from './workbench-models.js'
 import { renderRetrieval, collectionBoundary, evidenceScopeChanged } from './workbench-retrieval.js'
 const $ = id => document.getElementById(id), endpoint = '/api/retrieval-agent/tasks'
@@ -39,6 +40,7 @@ function updateExportControls() {
 const hasAccess = () => snapshot?.node && !['snapshot_invalid', 'permission_blocked'].includes(snapshot.node.status)
 const deliveryReady = () => hasAccess() && Boolean(snapshot.node.result) && !snapshot.failure
 const orchestrationUI = createOrchestrationUI({ api, endpoint, getSnapshot: () => snapshot, getTaskId: () => taskId, getReportStatus: () => reportStatus, showView: setView, expertDetail, openCandidate: c => detail(c) })
+const datasetUI = createDatasetUI({ api })
 const modelUI = createModelUI({ api, getTaskId: () => taskId })
 function error(e, source = 'action') {
   const target = $('feedback-dialog').open ? $('feedback-error') : $('delivery').open ? $('delivery-error') : $('error')
@@ -162,7 +164,7 @@ async function refresh() {
     if (snapshot && snapshot.inputRevision !== next.inputRevision) invalidateViews()
     if (snapshot?.node?.result?.resultRevision !== next.node?.result?.resultRevision) invalidateDelivery()
     if (snapshot && evidenceScopeChanged(snapshot, next) && !$('evidence-panel').hidden) closeDetail()
-    snapshot = next; currentListVersion = next.node?.collectionWindow?.version; minimumInput = next.inputRevision
+    snapshot = next; datasetUI.showBound(next.datasetId); currentListVersion = next.node?.collectionWindow?.version; minimumInput = next.inputRevision
     lastSeq = Math.max(lastSeq, next.eventSeq); clearError('refresh'); render()
     if (hasAccess() && view !== 'report' && (view === 'results' || $('candidate-disclosure').open)) {
       // 最终集合发布后读取同一权威版本，避免页头和分页仍停留在采样结果。
@@ -489,12 +491,13 @@ $('online-models').onchange = updateExecutionControls
 updateExecutionControls()
 $('query-form').onsubmit = async event => {
   event.preventDefault(); if ($('start').disabled) return
+  if (!datasetUI.selectedId()) { error(new Error('请选择索引已就绪的数据集。')); return }
   const online = $('online-learning').checked, models = [...$('online-models').querySelectorAll('input:checked')].map(input => input.value)
   if (online && models.length === 0) { error(new Error('请至少选择一种在线候选模型。')); return }
   const execution = { onlineLearning: online, semanticMethod: online ? 'auto' : $('semantic-method').value, orchestration: 'fixed',
     ...(online ? { onlineFusion: $('online-fusion').value, onlineModels: models } : {}) }
   $('start').disabled = true; $('online-learning').disabled = true; updateExecutionControls()
-  try { const r = await command(endpoint, { kind: 'query', text: $('query').value.trim(), execution }); await enterTask(r.taskId) }
+  try { const r = await command(endpoint, { kind: 'query', text: $('query').value.trim(), execution, datasetId: datasetUI.selectedId() }); await enterTask(r.taskId) }
   catch (e) { error(e) } finally { $('start').disabled = false; $('online-learning').disabled = false; updateExecutionControls() }
 }
 $('examples').onclick = event => { const b = event.target.closest('button'); if (b) { $('query').value = b.dataset.query; resizeInput($('query')); $('query').focus() } }

@@ -49,7 +49,7 @@ export class DatabaseTicketProvider implements TicketRetrievalProvider {
     assertTrustedPrincipal(principal); options?.signal?.throwIfAborted()
     const { source, index } = await this.db.publication(this.datasetId)
     const snapshotId = TicketSnapshotId(shortOpaque('snap', principalBinding(principal), source.id, index?.id ?? '', randomUUID()))
-    const snapshot: TicketSnapshot = { snapshotId, shortId: sha256(snapshotId).slice(0, 10), providerId: this.providerId,
+    const snapshot: TicketSnapshot = { datasetId: this.datasetId, snapshotId, shortId: sha256(snapshotId).slice(0, 10), providerId: this.providerId,
       createdAt: new Date().toISOString(), sourceVersion: source.id, indexVersion: index?.id ?? 'vector-unavailable',
       retrievalProfileVersion: this.#profile, authorizationVersion: principal.entitlementVersion,
       principalBindingHash: principalBinding(principal), queryPolicyVersion: 'query-policy-v1', queryFields: source.fields_json,

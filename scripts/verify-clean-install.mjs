@@ -1,7 +1,8 @@
 import { packageManager } from './package-manager.mjs'
+import { recycleTemporaryDirectory } from './recycle-directory.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync } from 'node:fs'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
@@ -562,7 +563,7 @@ if (JSON.stringify(replayedState) !== JSON.stringify(state)) {
   const resolvedTemp = resolve(tempRoot)
   const resolvedOsTemp = resolve(tmpdir())
   if (resolvedTemp.startsWith(`${resolvedOsTemp}${sep}`) && basename(resolvedTemp).startsWith('retrieval-agent-clean-install-')) {
-    await rm(resolvedTemp, { recursive: true, force: true })
+    recycleTemporaryDirectory(resolvedTemp, resolvedOsTemp, 'retrieval-agent-clean-install-')
   } else {
     throw new Error(`refusing to clean unexpected temporary directory ${resolvedTemp}; relative=${relative(resolvedOsTemp, resolvedTemp)}`)
   }

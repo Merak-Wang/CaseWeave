@@ -1,3 +1,4 @@
+import { installDatasetHost } from './datasets.js'
 import { taskRuntimeMetrics } from './orchestration-metrics.js'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
@@ -23,6 +24,7 @@ export interface TaskHostOptions {
   applicationFor(agent: Agent): DurableRetrievalAgentService
   analyzer: TicketQueryAnalyzer
   providerFor?(agent: Agent): TicketRetrievalProvider
+  validateDataset?(id: string): Promise<void>
   reportModel?: DeliveryOptions['model']
   leaseMs?: number
   concurrency?: number
@@ -32,7 +34,7 @@ export interface TaskHostOptions {
 export interface TaskSnapshot {
   orchestration?: ReturnType<typeof projectOrchestration> | undefined
   taskId: string; sessionId: string; eventSeq: number; semanticRevision: number; queryRevision: number; inputRevision: number;
-  query: string; failure: string | null; node: TicketCandidateNode | undefined;
+  datasetId?: string; query: string; failure: string | null; node: TicketCandidateNode | undefined;
   question: { id: string; question_json: unknown } | undefined; commands: TaskCommand[];
   conversation: { seq: number; role: 'user' | 'assistant'; text: string }[];
   feedback: { seq: number; candidateRef: string; text: string; status: 'received' | 'reviewed'; verdict?: string; reason?: string }[];
@@ -44,7 +46,7 @@ export function parseTaskCommand(value: unknown): { operationId: string; command
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RetrievalError('INVALID_REQUEST', '命令必须是 JSON 对象。')
   const v = value as Record<string, unknown>
   if (typeof v.operationId !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(v.operationId)) throw new RetrievalError('INVALID_REQUEST', '命令需要有效的幂等键。')
-  const fields: Record<string, string[]> = { query: ['text', 'execution'], supplement: ['text'], feedback: ['text', 'candidateRef', 'relevance'], answer: ['text', 'questionId'], resume: [], cancel: [] }
+  const fields: Record<string, string[]> = { query: ['text', 'execution', 'datasetId'], supplement: ['text'], feedback: ['text', 'candidateRef', 'relevance'], answer: ['text', 'questionId'], resume: [], cancel: [] }
   if (typeof v.kind !== 'string' || !Object.hasOwn(fields, v.kind)
     || Object.keys(v).some(key => !['kind', 'operationId', ...fields[v.kind as string]!].includes(key))) throw new RetrievalError('INVALID_REQUEST', '命令类型或字段无效。')
   if (v.kind !== 'cancel' && v.kind !== 'resume' && (typeof v.text !== 'string' || !v.text.trim() || v.text.length > 2000)) throw new RetrievalError('INVALID_REQUEST', '请输入 1–2000 字的内容。')
@@ -53,7 +55,8 @@ export function parseTaskCommand(value: unknown): { operationId: string; command
   switch (v.kind) {
     case 'query':
       if (v.execution !== undefined) assertSemanticExecutionOptions(v.execution)
-      command = { kind: 'query', text, execution: v.execution ?? DEFAULT_SEMANTIC_EXECUTION }; break
+      if (v.datasetId !== undefined && (typeof v.datasetId !== 'string' || !v.datasetId.trim() || v.datasetId.length > 191)) throw new RetrievalError('INVALID_REQUEST', '数据集引用无效。')
+      command = { kind: 'query', text, ...(v.datasetId ? { datasetId: v.datasetId as string } : {}), execution: v.execution ?? DEFAULT_SEMANTIC_EXECUTION }; break
     case 'cancel': command = { kind: 'cancel' }; break
     case 'supplement': command = { kind: 'supplement', text, information: compileTaskInformation(text) }; break
     case 'answer':
@@ -181,11 +184,15 @@ export class TaskHost {
   async modelAgent(id: string): Promise<Agent> { return (await this.access(id)).agent }
   async snapshot(id: string, attempt = 0): Promise<TaskSnapshot> {
     const { task: identity, agent, application } = await this.access(id)
+    let datasetId: string | undefined
     let node: TicketCandidateNode | undefined
     let orchestration: ReturnType<typeof projectOrchestration> | undefined
     if (identity.has_state) {
       const authorized = await application.authorizePresentation(agent, RetrievalId(id))
       if (authorized.accessValidation !== 'current' && authorized.termination !== 'snapshot_invalid') throw new RetrievalError('UNAUTHORIZED', authorized.stopExplanation ?? '当前工单访问资格未通过。')
+      datasetId = authorized.snapshot?.datasetId
+      if (!datasetId && authorized.snapshot) datasetId = (await this.store.rows<{ dataset_id: string }>(
+        'SELECT dataset_id FROM ra_provider_snapshot WHERE id=?', [authorized.snapshot.snapshotId]))[0]?.dataset_id
       node = windowedNode(authorized, projectTicketCandidateState(authorized, authorized.retrievalId))
       if (authorized.accessValidation === 'current' && !['snapshot_invalid', 'permission_blocked'].includes(authorized.termination)) {
         orchestration = projectOrchestration(authorized, taskRuntimeMetrics(agent, authorized))
@@ -218,7 +225,7 @@ export class TaskHost {
       return [{ seq: e.seq, role: 'assistant' as const, text }]
     })
     return { taskId: task.id, sessionId: task.session_id, eventSeq: task.event_seq, semanticRevision: task.semantic_revision,
-      queryRevision: task.query_revision, inputRevision: task.input_revision, query: task.original_query, failure: task.failure, node, orchestration,
+      queryRevision: task.query_revision, inputRevision: task.input_revision, datasetId: datasetId ?? commands.find(e => e.data_json.command.kind === 'query')?.data_json.command.datasetId, query: task.original_query, failure: task.failure, node, orchestration,
       question: await this.store.question(id), commands: await this.store.commands(id), conversation,
       ...(receipts[0] ? { receipt: receipts[0].receipt_json } : {}),
       feedback: entries.filter(e => e.kind === 'command/accepted' && e.data_json.command.kind === 'feedback').map(e => {
@@ -245,9 +252,10 @@ export class TaskHost {
         const { operationId, command } = parseTaskCommand(await readJson(request))
         if (!id) {
           if (command.kind !== 'query') throw new RetrievalError('INVALID_REQUEST', '新任务需要查询。')
+          if (command.datasetId) await this.options.validateDataset?.(command.datasetId)
           const agent = await this.options.agentFor(operationId, true)
           const principal = await this.options.applicationFor(agent).principal(agent, 'detail_read')
-          send(response, 202, await this.store.create(operationId, String(agent.session.id), principal, command.text, operationId, command.execution))
+          send(response, 202, await this.store.create(operationId, String(agent.session.id), principal, command.text, operationId, command.execution, command.datasetId))
         } else {
           if (command.kind === 'query') throw new RetrievalError('INVALID_REQUEST', '请通过新任务入口提交查询。')
           const { principal, application, agent } = await this.access(id)
@@ -411,7 +419,12 @@ export async function installTaskHost(ctx: Context, config: { mysqlUrl?: string;
     service.modelSelection = active => models.current(active)
     return service
   }
+  const datasets = await installDatasetHost(ctx, async () => {
+    const agent = await agentFor('dataset-management', true)
+    return (await applicationFor(agent).principal(agent, 'snapshot_open')).tenantId
+  })
   const host = new TaskHost(store, { agentFor, applicationFor,
+    validateDataset: async id => { if ((await datasets.get(id)).stage !== 'ready') throw new RetrievalError('INVALID_REQUEST', '数据集索引尚未就绪。') },
     providerFor: agent => {
       const provider = ctx.agentPresets.serviceFor(agent, 'ticketRetrievalProvider')
       if (!provider) throw new RetrievalError('PROVIDER_UNAVAILABLE', '当前工单来源不可用。')

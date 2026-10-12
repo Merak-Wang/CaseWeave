@@ -7,7 +7,7 @@ import { RetrievalController, createRetrievalStatePatch, migrateProjectionState,
 import { ARTIFACT_DDL, externalizeArtifacts, hydrateArtifacts, artifactIdentities } from './artifact-store.js'
 import { SEMANTIC_RESULT_DDL, MySqlSemanticResultStore } from './semantic-result-store.js'
 
-export type TaskCommand = { kind: 'query'; text: string; execution?: import('@retrieval-agent/contracts').SemanticExecutionOptions }
+export type TaskCommand = { kind: 'query'; text: string; datasetId?: string; execution?: import('@retrieval-agent/contracts').SemanticExecutionOptions }
   | { kind: 'supplement'; text: string; information: RetrievalClarificationAnswer }
   | { kind: 'feedback'; text: string; candidateRef: string; relevance: 'related' | 'unrelated' }
   | { kind: 'answer'; text: string; questionId: string; information: RetrievalClarificationAnswer }
@@ -127,11 +127,11 @@ export class MySqlTaskStore {
     await c.query('INSERT IGNORE INTO ra_task_job(id,task_id,kind,input_revision,status) VALUES (?,?,?,?,?)',
       [randomUUID(), task.id, kind, task.input_revision, 'queued'])
   }
-  async create(id: string, sessionId: string, principal: TrustedPrincipalContext, text: string, operationId = id, execution?: import('@retrieval-agent/contracts').SemanticExecutionOptions): Promise<CommandReceipt> {
+  async create(id: string, sessionId: string, principal: TrustedPrincipalContext, text: string, operationId = id, execution?: import('@retrieval-agent/contracts').SemanticExecutionOptions, datasetId?: string): Promise<CommandReceipt> {
     return this.transaction(async c => {
       await c.query('INSERT IGNORE INTO ra_task(id,session_id,owner_hash,original_query) VALUES (?,?,?,?)', [id, sessionId, taskOwner(principal), text])
       const task = await this.lock(c, id)
-      return this.accept(c, task, principal, operationId, { kind: 'query', text, ...(execution ? { execution } : {}) })
+      return this.accept(c, task, principal, operationId, { kind: 'query', text, ...(datasetId ? { datasetId } : {}), ...(execution ? { execution } : {}) })
     })
   }
   async submit(id: string, principal: TrustedPrincipalContext, operationId: string, command: Exclude<TaskCommand, { kind: 'query' }>): Promise<CommandReceipt> {

@@ -11,15 +11,21 @@ const task = () => ({ id: 'task', input_revision: 2, state_json: { phase: 'stopp
 
 it('checks each published knowledge dependency and preserves entries after unrelated source publication', async () => {
   const read = vi.fn(async (_p: unknown, request: { candidateRefs: string[] }) => ({ rejectedCandidateRefs: request.candidateRefs.filter(r => r === 'changed') }))
-  const context = { ticketRetrievalProvider: { openSnapshot: async () => ({ providerId: 'database', sourceVersion: 'next' }), readEvidence: read } }
+  const originalDatasetId = 'original-task-dataset'
+  const openSnapshot = vi.fn(async () => ({ providerId: 'database', sourceVersion: 'next' }))
+  const rows = vi.fn(async () => [{ dataset_id: originalDatasetId }])
+  const context = { ticketRetrievalProvider: { openSnapshot, readEvidence: read } }
   const app = { principal: async () => ({}), store: {
     sourceSnapshot: async () => ({ providerId: 'database', sourceVersion: 'old', snapshotId: 'snapshot' }),
+    rows,
     learningRecords: async () => [{ details_json: { entryIds: ['kept', 'withdrawn'], entrySources: { kept: ['unchanged'], withdrawn: ['changed'] } } }],
   } }
   const service = new WikiLearningService(context as any, app as any, 'unused-test-root')
   const invalidate = vi.spyOn(service as any, 'invalidate').mockResolvedValue(undefined)
   const job = { kind: 'source_check', task_id: 'task' }, signal = new AbortController().signal
   await service.run({} as any, job as any, signal)
+  expect(rows).toHaveBeenCalledWith('SELECT dataset_id FROM ra_provider_snapshot WHERE id=?', ['snapshot'])
+  expect(openSnapshot).toHaveBeenCalledWith({}, { signal, datasetId: originalDatasetId })
   expect(invalidate).toHaveBeenCalledWith(job, signal, true, new Set(['withdrawn']))
   invalidate.mockClear(); read.mockResolvedValue({ rejectedCandidateRefs: [] })
   await service.run({} as any, job as any, signal)
@@ -27,6 +33,8 @@ it('checks each published knowledge dependency and preserves entries after unrel
   read.mockRejectedValue(new Error('temporary database outage'))
   await expect(service.run({} as any, job as any, signal)).rejects.toThrow('temporary database outage')
   expect(invalidate).not.toHaveBeenCalled()
+  expect(openSnapshot).toHaveBeenCalledTimes(3)
+  for (const call of openSnapshot.mock.calls) expect(call).toEqual([{}, { signal, datasetId: originalDatasetId }])
 })
 
 it('requires current, reviewed, model-visible source evidence and preserves disagreement with user marks', () => {

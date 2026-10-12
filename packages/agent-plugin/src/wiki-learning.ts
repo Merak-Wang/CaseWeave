@@ -105,7 +105,8 @@ export class WikiLearningService {
       const principal = await this.application.principal(agent, 'snapshot_open', signal)
       // Open a freshly authorized source; expiry of an old task alone does not
       // prove that its source facts changed. No model call or business write.
-      const current = await this.ctx.ticketRetrievalProvider.openSnapshot(principal, { signal })
+      const datasetId = original?.datasetId ?? (original ? (await this.application.store.rows<{ dataset_id: string }>('SELECT dataset_id FROM ra_provider_snapshot WHERE id=?', [original.snapshotId]))[0]?.dataset_id : undefined)
+      const current = await this.ctx.ticketRetrievalProvider.openSnapshot(principal, { signal, ...(datasetId ? { datasetId } : {}) })
       if (!original || current.providerId !== original.providerId) { await this.invalidate(job, signal, true); return }
       if (current.sourceVersion === original.sourceVersion) return
       const affected = new Set<string>()

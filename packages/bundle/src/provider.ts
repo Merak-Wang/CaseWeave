@@ -20,8 +20,7 @@ import {
 import { TicketRetrievalProviderService } from '@retrieval-agent/agent-plugin'
 import { LocalTicketProvider, parseTicketDatasetJsonl, rankingDocuments } from '@retrieval-agent/provider-local'
 import { HybridRankingEngine, type RetrievalRanker } from '@retrieval-agent/model-service-client/ranking'
-import { DatabaseTicketProvider, TicketDatabase, MilvusClient } from '@retrieval-agent/provider-database'
-import { ModelServiceClient } from '@retrieval-agent/model-service-client'
+import { DatabaseTicketProvider, TicketDatabase, getDatabaseResources } from '@retrieval-agent/provider-database'
 import type { TicketRetrievalProvider } from '@retrieval-agent/contracts'
 
 export interface Config {
@@ -87,19 +86,23 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
   private readonly provider: TicketRetrievalProvider
   private readonly preparation: Promise<void>
   private preparationError: unknown
+  private database?: TicketDatabase
+  private datasetFactory?: (id: string) => DatabaseTicketProvider
+  private readonly datasets = new Map<string, DatabaseTicketProvider>()
+  private readonly snapshots = new Map<TicketSnapshotId, TicketRetrievalProvider>()
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
     const documentProjection=config.documentProjection??'ticket-search-projection-v1'
     if (config.storageBackend === 'mysql_milvus') {
       const lexicalRanker=config.lexicalRanking==='bm25f' ? config.ranker??new HybridRankingEngine({baseUrl:config.modelServiceBaseUrl??'http://127.0.0.1:8012',documentProjection}) : undefined
-      const database = new TicketDatabase(config.mysqlUrl ?? process.env.RETRIEVAL_AGENT_MYSQL_URL)
-      const model = new ModelServiceClient({ baseUrl: config.modelServiceBaseUrl ?? 'http://127.0.0.1:8012',
-        embeddingModel: config.embeddingModel ?? 'Qwen/Qwen3-Embedding-0.6B', embeddingDimensions: config.embeddingDimensions ?? 1024,
-        ...(config.embeddingRevision ? { embeddingRevision: config.embeddingRevision } : {}), defaultDeadlineMs: config.modelDeadlineMs ?? 120_000 })
-      this.provider = new DatabaseTicketProvider(database, new MilvusClient(config.milvusUrl ?? process.env.RETRIEVAL_AGENT_MILVUS_URL, process.env.RETRIEVAL_AGENT_MILVUS_TOKEN), model, config.datasetId, config.denseTopK, {documentProjection,...(lexicalRanker ? {lexicalRanker} : {})})
-      this.preparation = database.migrate().then(() => database.publication(config.datasetId ?? 'esft-development')).then(() => undefined, error => { this.preparationError = error })
-      ctx.effect(() => () => database.close())
+      const resources = getDatabaseResources({ ...(config.mysqlUrl ? { mysqlUrl: config.mysqlUrl } : {}), ...(config.milvusUrl ? { milvusUrl: config.milvusUrl } : {}), ...(config.modelServiceBaseUrl ? { modelBaseUrl: config.modelServiceBaseUrl } : {}),
+        ...(config.embeddingModel ? { embeddingModel: config.embeddingModel } : {}), ...(config.embeddingRevision ? { embeddingRevision: config.embeddingRevision } : {}), ...(config.embeddingDimensions ? { embeddingDimensions: config.embeddingDimensions } : {}), ...(config.modelDeadlineMs ? { modelDeadlineMs: config.modelDeadlineMs } : {}) })
+      const { db: database, milvus, model } = resources
+      this.database = database
+      this.datasetFactory = id => { let provider = this.datasets.get(id); if (!provider) { provider = new DatabaseTicketProvider(database, milvus, model, id, config.denseTopK, { documentProjection, ...(lexicalRanker ? { lexicalRanker } : {}) }); this.datasets.set(id, provider) } return provider }
+      this.provider = this.datasetFactory(config.datasetId ?? 'esft-development')
+      this.preparation = resources.ready.then(() => undefined, error => { this.preparationError = error })
       return
     }
     const records = [config.dataPath, ...(config.additionalDataPaths ?? [])]
@@ -158,52 +161,43 @@ export class LocalTicketProviderService extends TicketRetrievalProviderService {
     }
   }
 
+  private async forSnapshot(id: TicketSnapshotId): Promise<TicketRetrievalProvider> {
+    if (!this.database) return this.provider
+    let provider = this.snapshots.get(id)
+    if (!provider) {
+      const row = (await this.database.rows<{ dataset_id: string }>('SELECT dataset_id FROM ra_provider_snapshot WHERE id=?', [id]))[0]
+      if (!row) throw new RetrievalError('SNAPSHOT_NOT_FOUND', '数据库快照不存在。')
+      provider = this.datasetFactory!(row.dataset_id); this.snapshots.set(id, provider)
+    }
+    return provider
+  }
   get providerId(): string { return this.provider.providerId }
   resolve(request: TicketRetrievalRequest): TicketRetrievalSpec { return this.provider.resolve(request) }
   async openSnapshot(principal: TrustedPrincipalContext, options?: ProviderCallOptions): Promise<TicketSnapshot> {
     await this.ensurePrepared()
-    return await this.provider.openSnapshot(principal, options)
+    const provider = options?.datasetId && this.datasetFactory ? this.datasetFactory(options.datasetId) : this.provider
+    const snapshot = await provider.openSnapshot(principal, options)
+    this.snapshots.set(snapshot.snapshotId, provider)
+    return snapshot
   }
   async search(principal: TrustedPrincipalContext, snapshotId: TicketSnapshotId, spec: TicketRetrievalSpec, options: TicketSearchOptions): Promise<TicketSearchPage> {
-    await this.ensurePrepared()
-    return await this.provider.search(principal, snapshotId, spec, options)
+    await this.ensurePrepared(); return (await this.forSnapshot(snapshotId)).search(principal, snapshotId, spec, options)
   }
   override restoreSnapshot: NonNullable<TicketRetrievalProvider['restoreSnapshot']> = async (principal, snapshot, options) => {
-    options?.signal?.throwIfAborted()
-    await this.ensurePrepared()
-    options?.signal?.throwIfAborted()
-    await this.provider.restoreSnapshot?.(principal, snapshot, options)
+    await this.ensurePrepared(); await (await this.forSnapshot(snapshot.snapshotId)).restoreSnapshot?.(principal, snapshot, options)
   }
-  readEvidence(principal: TrustedPrincipalContext, request: EvidenceReadRequest, options?: ProviderCallOptions): Promise<TicketEvidenceResult> { return this.provider.readEvidence(principal, request, options) }
-  readDetails(principal: TrustedPrincipalContext, request: DetailReadRequest, options?: ProviderCallOptions): Promise<TicketDetailResult> { return this.provider.readDetails(principal, request, options) }
-  override readFeatures: NonNullable<import('@retrieval-agent/contracts').TicketRetrievalProvider['readFeatures']> = (...args) => this.provider.readFeatures?.(...args) ?? Promise.resolve([])
-  override featureAnchors:NonNullable<TicketRetrievalProvider['featureAnchors']>=(...args)=>{
-    if(!this.provider.featureAnchors) throw new Error('Provider does not support pinned query anchors')
-    return this.provider.featureAnchors(...args)
-  }
-  override featureBlock: NonNullable<TicketRetrievalProvider['featureBlock']> = (...args) => {
-    if (!this.provider.featureBlock) throw new Error('Provider does not support numeric blocks')
-    return this.provider.featureBlock(...args)
-  }
-  override resolveFeatureIds: NonNullable<TicketRetrievalProvider['resolveFeatureIds']> = (...args) => {
-    if (!this.provider.resolveFeatureIds) throw new Error('Provider does not support numeric IDs')
-    return this.provider.resolveFeatureIds(...args)
-  }
-  override scanFeatures: NonNullable<import('@retrieval-agent/contracts').TicketRetrievalProvider['scanFeatures']> = (...args) => {
-    if (!this.provider.scanFeatures) throw new Error('Provider does not support corpus features')
-    return this.provider.scanFeatures(...args)
-  }
-  override readCandidates: NonNullable<import('@retrieval-agent/contracts').TicketRetrievalProvider['readCandidates']> = (...args) => {
-    if (!this.provider.readCandidates) throw new Error('Provider does not support corpus candidates')
-    return this.provider.readCandidates(...args)
-  }
+  async readEvidence(principal: TrustedPrincipalContext, request: EvidenceReadRequest, options?: ProviderCallOptions): Promise<TicketEvidenceResult> { return (await this.forSnapshot(request.snapshotId)).readEvidence(principal, request, options) }
+  async readDetails(principal: TrustedPrincipalContext, request: DetailReadRequest, options?: ProviderCallOptions): Promise<TicketDetailResult> { return (await this.forSnapshot(request.snapshotId)).readDetails(principal, request, options) }
+  override readFeatures: NonNullable<TicketRetrievalProvider['readFeatures']> = async (principal, request, options) => { const provider = await this.forSnapshot(request.snapshotId); return provider.readFeatures!(principal, request, options) }
+  override featureAnchors: NonNullable<TicketRetrievalProvider['featureAnchors']> = async (principal, request, options) => { const provider = await this.forSnapshot(request.snapshotId); return provider.featureAnchors!(principal, request, options) }
+  override featureBlock: NonNullable<TicketRetrievalProvider['featureBlock']> = async (principal, request, options) => { const provider = await this.forSnapshot(request.snapshotId); return provider.featureBlock!(principal, request, options) }
+  override resolveFeatureIds: NonNullable<TicketRetrievalProvider['resolveFeatureIds']> = async (principal, request, options) => { const provider = await this.forSnapshot(request.snapshotId); return provider.resolveFeatureIds!(principal, request, options) }
+  override scanFeatures: NonNullable<TicketRetrievalProvider['scanFeatures']> = async (principal, request, options) => { const provider = await this.forSnapshot(request.snapshotId); return provider.scanFeatures!(principal, request, options) }
+  override readCandidates: NonNullable<TicketRetrievalProvider['readCandidates']> = async (principal, request, options) => { const provider = await this.forSnapshot(request.snapshotId); return provider.readCandidates!(principal, request, options) }
   async status(principal: TrustedPrincipalContext, snapshotId?: TicketSnapshotId): Promise<TicketProviderStatus> {
     await this.preparation
-    if (this.preparationError !== undefined) {
-      return { providerId: this.providerId, ready: false, readOnly: true, warnings: ['retrieval_index_unavailable'] }
-    }
-    return await this.provider.status(principal, snapshotId)
+    if (this.preparationError !== undefined) return { providerId: this.providerId, ready: false, readOnly: true, warnings: ['retrieval_index_unavailable'] }
+    return (snapshotId ? await this.forSnapshot(snapshotId) : this.provider).status(principal, snapshotId)
   }
 }
-
 export default LocalTicketProviderService

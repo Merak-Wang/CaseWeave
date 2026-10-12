@@ -52,8 +52,8 @@ export async function executeTaskJob(application: DurableRetrievalAgentService, 
       const execution = queryCommand?.kind === 'query' ? queryCommand.execution : undefined
       const state = current ? application.operators && current.phase !== 'snapshot_opened' && current.termination !== 'backend_error'
         ? (await application.ensureModelAccess(agent, signal))! : await application.refresh(agent, signal)
-        : await application.start(agent, application.operators ? buildSemanticTicketRequest(query!.original_query, execution)
-          : await buildFastTicketRequest(query!.original_query, { analyzer, signal }), signal)
+        : await application.start(agent, { ...(application.operators ? buildSemanticTicketRequest(query!.original_query, execution)
+          : await buildFastTicketRequest(query!.original_query, { analyzer, signal })), ...(queryCommand?.kind === 'query' && queryCommand.datasetId ? { datasetId: queryCommand.datasetId } : {}) }, signal)
       if (state.termination === 'backend_error') throw new RetrievalError('PROVIDER_UNAVAILABLE', state.stopExplanation ?? '检索来源暂时不可用。', { retryable: true })
       if (application.operators) await runOperators()
       return

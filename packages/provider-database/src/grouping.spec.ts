@@ -80,7 +80,7 @@ it('pins the actual legacy query instruction and refuses the old mutable-default
   const textHash = sha256('synthetic original query')
   fake.cache.set(`${sha256(stableJson(old))}:${textHash}`, [-1, 0])
   const provider = fake.create(), snapshot = await provider.openSnapshot(user)
-  expect(snapshot.retrievalProfileVersion).toContain('v4-pinned-query')
+  expect(snapshot.retrievalProfileVersion).toBe('mysql-milvus-set-vector-v5-cosine-gte-threshold')
   await provider.featureBlock(user, { snapshotId: snapshot.snapshotId, ids: [0], limit: 1, rankingQuery: 'synthetic original query' })
   expect(fake.embed).toHaveBeenCalledTimes(1)
   expect(fake.embed.mock.calls[0]![0]).toMatchObject({ inputType: 'query', instruction: EMBEDDING_INSTRUCTION, requireCompleteInput: true })

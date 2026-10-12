@@ -204,6 +204,7 @@ export type TicketQueryDelta = TicketQueryChange | {
 
 /** Initial consumer request before provider defaults are applied. */
 export interface TicketRetrievalRequest {
+  readonly datasetId?: string
   readonly target: TicketTaskTarget
   /** Exact direct-user text retained for provenance. */
   readonly query: string
@@ -248,6 +249,7 @@ export interface TicketRetrievalSpec {
 
 /** Provider-issued authorization and data snapshot. */
 export interface TicketSnapshot {
+  readonly datasetId?: string
   readonly snapshotId: TicketSnapshotId
   readonly shortId: string
   readonly providerId: string

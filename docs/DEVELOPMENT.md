@@ -14,7 +14,7 @@ GPU部署需要NVIDIA容器支持；CPU设备、精度或模型变化须相应�
 
 需要签名或特殊封套的内部网关可设置 `RETRIEVAL_AGENT_MODEL_TRANSPORT_MODULE` 为可信本地模块的绝对路径。模块默认导出 `{ provider, createFetch(baseURL, options), labelProbabilities? }`：仅为指定供应商返回自定义 Fetch，复用 DSH 的模型目录、凭据、工具解析和用量处理。`options.apiKey` 来自现有服务端凭据存储；私有驱动负责按网关协议读取凭据、封装请求及返回 OpenAI-compatible 响应流。非流式网关可桥接响应，须保留实际响应 model 和 usage，不能把桥接当成上游原生 SSE。试用容器可将驱动放在持久化 `/app/.cache` 中；驱动、内网地址、凭据和网关协议材料不进入源码提交。
 
-只有返回真实标签 token 概率的供应商才能支持概率判别；驱动可声明 `labelProbabilities: false`，工作台会提示采用简洁是／否判断。模型自报 confidence 与真实 token 概率是不同的输出。
+工单判断统一使用结构化是／否与教师自报置信度；生产流程不请求标签 token 概率或进行概率校准。
 
 ## Python 算子服务
 
@@ -369,3 +369,11 @@ Remove-Item Env:RETRIEVAL_AGENT_REPLAY_SCALE
 工程检查通过只证明对应代码、协议或受控场景；业务质量需使用真实任务、独立期望和明确的数据范围评估。
 
 核心产品行为与评测场景见 [评测策略](EVALUATION_STRATEGY.md)，组件职责见 [架构说明](ARCHITECTURE.md)。
+
+### 浏览器连接 Mongo 并准备检索数据
+
+访问 `/retrieval/datasets`，填写 Mongo 连接、数据库、集合、时间范围及来源字段，先预览匹配数和字段，再开始导入。页面默认近一个月，工单身份字段默认 `_id`，标题与摘要默认 `large_model_title`、`large_model_abstract`。Mongo 只读；连接串只在当前导入进程中使用，不写入数据目录或浏览器存储。
+
+导入依次清理空标题摘要和重复身份、写入 MySQL、生成标题摘要向量并发布 Milvus 索引。标题摘要按生成字段保存，不伪造原文或对话；当前流程不执行额外个人信息脱敏规则，使用者应选择已有合规字段。索引完成后数据集才出现在首页可选目录；新建数据集不会修改默认选择。
+
+首页选择数据集后提交新查询，该任务固定使用此数据集快照。已有任务不会随首页切换漂移；补充条件也不更换数据集。应用重启中断的导入显示失败，重新连接并导入即可，已经就绪的数据集保持可用。

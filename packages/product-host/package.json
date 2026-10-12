@@ -27,7 +27,8 @@
     "@retrieval-agent/product-api": "workspace:*",
     "@retrieval-agent/query-understanding": "workspace:*",
     "@retrieval-agent/dsh-compat": "workspace:*",
-    "@deepseek-ai/dsh-agent-preset-registry": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-agent-preset-registry": "0.2.0-rc.2",
+    "@retrieval-agent/provider-database": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4",

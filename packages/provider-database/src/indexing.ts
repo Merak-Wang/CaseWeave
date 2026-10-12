@@ -6,7 +6,7 @@ import { MilvusClient } from './milvus.js'
 
 /** Immutable collections + SQL publication fence. Checkpoint only after Milvus acknowledges an idempotent upsert. */
 export async function buildIndex(db: TicketDatabase, milvus: MilvusClient, model: RetrievalModelGateway, generation: string,
-  identity: EmbeddingIdentity, options: { signal?: AbortSignal; onProgress?: (completed: number, total: number) => void; batchSize?: number } = {}): Promise<string> {
+  identity: EmbeddingIdentity, options: { signal?: AbortSignal; onProgress?: (completed: number, total: number) => void | Promise<void>; batchSize?: number } = {}): Promise<string> {
   if(identity.documentProjection==='canonical-title-abstract-v1' && (identity.chunkVersion!=='canonical-title-abstract-codepoints-v1' || !identity.queryInstruction?.trim() || identity.pooling!=='last_token')) throw new TypeError('Canonical publication requires versioned chunks, pinned query instruction and pooling')
   const source = await db.generation(generation)
   async function* chunkPages() {
@@ -60,7 +60,7 @@ export async function buildIndex(db: TicketDatabase, milvus: MilvusClient, model
         await connection.query('UPDATE ra_index SET completed_chunks=?,status=? WHERE id=?', [count, 'building', id])
         await connection.commit()
       } catch (error) { await connection.rollback(); throw error }
-      options.onProgress?.(count, totalChunks)
+      await options.onProgress?.(count, totalChunks)
     }
     }
     const actual = await milvus.count(collection)

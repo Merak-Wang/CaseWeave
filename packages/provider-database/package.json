@@ -24,7 +24,8 @@
     "@retrieval-agent/contracts": "workspace:*",
     "@retrieval-agent/provider-local": "workspace:*",
     "@retrieval-agent/model-service-client": "workspace:*",
-    "mysql2": "3.14.5"
+    "mysql2": "3.14.5",
+    "mongodb": "6.20.0"
   },
   "publishConfig": {
     "access": "public"
