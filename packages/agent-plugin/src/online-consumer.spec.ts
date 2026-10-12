@@ -65,6 +65,7 @@ class TraceBridge extends PythonOperatorBridge {
   readonly updates: Record<string, unknown>[] = []
   readonly begins: Record<string, unknown>[] = []
   readonly finishes: Record<string, unknown>[] = []
+  readonly rankedScanIds: number[] = []
   featureSeedRows = 0
   featureScanRows = 0
   sourceRows = 0
@@ -75,8 +76,10 @@ class TraceBridge extends PythonOperatorBridge {
       this.callbacks.push(input.op + ':' + method)
       const reply = await callback(method, payload)
       if (input.op === 'sem_filter' && ['features.seeds', 'features.scan', 'features.take'].includes(method)) {
-        const block = reply as { ids: number[]; row_groups: NumericFeatureRowGroup[] }
+        const block = reply as { ids: number[]; row_groups: NumericFeatureRowGroup[]; texts: string[] }
         expect(block.row_groups).toHaveLength(block.ids.length)
+        expect(block.texts).toHaveLength(block.ids.length)
+        expect(block.texts.every(text => typeof text === 'string' && text.length > 0)).toBe(true)
         block.row_groups.forEach((group, i) => {
           const id = block.ids[i]!
           expect(id).toBeGreaterThanOrEqual(0); expect(id).toBeLessThan(poolCount)
@@ -87,7 +90,10 @@ class TraceBridge extends PythonOperatorBridge {
           this.groups.set(id, group)
         })
         if (method === 'features.seeds') this.featureSeedRows += block.ids.length
-        if (method === 'features.scan') this.featureScanRows += block.ids.length
+        if (method === 'features.scan') {
+          this.featureScanRows += block.ids.length
+          if ((payload as { ranked?: boolean }).ranked) this.rankedScanIds.push(...block.ids)
+        }
       }
       if (input.op === 'sem_filter' && method === 'rows.read') {
         const request = payload as { ids: number[] }, records = reply as { rows: Row[] }
@@ -120,12 +126,12 @@ class TraceBridge extends PythonOperatorBridge {
 }
 async function fixture(execution: SemanticExecutionOptions, flipFinalTeacher = false, complementary = false) {
   const ctx = new Context(), root = process.cwd(), calls = { intent: 0, teacher: 0, main: 0, rank: 0 }
-  const bridge = new TraceBridge(root, resolve(tmpdir(), 'caseweave-online-' + randomUUID() + '.sqlite'), resolve(root, '.venv/Scripts/python.exe'))
+  const bridge = new TraceBridge(root, resolve(tmpdir(), 'caseweave-online-' + randomUUID() + '.sqlite'), resolve(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python'))
   const teacherLabels = new Map<number, number>(), vectors = complementary ? complementaryVectors(poolCount + outsideCount) : undefined
   let dispose: (() => Promise<void>) | undefined
   try {
     await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime); await ctx.plugin(ToolRuntime)
-    await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)
+    await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter); await ctx.plugin(SessionProjection)
     const ranker: RetrievalRanker = {
       profileVersion: 'online-synthetic-v1', documentProjection: 'canonical-title-abstract-v1',
       capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
@@ -169,10 +175,10 @@ async function fixture(execution: SemanticExecutionOptions, flipFinalTeacher = f
       override async resolveModel(provider: string, id: string) { return { provider, id, name: id, reasoning: { efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }] } } }
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
         let payload: unknown
-        if (options.system?.includes('当前操作：query_plan')) {
+        if (options.messages.some(message => message.source && 'sections' in message.source && message.source.sections?.some(section => section.name === 'query_plan'))) {
           calls.intent++
           payload = { keywords: [], instruction: query, retrieval_expressions: [], structured_conditions: [] }
-        } else if (options.sessionId?.startsWith('operator-') && options.system?.includes('当前操作：sem_filter')) {
+        } else if (options.sessionId?.startsWith('operator-') && options.messages.some(message => message.source && 'sections' in message.source && message.source.sections?.some(section => section.name === 'sem_filter'))) {
           calls.teacher++
           const content = options.messages.flatMap(message => message.content.flatMap(block => block.type === 'text' ? [block.text] : [])).join('')
           const input = JSON.parse(content) as { records: Row[]; require_source: boolean; required_fields: string[] }
@@ -196,22 +202,22 @@ async function fixture(execution: SemanticExecutionOptions, flipFinalTeacher = f
       }
     }
     ctx.llm.registerAdapter(['online-fixture'], new SyntheticTransport())
-    await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+    await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
     const handle = await ctx.agents.create({ sessionId: SessionId(randomUUID()), agentOptions: { provider: 'online-fixture', model: 'scripted' } })
     dispose = handle.dispose
     await app.start(handle.agent, buildSemanticTicketRequest(query, execution))
-    expect(calls).toMatchObject({ intent: 1, teacher: 0, main: 0, rank: 0 })
+    expect(calls, JSON.stringify(app.current(handle.agent))).toMatchObject({ intent: 1, teacher: 0, main: 0, rank: 0 })
     return { app, operators, agent: handle.agent, bridge, calls, teacherLabels, async close() { bridge.close(); await dispose?.(); await ctx.fiber.dispose() } }
   } catch (error) { bridge.close(); await dispose?.(); await ctx.fiber.dispose(); throw error }
 }
 
-it('routes the explicit six-model selective bank through real Python fits, keeps the single baseline, and refits all fixed128 teacher labels', async () => {
+it('routes the complete selective model bank through real Python fits, keeps the single baseline, and refits all fixed128 teacher labels', async () => {
   const run = await fixture({ onlineLearning: true, semanticMethod: 'auto', orchestration: 'fixed', onlineFusion: 'selective', onlineModels: ONLINE_MODEL_NAMES }, false)
   try {
     await run.operators.searchAndFilter(run.agent)
     const state = run.app.current(run.agent), learning = state.budget.operatorUsage!.learning as Record<string, unknown>
     expect(run.bridge.operations.map(op => op.op)).toEqual(['query_plan', 'sem_filter'])
-    expect(run.bridge.operations[1]!.params).toMatchObject({ algorithm: 'auto', scope_mode: 'full', online_feedback_training: true,
+    expect(run.bridge.operations[1]!.params).toMatchObject({ algorithm: 'auto', scope_mode: 'full', require_source: false, required_fields: [],
       options: { methods: ONLINE_MODEL_NAMES, fusion: 'selective' } })
     expect(learning).toMatchObject({ algorithm: 'learned', regime: 'online_teacher_feedback', online_feedback_training: true,
       candidate_models: ONLINE_MODEL_NAMES, fusion: 'selective', quality_basis: 'training_group_crossfit',
@@ -228,7 +234,8 @@ it('routes the explicit six-model selective bank through real Python fits, keeps
     expect(learning.teacher_unique_records).toBe(128)
     expect(learning.exploration_records).toBe(0)
     expect(new Set(learning.training_ids as number[]).size).toBe(128)
-    expect(run.bridge.groups.size).toBe(poolCount); expect(run.bridge.featureSeedRows).toBeGreaterThan(0)
+    expect(run.bridge.groups.size).toBe(poolCount); expect(run.bridge.featureSeedRows).toBe(0)
+    expect([...run.teacherLabels.keys()].sort((a,b)=>a-b)).toEqual(run.bridge.rankedScanIds.slice(0,128).sort((a,b)=>a-b))
     expect(run.bridge.sourceRows).toBe(128); expect(run.bridge.featureScanRows).toBe(poolCount * 2)
     expect(run.bridge.predictions.size).toBe(poolCount)
     const learned = learnedResult(state)!
@@ -267,7 +274,7 @@ it('actually fits LR/prototype members and retains the OOF best binary model whe
   try {
     await run.operators.searchAndFilter(run.agent)
     const state = run.app.current(run.agent), learning = state.budget.operatorUsage!.learning as Record<string, unknown>
-    expect(run.bridge.operations[1]!.params).toMatchObject({ scope_mode: 'full', online_feedback_training: true, options: { methods, fusion: 'selective' } })
+    expect(run.bridge.operations[1]!.params).toMatchObject({ scope_mode: 'full', require_source: false, required_fields: [], options: { methods, fusion: 'selective' } })
     expect(learning).toMatchObject({ candidate_models: methods, selected_ensemble: false, selected_members: ['dense_lr'], selection_reason: 'no_oof_diversity_gain',
       complete_scope_coverage: true, scope_records: poolCount, predicted_records: poolCount, stop_reason: 'quality_fallback' })
     const baseline = learning.single_baseline as { name: string; precision: number; f1: number }

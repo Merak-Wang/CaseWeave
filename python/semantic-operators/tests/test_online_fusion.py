@@ -33,6 +33,41 @@ def test_nonfinite_operating_point_is_unknown_and_not_certified():
             models.operating_point([1, 0], [2., 1.], weights=weights)
 
 
+def test_imbalanced_teacher_threshold_avoids_high_f1_all_yes():
+    from caseweave_ops.ensemble import binary_report
+    y = np.r_[np.ones(98), np.zeros(30)].astype(int)
+    scores = np.r_[np.full(75, .9), np.full(23, .1), np.full(4, .9), np.full(26, .1)]
+    all_yes = binary_report(y, np.ones(128))
+    point = models.operating_point(y, scores)
+    assert all_yes['f1'] > point['f1']
+    assert all_yes['balanced_accuracy'] == .5
+    assert point['balanced_accuracy'] == pytest.approx((75/98 + 26/30)/2)
+    assert point['threshold'] == .9 and point['specificity'] == pytest.approx(26/30)
+    assert not point['feasible_on_selection']
+    assert binary_report([1, 1], [1, 1])['balanced_accuracy'] is None
+
+
+def test_same_bias_voters_cannot_replace_more_balanced_single(monkeypatch):
+    from caseweave_ops.models import Fitted
+    y = np.r_[np.ones(98), np.zeros(30)].astype(int)
+    x = np.arange(128)[:, None].astype(float)
+    class FakeScore:
+        def __init__(self, name): self.name = name
+        def decision_function(self, values):
+            ids = values[:, 0].astype(int)
+            if self.name != 'dense_lr':
+                return np.ones(len(ids))
+            return np.where((ids < 75) | ((ids >= 98) & (ids < 102)), .9, .1)
+    def fit(candidate, *args, **kwargs):
+        return Fitted(candidate.name, 'dense', FakeScore(candidate.name), None, .001)
+    monkeypatch.setattr(models, '_fit', fit)
+    selected, manifest = select_group_crossfit({'dense': x}, y, np.arange(128).astype(str),
+        methods=['dense_lr', 'feedback_margin', 'dense_svm'], fusion='selective')
+    assert selected.name == 'dense_lr' and not manifest['selected_ensemble']
+    assert manifest['threshold_metrics_oof']['balanced_accuracy'] > .8
+    assert manifest['selection_metric'] == 'balanced_accuracy'
+
+
 def test_group_closure_is_transitive_and_roles_do_not_depend_on_page_order():
     rows = [metadata(i) for i in range(6)]
     rows[1]["business_hash"] = rows[0]["business_hash"]
@@ -220,7 +255,8 @@ def test_explicit_six_method_names_remain_available_with_optional_sparse_view():
     from scipy.sparse import csr_matrix
     from caseweave_ops.ensemble import DEFAULT_METHODS
     y=np.arange(80)%2; x=np.eye(2)[y]
-    selected,manifest=select_group_crossfit({'dense':x,'sparse':csr_matrix(x)},y,np.arange(80).astype(str),
+    texts=np.array(['权限异常' if label else '普通业务' for label in y],dtype=object)
+    selected,manifest=select_group_crossfit({'dense':x,'sparse':csr_matrix(x),'text':texts},y,np.arange(80).astype(str),
         methods=list(DEFAULT_METHODS),fusion='single')
     assert {row['name'] for row in manifest['models']}==set(DEFAULT_METHODS)
     assert selected.name in DEFAULT_METHODS

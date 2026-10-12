@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { sessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog'
+import { sessionFormatCatalog, historicalSessionFormatCatalog, createSessionFormatCatalogWithChildren } from '@deepseek-ai/dsh-session-format-catalog'
 import type { SessionFormatArtifact, SessionFormatEvent, SessionFormatJsonObject } from '@deepseek-ai/dsh-session-format'
 import { createSessionFormatCatalog } from '@deepseek-ai/dsh-session-format'
 import { releasedV0SessionFormatCodec, releasedV1SessionFormatCodec, sessionFormatV0ToV1 } from '@deepseek-ai/dsh-session-format-v0-to-v1'
@@ -55,9 +55,18 @@ function validateRetrievalRow(row: Record<string, unknown>): void {
  * Known log-only extensions travel through the pure converter as unique feedback
  * records so upstream sequence/provenance remapping still sees every position.
  * Those transport records are never published or presented: restore the exact
- * extension payloads, then validate the entire native V3 artifact again.
+ * extension payloads, then validate the entire native current artifact again.
  */
-export function migrateRetrievalSession(rows: readonly unknown[]): SessionFormatArtifact {
+export function migrateRetrievalSession(rows: readonly unknown[], children: readonly SessionFormatJsonObject[]): SessionFormatArtifact {
+  return migrateWithCatalog(rows, createSessionFormatCatalogWithChildren(children))
+}
+
+/** 先转为历史 V3，供目录扫描读取子会话自身描述，不发布这个中间结果。 */
+export function restoreHistoricalRetrievalSession(rows: readonly unknown[]): SessionFormatArtifact {
+  return migrateWithCatalog(rows, historicalSessionFormatCatalog, true)
+}
+
+function migrateWithCatalog(rows: readonly unknown[], catalog: typeof sessionFormatCatalog, historical = false): SessionFormatArtifact {
   installDshSessionCompatibility()
   const header = record(rows[0])
   if (header.version !== 0) throw new Error('CaseWeave migration requires a released V0 Session')
@@ -74,7 +83,7 @@ export function migrateRetrievalSession(rows: readonly unknown[]): SessionFormat
     } else restore.decodeRow(row)
   }
   const v2 = prepareInitialStep(restore.finish())
-  const latest = sessionFormatCatalog.createRestore(releasedV2.encodeCurrentHeader(v2.header, v2.inheritedEventCount), { recovery: 'strict', validation: 'current' })
+  const latest = catalog.createRestore(releasedV2.encodeCurrentHeader(v2.header, v2.inheritedEventCount), { recovery: 'strict', validation: 'current' })
   for (const event of v2.events) latest.decodeRow(releasedV2.encodeCurrentEvent(event))
   const migrated = latest.finish()
   let recovered = 0
@@ -86,13 +95,14 @@ export function migrateRetrievalSession(rows: readonly unknown[]): SessionFormat
     return { ...original, seq: event.seq }
   })
   if (recovered !== extensions.size) throw new Error('Historical retrieval events were lost during migration')
+  if (historical) return { ...migrated, events }
   const current = sessionFormatCatalog.createRestore(sessionFormatCatalog.encodeCurrentHeader(migrated.header, migrated.inheritedEventCount),
     { recovery: 'strict', validation: 'current' })
   for (const event of events) current.decodeRow(sessionFormatCatalog.encodeCurrentEvent(event))
   return current.finish()
 }
 
-/** Produce canonical V3 JSONL, validated before any file is published. */
+/** Produce canonical current JSONL, validated before any file is published. */
 export function encodeMigratedSession(artifact: SessionFormatArtifact): string {
   const rows: SessionFormatJsonObject[] = [sessionFormatCatalog.encodeCurrentHeader(artifact.header, artifact.inheritedEventCount),
     ...artifact.events.map(event => sessionFormatCatalog.encodeCurrentEvent(event))]

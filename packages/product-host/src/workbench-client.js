@@ -480,8 +480,8 @@ function updateExecutionControls() {
   const modelCount = $('online-models').querySelectorAll('input:checked').length
   $('online-model-count').textContent = '候选模型（' + modelCount + ' 种）'
   $('online-fusion-note').textContent = $('online-fusion').value === 'single'
-    ? '根据训练组交叉拟合的教师一致率选择一个候选模型。'
-    : '比较候选模型与融合方案，根据训练组交叉拟合的教师一致率选择。'
+    ? '兼顾相关与不相关样本的识别，训练对照后选择最佳单模型。'
+    : '兼顾相关与不相关样本的识别，训练对照后择优投票。'
   $('semantic-method-note').textContent = '该方式不调用教师学习，直接输出模型判断为相关的工单，可下载 XLSX；质量未人工评测。'
 }
 $('online-learning').onchange = updateExecutionControls

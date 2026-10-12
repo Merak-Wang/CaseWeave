@@ -1055,6 +1055,22 @@ describe('RetrievalController', () => {
 })
 
 describe('trusted Provider snapshot restoration during presentation', () => {
+  it('recovers the bound projection for an old snapshot without changing the task or data identities', async () => {
+    const port = provider()
+    const status = port.status.bind(port)
+    port.status = async (...args) => ({ ...await status(...args), documentProjection: 'canonical-title-abstract-v1' })
+    const { controller, journal } = setup(port)
+    const initial = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '账号权限异常' })
+    expect(initial.snapshot?.documentProjection).toBeUndefined()
+    const restored = await controller.reauthorize(PRINCIPAL, initial)
+    expect(restored.snapshot).toEqual({ ...initial.snapshot, documentProjection: 'canonical-title-abstract-v1' })
+    expect(restored.retrievalId).toBe(initial.retrievalId)
+    expect(restored.inputGeneration).toBe(initial.inputGeneration)
+    expect(restored.query).toEqual(initial.query)
+    expect(restored.candidates).toEqual(initial.candidates)
+    expect(foldRetrievalEvents(journal.read(restored.retrievalId), restored.retrievalId)).toEqual(restored)
+    expect(await controller.reauthorize(PRINCIPAL, restored)).toBe(restored)
+  })
   it('restores a completed numeric collection after same-source snapshot reauthorization', async () => {
     const { controller } = setup(provider())
     const active = await controller.start(PRINCIPAL, { target: 'ranked_cases', query: '登录' })

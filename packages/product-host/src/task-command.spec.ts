@@ -13,7 +13,7 @@ it('admits explicit no-feedback execution only on the query command', () => {
   expect(() => parseTaskCommand({ operationId: 'bad-2', kind: 'resume', execution })).toThrow()
   expect(parseTaskCommand({ operationId: 'legacy-1', kind: 'query', text: '副卡' }).command)
     .toMatchObject({ kind: 'query', text: '副卡', execution: { onlineLearning: true, onlineFusion: 'selective',
-      onlineModels: ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic', 'dense_ridge', 'dense_rbf_svm', 'dense_extra_trees', 'dense_gaussian_nb', 'dense_knn'] } })
+      onlineModels: ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic', 'dense_ridge', 'dense_rbf_svm', 'dense_extra_trees', 'dense_gaussian_nb', 'dense_knn', 'text_lr', 'text_svm'] } })
 })
 
 

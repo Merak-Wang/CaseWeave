@@ -20,6 +20,7 @@ from .vector_cache import VECTOR_CACHE_FORMAT_VERSION, VectorCacheStore
 
 
 RAG_PROTOCOL_VERSION = "retrieval-agent.rag.v1"
+DEFAULT_DENSE_RECALL_THRESHOLD = 0.65
 RANKING_TOKENIZER_VERSION = "unicode-han-bigram-v1"
 BM25F_VERSION = f"bm25f-v2-full-corpus:{RANKING_TOKENIZER_VERSION}"
 DENSE_RANKING_VERSION = "exact-cosine-v1"
@@ -172,7 +173,7 @@ def _profile(value: Any) -> dict[str, Any]:
             allow_empty=False,
         ),
         "embeddingBatchSize": _integer(value.get("embeddingBatchSize", 16), "embedding batch size", 1),
-        "minimumDenseScore": _number(value.get("minimumDenseScore", 0.75), "minimum dense score"),
+        "minimumDenseScore": _number(value.get("minimumDenseScore", DEFAULT_DENSE_RECALL_THRESHOLD), "minimum dense score"),
         "denseTopK": _integer(value.get("denseTopK", 15), "dense top K", 1),
         "modelDeadlineMs": _integer(value.get("modelDeadlineMs", 120_000), "model deadline", 100),
         "rerankerEnabled": value.get("rerankerEnabled", False),

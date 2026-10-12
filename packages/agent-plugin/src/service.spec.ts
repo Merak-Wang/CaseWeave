@@ -691,7 +691,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       expect(decision.messages).toHaveLength(2)
       expect(decision.messages[0]).toEqual(direct)
       expect(decision.messages[1]?.source).toMatchObject({
-        kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot',
+        kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
       })
       expect(session.snapshotEvents().filter(event => event.type === 'retrieval/input-accepted')).toHaveLength(1)
     } finally {
@@ -750,7 +750,7 @@ describe('RetrievalAgentService Cordis binding', () => {
       expect(decision.messages).toHaveLength(2)
       expect(decision.messages[0]).toEqual(direct)
       expect(decision.messages[1]?.source).toMatchObject({
-        kind: 'retrieval-agent', plugin: 'retrieval-agent', form: 'snapshot',
+        kind: 'plugin', plugin: 'retrieval-agent', form: 'snapshot',
       })
       const persistedUser = session.snapshotEvents().filter(event => event.type === 'retrieval/input-accepted')
       expect(persistedUser.map(event => event.data)).toEqual([{ messageId: direct.id, text: '帮我找两条副卡解绑后流量共享的工单', turn: 1 }])

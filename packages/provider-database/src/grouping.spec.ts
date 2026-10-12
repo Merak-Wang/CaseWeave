@@ -35,6 +35,12 @@ function fakeDatabase(published: EmbeddingIdentity = identity) {
     })
     if (statement.startsWith('SELECT COUNT(*) n FROM ra_numeric_feature')) return [{ n: 2 }]
     if (statement.startsWith('SELECT ticket_id,JSON_OBJECT')) return groupingRows.filter(r => (params[1] as string[]).includes(r.ticket_id))
+    if (statement.startsWith('SELECT a.overview_json AS record')) {
+      expect(params[0]).toBe(source.id)
+      return groupingRows.filter(r => (params[1] as string[]).includes(r.ticket_id)).map(r => ({ record: {
+        ticketId: r.ticket_id, tenantId: user.tenantId, title: r.ticket_id, summary: '标准摘要',
+      } }))
+    }
     if (statement.startsWith('SELECT vector_json FROM ra_embedding_cache')) {
       const vector = cache.get(`${params[0]}:${params[1]}`); return vector ? [{ vector_json: vector }] : []
     }
@@ -67,6 +73,7 @@ it('executes the real DB featureBlock group consumer aligned to requested ordina
   const fake = fakeDatabase(), provider = fake.create(), snapshot = await provider.openSnapshot(user)
   const block = await provider.featureBlock(user, { snapshotId: snapshot.snapshotId, ids: [1, 0], limit: 2 })
   expect(block.ids).toEqual([1, 0])
+  expect(block.texts).toEqual(['physical-1\n标准摘要', 'physical-0\n标准摘要'])
   expect(block.row_groups).toEqual([ticketGroupHashes(groupingRows[1]!.group_source), ticketGroupHashes(groupingRows[0]!.group_source)])
   expect(block.row_groups![0]!.canonical_hash).toBe(block.row_groups![1]!.canonical_hash)
   expect(block.row_groups![0]!.business_hash).not.toBe(block.row_groups![1]!.business_hash)
@@ -80,7 +87,7 @@ it('pins the actual legacy query instruction and refuses the old mutable-default
   const textHash = sha256('synthetic original query')
   fake.cache.set(`${sha256(stableJson(old))}:${textHash}`, [-1, 0])
   const provider = fake.create(), snapshot = await provider.openSnapshot(user)
-  expect(snapshot.retrievalProfileVersion).toBe('mysql-milvus-set-vector-v5-cosine-gte-threshold')
+  expect(snapshot.retrievalProfileVersion).toBe('mysql-milvus-set-vector-v6-cosine-gte-065')
   await provider.featureBlock(user, { snapshotId: snapshot.snapshotId, ids: [0], limit: 1, rankingQuery: 'synthetic original query' })
   expect(fake.embed).toHaveBeenCalledTimes(1)
   expect(fake.embed.mock.calls[0]![0]).toMatchObject({ inputType: 'query', instruction: EMBEDDING_INSTRUCTION, requireCompleteInput: true })

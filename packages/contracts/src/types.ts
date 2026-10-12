@@ -136,7 +136,7 @@ export type TicketFastQueryPlan =
  * before Provider access so a retrieval can explain exactly which task,
  * language, domain, entities, constraints, and result-set policy it used.
  */
-export const ONLINE_MODEL_NAMES = ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic', 'dense_ridge', 'dense_rbf_svm', 'dense_extra_trees', 'dense_gaussian_nb', 'dense_knn'] as const
+export const ONLINE_MODEL_NAMES = ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic', 'dense_ridge', 'dense_rbf_svm', 'dense_extra_trees', 'dense_gaussian_nb', 'dense_knn', 'text_lr', 'text_svm'] as const
 export type OnlineModelName = typeof ONLINE_MODEL_NAMES[number]
 
 export interface SemanticExecutionOptions {
@@ -258,6 +258,7 @@ export interface TicketSnapshot {
   readonly sourceVersion: string
   readonly indexVersion: string
   readonly retrievalProfileVersion: string
+  readonly vectorRecallThreshold?: number
   readonly authorizationVersion: string
   readonly principalBindingHash: string
   readonly queryPolicyVersion: string
@@ -457,6 +458,7 @@ export interface TicketProviderStatus {
   readonly readOnly: true
   readonly sourceVersion?: string
   readonly indexVersion?: string
+  readonly documentProjection?: TicketSnapshot['documentProjection']
   readonly snapshotValid?: boolean
   readonly warnings: readonly string[]
 }

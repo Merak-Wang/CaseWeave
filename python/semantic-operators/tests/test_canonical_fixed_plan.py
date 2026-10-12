@@ -48,7 +48,7 @@ def test_original_generic_intent_one_real_runtime_model_invocation_and_cache(mak
     second = asyncio.run(plan_query(rt, query, serialized))
     assert rt.model.calls == 1 and len(requests) == 1
     assert first['manifest_id'] == second['manifest_id']
-    assert len(first['keywords']) == 16
+    assert len(first['keywords']) == 15 and '告警' not in first['keywords']
     assert first['steps'][0]['params'] == {'require_source': False, 'required_fields': []}
     assert 'unsupported_constraints' not in first
     schema = requests[0]['schema']
@@ -65,12 +65,32 @@ def test_fixed_parser_rejects_unknown_or_old_field_protocol(extra):
         parse_fixed_query(value, '设备故障', context())
 
 
-def test_parser_preserves_all_keywords_and_does_not_mutate_response():
+def test_parser_preserves_specific_keywords_and_does_not_mutate_response():
     value = interpretation()
     original = copy.deepcopy(value)
     plan = parse_fixed_query(value, '设备故障', context())
-    assert plan['keywords'] == original['keywords'] and len(plan['keywords']) == 16
+    assert plan['keywords'] == [term for term in original['keywords'] if term != '告警']
     assert value == original
+
+
+def test_compound_intent_removes_only_submitted_components_and_preserves_specific_product(make_runtime):
+    query = '帮我找宽带欠费停机和5G业务相关工单'
+    value = {'keywords': ['宽带', '欠费', '停机', '宽带欠费', '欠费停机', '5G'],
+             'instruction': '查找宽带欠费停机和5G业务相关工单。',
+             'retrieval_expressions': ['宽带欠费停机与5G业务'], 'structured_conditions': []}
+    def answer(payload, request):
+        assert payload['query'] == query
+        prompt = json.dumps(request['messages'], ensure_ascii=False)
+        assert '优先选择承载完整业务意图' in prompt
+        assert '去掉帮我找、相关工单' in prompt
+        return value
+    runtime = make_runtime(answer)
+    result = asyncio.run(plan_query(runtime, query, json.dumps(context(query), ensure_ascii=False)))
+    assert runtime.model.calls == 1
+    assert result['keywords'] == ['宽带欠费', '欠费停机', '5G']
+    assert result['instruction'] == value['instruction']
+    assert result['retrieval_expressions'] == value['retrieval_expressions']
+    assert value['keywords'] == ['宽带', '欠费', '停机', '宽带欠费', '欠费停机', '5G']
 
 
 def test_explicit_missing_raw_evidence_keeps_quote_and_unknown_metadata():

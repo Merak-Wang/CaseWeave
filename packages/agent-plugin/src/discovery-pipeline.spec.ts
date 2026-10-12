@@ -16,6 +16,8 @@ function harness(search: (options: { onProgress: (value: TicketSearchProgress) =
     search: vi.fn(async (_principal: unknown, _snapshotId: string, spec: Record<string, unknown>, options: { onProgress: (value: TicketSearchProgress) => Promise<void> }) => {
       expect(spec.mode).toBe('hybrid')
       expect(spec.semanticHints).toEqual(['包年变包月'])
+      expect(spec.semanticQuery).toBe('宽带到期扣费')
+      expect(spec.keywordQuery).toEqual({ terms: ['宽带', '到期'], operator: 'or' })
       await options.onProgress({ page: partial, channels: [{ channel: 'keyword', status: 'running', count: 500 }], timings: {} })
       return search(options)
     }),

@@ -1,7 +1,6 @@
 import { createServer } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
 import SettingsForms from '@deepseek-ai/dsh-settings'
-import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { resolve, join } from 'node:path'
@@ -45,25 +44,31 @@ describe('workbench settings through native DSH provider configuration', () => {
     const directory = resolve('.cache/semantic-operators/settings-probes', randomUUID()), home = join(directory, 'home')
     await mkdir(home, { recursive: true })
     const patchPath = join(directory, 'cordis.patch.yml'), basePath = join(directory, 'base.yml')
-    await writeFile(join(directory, 'package.json'), JSON.stringify({ name: 'settings-fixture', version: '0.0.0',
-      exports: { './package.json': './package.json' }, dsh: { profile: { bundles: ['settings-fixture'] }, bundle: { patch: 'bundle.patch.yml' } } }))
+    const bundle = join(directory, 'node_modules/settings-fixture')
+    await mkdir(bundle, { recursive: true })
+    await writeFile(join(bundle, 'package.json'), JSON.stringify({ name: 'settings-fixture', version: '0.0.0', dsh: { bundle: { patch: 'bundle.patch.yml' } } }))
+    await writeFile(join(directory, 'package.json'), JSON.stringify({ name: 'settings-profile', version: '0.0.0',
+      exports: { './package.json': './package.json' }, dsh: { profile: { bundles: ['settings-fixture'] } } }))
     await writeFile(patchPath, '[]\n')
     const require = createRequire(import.meta.url), settingsRequire = createRequire(require.resolve('@deepseek-ai/dsh-settings'))
     const editorPath = settingsRequire.resolve('@deepseek-ai/dsh-config-editor')
-    const { mountRootInclude, readProfilePatches } = await import(pathToFileURL(createRequire(editorPath).resolve('@deepseek-ai/dsh-app-boot')).href)
+    const { mountRootInclude, readProfilePatches, loadProfileDirectory } = await import(pathToFileURL(createRequire(editorPath).resolve('@deepseek-ai/dsh-app-boot')).href)
     await writeFile(basePath, '[]\n')
-    await writeFile(join(directory, 'bundle.patch.yml'), JSON.stringify([
-      { id: 'agent-default-model', insert: true, name: pathToFileURL(require.resolve('@deepseek-ai/dsh-agent-default-model')).href, config: { provider: 'opencode-test', model: 'fixture' } },
-      { id: 'retrieval-llm-pi-ai', insert: true, name: pathToFileURL(resolve('packages/dsh-compat/lib/opencode-pi-ai.js')).href, config: { providers: { 'opencode-test': { baseURL, api: 'openai-completions', headers: { 'x-custom': 'kept' }, models: [{ id: 'fixture', contextWindow: 8192, maxTokens: 1024 }] } } } },
-    ]))
+    await writeFile(join(bundle, 'bundle.patch.yml'), JSON.stringify([{ insert: [
+      { id: 'agent-default-model', name: pathToFileURL(require.resolve('@deepseek-ai/dsh-agent-default-model')).href, config: { provider: 'opencode-test', model: 'fixture' } },
+      { id: 'retrieval-llm-pi-ai', name: pathToFileURL(resolve('packages/dsh-compat/lib/opencode-pi-ai.js')).href, config: { providers: { 'opencode-test': { baseURL, api: 'openai-completions', headers: { 'x-custom': 'kept' }, models: [{ id: 'fixture', contextWindow: 8192, maxTokens: 1024 }] } } } },
+    ] }]))
     try {
       ctx.baseUrl = pathToFileURL(resolve('packages/product-host')+'/').href
-      await ctx.plugin(Loader); await ctx.plugin(Credentials); await ctx.plugin(LlmRuntime)
+      await ctx.plugin((await import(pathToFileURL(createRequire(createRequire(editorPath).resolve('@deepseek-ai/dsh-app-boot')).resolve('@deepseek-ai/cordis-plugin-loader')).href)).default); await ctx.plugin(Credentials); await ctx.plugin(LlmRuntime)
       const profile = { dir: directory, home, patchPath, installAnchor: join(directory, 'package.json'), overlays: [] }
       ctx.reflect.provide('profileContext' as never, profile as never)
       await ctx.plugin((await import(pathToFileURL(editorPath).href)).default)
       await ctx.plugin(SettingsForms)
-      await mountRootInclude(ctx, basePath, readProfilePatches('dsh', profile), ctx.baseUrl)
+      const patches = readProfilePatches('dsh', profile)
+      expect(patches, JSON.stringify(loadProfileDirectory('dsh', directory, profile.installAnchor))).toHaveLength(1)
+      await mountRootInclude(ctx, basePath, patches)
+      await ctx.loader.resolve('include').fiber?.await()
       await ctx.loader.await()
       expect(ctx.agentDefaultModel, JSON.stringify([...ctx.loader.entries()].map(e => ({ id: e.options.id, state: e.fiber?.state })))).toBeDefined()
       for (const name of ['webServer', 'agents', 'agentPresets', 'workspaceRegistry']) ctx.reflect.provide(name as never, {} as never)
@@ -73,6 +78,7 @@ describe('workbench settings through native DSH provider configuration', () => {
       const after = await models.update({ action: 'save', provider: 'opencode-test', model: 'fixture', baseURL, api: 'openai-completions', apiKey: 'fixture-secret', revision: before.revision })
       if (!('selected' in after) || !after.selected) throw new Error('Saved model selection missing')
       expect(JSON.stringify(after)).not.toContain('fixture-secret')
+      expect(after).toMatchObject({ probe: { finish: 'stop', outputKind: 'text' } })
       expect(after).toMatchObject({ selected: { provider: 'opencode-test', model: 'fixture' }, configured: [{ hasCredential: true }] })
       const resumed = { ctx: ctx.extend(), session: { requestHeader: () => undefined, snapshotEvents: () => [{ type: 'user/message', data: { source: {
         kind: 'plugin', plugin: 'retrieval-agent-models', form: 'snapshot', sections: [{ name: 'model-selection', text: JSON.stringify({ provider: 'opencode-test', model: 'removed-model' }) }],
@@ -92,7 +98,10 @@ describe('workbench settings through native DSH provider configuration', () => {
       const request = { ...after.selected, sessionId: SessionId('model-settings-session'), messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text' as const, text: 'hello' }] })] }
       const chunks = []; for await (const chunk of ctx.llm.stream(request)) chunks.push(chunk)
       expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
-      expect(received).toEqual([{ authorization: 'Bearer fixture-secret', custom: 'kept', session: compatibility.openCodeSessionId('model-settings-session') }])
+      expect(received).toHaveLength(2)
+      expect(received[0]).toMatchObject({ authorization: 'Bearer fixture-secret', custom: 'kept', session: expect.stringMatching(/^[a-f0-9-]{36}$/) })
+      expect(received[0]?.session).not.toBe(compatibility.openCodeSessionId('model-settings-session'))
+      expect(received.slice(1)).toEqual([{ authorization: 'Bearer fixture-secret', custom: 'kept', session: compatibility.openCodeSessionId('model-settings-session') }])
       const ollama = await models.update({ action: 'save', provider: 'ollama', model: 'local', baseURL, api: 'openai-completions', contextWindow: 8192, maxTokens: 1024, revision: after.revision })
       if (!('selected' in ollama) || !ollama.selected) throw new Error('Ollama selection missing')
       const local = []; for await (const chunk of ctx.llm.stream({ ...request, ...ollama.selected })) local.push(chunk)

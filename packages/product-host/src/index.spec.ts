@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { recycleDirectory } from '../../bundle/src/recycle.js'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -151,7 +152,7 @@ async function isolatedPresetHarness(): Promise<{
   await ctx.agentPresets.register({ id: 'isolated-export', plugins: [{
     id: 'isolated-export-services', name: 'cordis:group', group: true,
     isolate: { retrievalAgent: true, ticketRetrievalProvider: true },
-    config: [{ id: 'fixture-services', name: fixturePath }],
+    config: [{ id: 'fixture-services', name: pathToFileURL(fixturePath).href }],
   }] })
   const joined = createScope(ctx, { productHostTest: 'joined' })
   const unjoined = createScope(ctx, { productHostTest: 'unjoined' })
@@ -168,7 +169,8 @@ describe('DSH product Host adapter', () => {
   it('can invoke the report model from the declared Cordis product Host scope', async () => {
     const ctx = new Context()
     const invoked = vi.fn()
-    for (const name of ['webServer', 'agents', 'agentPresets', 'workspaceRegistry', 'settings', 'credentials', 'agentDefaultModel']) ctx.reflect.provide(name as never, {} as never)
+    for (const name of ['webServer', 'agents', 'workspaceRegistry', 'settings', 'credentials', 'agentDefaultModel']) ctx.reflect.provide(name as never, {} as never)
+    ctx.reflect.provide('agentPresets', { serviceFor: () => undefined } as never)
     await ctx.plugin({ name: 'report-model-provider', apply(provider: Context) {
       provider.reflect.provide('llm', { async *stream() {
         invoked()
@@ -190,7 +192,7 @@ describe('DSH product Host adapter', () => {
     } finally { await ctx.fiber.dispose() }
   })
 
-  it('refuses prediction downloads without a trusted durable task identity', async () => {
+  it('refuses prediction downloads and exports only confirmed tickets', async () => {
     const harness = await isolatedPresetHarness()
     try {
       const service = harness.ctx.agentPresets.serviceFor(harness.agent, 'retrievalAgent')!, current = service.currentOrUndefined(harness.agent)!
@@ -206,19 +208,19 @@ describe('DSH product Host adapter', () => {
       expect(defaults.status).toBe(400); expect(await defaults.json()).toMatchObject({ code: 'CANDIDATE_NOT_FOUND' })
       const response = await post({ ...identity, format: 'xlsx', collection: 'predictions' })
       const diagnostic = await response.clone().json()
-      expect(response.status, JSON.stringify(diagnostic)).toBe(503)
-      expect(diagnostic).toMatchObject({ code: 'PROVIDER_UNAVAILABLE' })
+      expect(response.status, JSON.stringify(diagnostic)).toBe(400)
+      expect(diagnostic).toMatchObject({ code: 'INVALID_REQUEST', message: '当前工作台只允许下载已确认工单，算法预测可在页面中查看。' })
       expect(diagnostic).not.toHaveProperty('contentBase64')
       expect(state.selectedCandidateRefs).toEqual([])
       const csv = await post({ ...identity, collection: 'predictions' })
-      expect(csv.status).toBe(503)
+      expect(csv.status).toBe(400)
       expect(await csv.json()).not.toHaveProperty('contentUtf8')
       expect((await post({ ...identity, format: 'xlsx', collection: 'predictions', resultRevision: 'obsolete' })).status).toBe(409)
-      expect((await post({ ...identity, format: 'xlsx', collection: 'predictions', candidateRefs: [state.candidates[1]!.ref] })).status).toBe(503)
+      expect((await post({ ...identity, format: 'xlsx', collection: 'predictions', candidateRefs: [state.candidates[1]!.ref] })).status).toBe(400)
     } finally {
       await harness.ctx.fiber.dispose()
       if (!resolve(harness.root).startsWith(resolve(tmpdir()) + sep)) throw new Error('Fixture cleanup escaped temporary directory')
-      await rm(harness.root, { recursive: true, force: true })
+      recycleDirectory(harness.root)
     }
   })
   it('serves confirmed-only downloads through the actual registered HTTP route', async () => {
@@ -276,7 +278,7 @@ describe('DSH product Host adapter', () => {
       expect(await raw.json()).toMatchObject({ code: 'FIELD_NOT_ALLOWED' })
     } finally {
       await harness.ctx.fiber.dispose()
-      await rm(harness.root, { recursive: true, force: true })
+      recycleDirectory(harness.root)
     }
   })
 
@@ -351,7 +353,7 @@ describe('DSH product Host adapter', () => {
         })
     } finally {
       await harness.ctx.fiber.dispose()
-      await rm(harness.root, { recursive: true, force: true })
+      recycleDirectory(harness.root)
     }
   })
 
@@ -381,7 +383,7 @@ describe('DSH product Host adapter', () => {
       expect(record).toHaveBeenCalledWith(harness.agent, response.receipt, expect.objectContaining({ details: response.details }))
     } finally {
       await harness.ctx.fiber.dispose()
-      await rm(harness.root, { recursive: true, force: true })
+      recycleDirectory(harness.root)
     }
   })
 
@@ -411,7 +413,7 @@ describe('DSH product Host adapter', () => {
       expect(record).not.toHaveBeenCalled()
     } finally {
       await harness.ctx.fiber.dispose()
-      await rm(harness.root, { recursive: true, force: true })
+      recycleDirectory(harness.root)
     }
   })
 
@@ -429,7 +431,7 @@ describe('DSH product Host adapter', () => {
       expect(() => parseReadRetrievalParams({ ...params, principal: { subjectId: 'forged' } })).toThrow(/未知字段/u)
     } finally {
       await harness.ctx.fiber.dispose()
-      await rm(harness.root, { recursive: true, force: true })
+      recycleDirectory(harness.root)
     }
   })
 
@@ -447,7 +449,7 @@ describe('DSH product Host adapter', () => {
       })
     } finally {
       await harness.ctx.fiber.dispose()
-      await rm(harness.root, { recursive: true, force: true })
+      recycleDirectory(harness.root)
     }
   })
 
@@ -465,7 +467,7 @@ describe('DSH product Host adapter', () => {
       })).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
     } finally {
       await harness.ctx.fiber.dispose()
-      await rm(harness.root, { recursive: true, force: true })
+      recycleDirectory(harness.root)
     }
   })
 })

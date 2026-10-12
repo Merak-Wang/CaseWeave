@@ -593,6 +593,7 @@ export class RetrievalController {
     signal?.throwIfAborted()
     try {
       if (state.snapshot === undefined) throw new RetrievalError('SNAPSHOT_INVALID', '没有可重新授权的历史快照。')
+      const snapshotId = state.snapshot.snapshotId
       let status = await this.#provider.status(principal, state.snapshot.snapshotId)
       // Process-local Providers lose their snapshot registry on restart. Rehydrate
       // only an invalid/missing registration, then keep every current access check.
@@ -606,11 +607,15 @@ export class RetrievalController {
         throw new RetrievalError('SNAPSHOT_INVALID', '历史快照或来源版本已失效，必须重新检索。')
       }
       if (!status.ready) throw new RetrievalError('PROVIDER_UNAVAILABLE', '当前工单来源不可用。')
+      // 老快照漏写投影时，只补回Provider核验的绑定索引元数据，不切换工单或索引版本。
+      if (state.snapshot.documentProjection === undefined && status.documentProjection !== undefined) {
+        state = this.#record(state, { snapshot: { ...state.snapshot, documentProjection: status.documentProjection } })
+      }
       if (state.candidates.length > 0) {
         const result = await this.#provider.readEvidence(principal, {
-          snapshotId: state.snapshot.snapshotId, candidateRefs: state.candidates.map(candidate => candidate.ref), fields: [], tokenBudget: 1,
+          snapshotId, candidateRefs: state.candidates.map(candidate => candidate.ref), fields: [], tokenBudget: 1,
         }, signal === undefined ? undefined : { signal })
-        if (result.snapshotId !== state.snapshot.snapshotId || result.requestedCandidateRefs.length !== state.candidates.length
+        if (result.snapshotId !== snapshotId || result.requestedCandidateRefs.length !== state.candidates.length
           || result.requestedCandidateRefs.some((ref, index) => ref !== state.candidates[index]?.ref)) {
           throw new RetrievalError('PROTOCOL_MISMATCH', '重新授权返回了不一致的快照或候选集合。')
         }

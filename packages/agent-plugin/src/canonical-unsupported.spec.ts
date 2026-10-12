@@ -29,7 +29,7 @@ describe('explicit unsupported canonical evidence constraint', () => {
     expect(stopIncomplete).toHaveBeenCalledTimes(1)
     expect(bridgeRun).not.toHaveBeenCalled()
     expect(result.phase).toBe('stopped')
-    expect(result.stopExplanation).toContain('不知道')
+    expect(result.stopExplanation).toContain('执行未完成：用户要求的原文证据未包含在当前投影中')
     expect(result.selectedCandidateRefs).toEqual([])
   })
 

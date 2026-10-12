@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { DEFAULT_DENSE_RECALL_THRESHOLD } from './types.js'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import {
@@ -83,7 +84,7 @@ function createProfile(options: HybridRankingOptions): RankingProfileParams {
     rerankerInstruction: options.rerankerInstruction ?? RERANKER_INSTRUCTION,
     embeddingBatchSize: options.embeddingBatchSize ?? 16,
     modelDeadlineMs: options.modelDeadlineMs ?? 120_000,
-    minimumDenseScore: options.minimumDenseScore ?? 0.75,
+    minimumDenseScore: options.minimumDenseScore ?? DEFAULT_DENSE_RECALL_THRESHOLD,
     denseTopK: options.denseTopK ?? 15,
     fusion: {
       rankConstant: options.fusion?.rankConstant ?? 60,

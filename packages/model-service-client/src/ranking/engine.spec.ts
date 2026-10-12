@@ -46,13 +46,13 @@ describe('HybridRankingEngine FastAPI adapter', () => {
     }, { maxScan: 10 })).resolves.toMatchObject({ hits: [{ documentId: 'allowed' }] })
   })
 
-  it('sends the Top-15 floor and .75 recall threshold to the ranking service', async () => {
+  it('sends the page size and .65 recall threshold to the ranking service', async () => {
     let observedDenseTopK: number | undefined
     let engine: HybridRankingEngine
     const fetch: typeof globalThis.fetch = async (_input, init) => {
       const request = JSON.parse(String(init?.body))
       observedDenseTopK = request.profile.denseTopK
-      expect(request.profile.minimumDenseScore).toBe(.75)
+      expect(request.profile.minimumDenseScore).toBe(.65)
       return new Response(JSON.stringify({
         protocolVersion: RAG_SERVICE_PROTOCOL_VERSION,
         requestId: request.requestId,

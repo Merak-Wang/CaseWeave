@@ -67,7 +67,7 @@ class ScriptedExperts extends LlmAdapter {
       if (this.broken) args = {}
       else if (this.quota && step <= 12) args = { action: 'inspect', candidate_aliases: ['c1'], fields: [] }
       else if (step === 1 && this.questionGate && knowledge.scope === '支持核查') args = {
-        action: 'report', judgments: [{ candidate_alias: 'c1', verdict: 'undetermined', evidence_aliases: ['c1'], reason: '办理范围需用户确认。' }],
+        action: 'report', judgments: [],
         semantic_gaps: [{ kind: 'ambiguity', status: 'open', evidence_aliases: ['c1'], description: '是否包括解绑后的共享流量？' }],
         question: '是否包括解绑后的共享流量？', next_action: '请主 Agent 提问；其他反例核查可继续。' }
       else if (step === 1) { await this.questionGate; args = { action: 'search', query: '副卡解绑', mode: 'dense', judgments: [], semantic_gaps: [] } }
@@ -373,7 +373,8 @@ describe('A3/A4/A6/A9 installed DSH expert execution', () => {
         for (const task of state.expertTasks!) expect(state.contextManifests?.some(m => m.roleId === task.id && m.measurement === 'dsh_request'
           && m.evidenceIds.includes(spans.at(-1)!.evidenceId))).toBe(true)
       } else expect(reads).toBe(questionGate || variant === 'quota' ? 1 : 2) // one shared expert read + main conflict re-read
-      expect(state.expertConflicts).toMatchObject([{ status: questionGate ? 'open' : 'resolved', kind: 'business_scope' }])
+      if (questionGate) expect(state.expertConflicts).toEqual([])
+      else expect(state.expertConflicts).toMatchObject([{ status: 'resolved', kind: 'business_scope' }])
       expect(state.contextManifests?.filter(m => m.roleId !== 'main').length).toBeGreaterThanOrEqual(questionGate ? 4 : 6)
       expect(new Set(state.contextManifests?.map(m => m.roleId)).size).toBe(3)
       if (questionGate) { expect(state.phase).toBe('awaiting_clarification'); expect(state.selectedCandidateRefs).toEqual([]) }

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from caseweave_ops import *
 from conftest import record, source, collect
+from caseweave_ops.filter import judge_batch
 
 def map_payload(p,r):
     return {"rows":[{"ref":x["ref"],"status":"ok","data":{"state":"受阻"},
@@ -46,8 +47,17 @@ def test_enriched_source_can_be_reprocessed(make_runtime):
     rt=make_runtime()
     row=record()
     more=replace(row,passages=row.passages+(Passage("later","source.raw_dialogue","后续更正",100),))
-    out=asyncio.run(collect(sem_filter(rt,source([row,more]),"x",batch_size=1, scope_mode="candidates")))
-    assert len(out)==2 and rt.model.calls==4
+    async def run():
+        first = await judge_batch(rt, [row], 'x')
+        enriched = await judge_batch(rt, [more], 'x')
+        reused = await judge_batch(rt, [more], 'x')
+        return first, enriched, reused
+    first, enriched, reused = asyncio.run(run())
+    # 新片段改变请求和缓存身份；同一丰富后的正文才复用结果。
+    assert rt.model.calls == 2
+    assert first[0].manifest_id != enriched[0].manifest_id == reused[0].manifest_id
+    assert [c.passage_id for c in enriched[0].citations] == [row.passages[0].id, 'later']
+    assert enriched[0].label == 'accept' and reused[0].basis == 'reused_model'
 
 
 def test_source_fields_parse_without_model_and_missing_fact_stays_unknown(make_runtime):

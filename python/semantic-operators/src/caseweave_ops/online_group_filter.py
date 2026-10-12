@@ -35,7 +35,7 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
         supplied.pop(obsolete, None)
     if set(supplied) - set(cfg):
         raise ValueError("Unknown online learning option")
-    # 默认与显式入口使用同一六模型库；仅投票配置决定是否融合。
+    # 默认候选使用可用文档特征；显式文本候选需要真实文本输入。
     cfg.update(supplied)
     cfg.update(sample_size=128, exploration_fraction=0.)
     cfg["pool_size"] = max(128, cfg["pool_size"])
@@ -150,7 +150,8 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
         return FeatureBlock(np.concatenate([p.ids for p in parts]), np.concatenate([p.dense for p in parts]),
             np.concatenate([p.available for p in parts]),
             vstack([p.sparse for p in parts], format="csr") if parts[0].sparse is not None else None,
-            row_groups=tuple(item for p in parts for item in p.row_groups))
+            row_groups=tuple(item for p in parts for item in p.row_groups),
+            texts=np.concatenate([p.texts for p in parts]) if parts[0].texts is not None else None)
     async def read(ids):
         await runtime.scope.check()
         response = await call("rows.read", {"ids": list(map(int, ids))})
@@ -257,10 +258,13 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
         y = np.asarray([labels[int(i)] for i in available_ids], dtype=np.int8)
         groups = np.asarray([groups_by_id[int(i)] for i in available_ids], dtype=object)
         views = {name: x[train.available] for name, x in train.views.items()}
+        methods = cfg["methods"]
+        if "methods" not in supplied and "text" not in views:
+            methods = [name for name in methods if not name.startswith("text_")]
         stats.update(training_sampled_records=len(train_ids), training_records=len(y),
             training_ids=available_ids.tolist())
         cohort = digest([groups.tolist(), y.tolist()])
-        feature_cohort = digest([stats["feature_id"],
+        feature_cohort = digest([stats["feature_id"], "text-tfidf-ba-v1", sorted(views),
             [(int(i), identities[int(i)]) for i in available_ids], groups.tolist(), y.tolist()])
         await update("training")
         def check():
@@ -277,7 +281,7 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
                     "models": [], "candidate_failures": [], "threshold_metrics_oof": point}
             else:
                 candidate, manifest = await asyncio.to_thread(select_group_crossfit, views, y, groups,
-                    methods=cfg["methods"], fusion=cfg["fusion"], seed=cfg["seed"],
+                    methods=methods, fusion=cfg["fusion"], seed=cfg["seed"],
                     precision_target=cfg["precision_target"], recall_target=cfg["recall_target"],
                     budget_seconds=cfg["fit_budget_seconds"], check=check)
             await runtime.scope.check()
@@ -301,7 +305,8 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
         point = selection_manifest["threshold_metrics_oof"]
         feasible = point["precision"] >= cfg["precision_target"] and point["recall"] >= cfg["recall_target"]
         quality = {"basis": "teacher_single_class" if len(set(y)) == 1 else "training_group_crossfit", "reference_basis": "teacher", "business_accuracy": "not_measured",
-            **{name: point[name] for name in ("precision", "recall", "f1", "coverage")},
+            **{name: point[name] for name in ("precision", "recall", "f1", "coverage", "specificity", "balanced_accuracy", "tp", "fp", "fn", "tn")},
+            "selection_metric": "balanced_accuracy",
             "selection_records": point["reference_records"], "threshold_metrics_oof": point}
         if len(set(y)) == 1:
             quality["training_fit_metrics"] = quality.pop("threshold_metrics_oof")
@@ -309,7 +314,7 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
             stats.update(quality_basis="teacher_single_class", training_fit_metrics=stats.pop("threshold_metrics_oof"))
         stats.update(quality=quality)
         await update("predicting", predicted_records=0)
-        model_id = digest([checkpoint_key, cohort, selection_manifest["members"], selection_manifest["member_thresholds"]])
+        model_id = digest([checkpoint_key, cohort, feature_cohort, selection_manifest["members"], selection_manifest["member_thresholds"]])
         await call("predictions.begin", {"model_id": model_id, "predicate_key": key, "feature_id": stats["feature_id"],
             "input_revision": runtime.scope.input_revision, "training_records": len(y), "fit_count": stats["fit_count"],
             "model": selected.name, "threshold": selected.threshold, "task_semantics": stats["task_semantics"],

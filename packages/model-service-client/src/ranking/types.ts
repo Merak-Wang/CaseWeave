@@ -1,3 +1,5 @@
+export const DEFAULT_DENSE_RECALL_THRESHOLD = 0.65
+
 export type RankingMode = 'keyword' | 'dense' | 'hybrid'
 export type RankingChannelKind = 'keyword' | 'vector' | 'reranker'
 

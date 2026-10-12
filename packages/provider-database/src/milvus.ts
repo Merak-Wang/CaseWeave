@@ -1,4 +1,5 @@
 import type { TicketChunk } from './projection.js'
+import { DEFAULT_DENSE_RECALL_THRESHOLD } from '@retrieval-agent/model-service-client/ranking'
 import type { EmbeddingIdentity } from './store.js'
 
 export interface MilvusHit { id: string; ticket_id: string; content_hash: string; source_version: string; field: string; part: number; start: number; end: number; text_hash: string; distance: number }
@@ -71,7 +72,7 @@ export class MilvusClient {
     async function* batches() { for (let i = 0; i < ticketIds.length; i += 1000) yield ticketIds.slice(i, i + 1000) }
     return this.searchBatches(name, vector, batches(), topK, signal)
   }
-  async searchBatches(name: string, vector: readonly number[], batches: AsyncIterable<readonly string[]>, topK: number, signal?: AbortSignal, threshold?: number): Promise<MilvusHit[]> {
+  async searchBatches(name: string, vector: readonly number[], batches: AsyncIterable<readonly string[]>, topK: number, signal?: AbortSignal, threshold: number = DEFAULT_DENSE_RECALL_THRESHOLD): Promise<MilvusHit[]> {
     signal?.throwIfAborted()
     let best: MilvusHit[] = [], pending: Promise<MilvusHit[]>[] = []
     const abort = new AbortController(), combined = AbortSignal.any([abort.signal, ...(signal ? [signal] : [])])

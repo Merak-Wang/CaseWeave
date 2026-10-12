@@ -96,10 +96,10 @@ async function fixture(method: Method, variant: Variant = 'normal') {
   const root = process.cwd()
   // Pin local stdio explicitly: ambient service/model environment cannot select a network endpoint.
   const bridge = new TraceBridge(root, resolve(tmpdir(), `caseweave-unlabeled-${randomUUID()}.sqlite`),
-    resolve(root, '.venv/Scripts/python.exe'))
+    resolve(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python'))
   try {
     await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(LlmRuntime); await ctx.plugin(ToolRuntime)
-    await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter)
+    await ctx.plugin(SystemPrompt); await ctx.plugin(TokenMeter); await ctx.plugin(SessionProjection)
     const ranker: RetrievalRanker = {
       profileVersion: 'unlabeled-synthetic-v1', documentProjection: 'canonical-title-abstract-v1',
       capabilities: { keyword: true, dense: true, fusion: true, reranker: false },
@@ -147,7 +147,7 @@ async function fixture(method: Method, variant: Variant = 'normal') {
     class PlanningOnlyAdapter extends LlmAdapter {
       override async resolveModel(provider: string, id: string) { return { provider, id, name: id, reasoning: { efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }] } } }
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-        if (!options.system?.includes('当前操作：query_plan')) {
+        if (!options.messages.some(message => message.source && 'sections' in message.source && message.source.sections?.some(section => section.name === 'query_plan'))) {
           if (options.sessionId?.startsWith('operator-')) calls.teacher++; else calls.main++
           throw new Error('Only the scripted intent call is allowed; teacher/main generation is forbidden')
         }
@@ -161,13 +161,13 @@ async function fixture(method: Method, variant: Variant = 'normal') {
       }
     }
     ctx.llm.registerAdapter(['unlabeled-fixture'], new PlanningOnlyAdapter())
-    await ctx.plugin(SessionProjection); await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+    await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
     const handle = await ctx.agents.create({ sessionId: SessionId(randomUUID()), agentOptions: { provider: 'unlabeled-fixture', model: 'scripted' } })
     dispose = handle.dispose
     const agent = handle.agent
     await app.start(agent, buildSemanticTicketRequest(query, { onlineLearning: false, semanticMethod: method,
       ...(variant === 'unavailable_source_fields' ? { orchestration: 'fixed' as const } : {}) }))
-    expect(calls).toMatchObject({ intent: 1, main: 0, teacher: 0, rank: 0, anchors: 0 })
+    expect(calls, JSON.stringify(app.current(handle.agent))).toMatchObject({ intent: 1, main: 0, teacher: 0, rank: 0, anchors: 0 })
     return { app, operators, agent, bridge, calls, anchorReached, async close() { bridge.close(); await dispose?.(); await ctx.fiber.dispose() } }
   } catch (error) { bridge.close(); await dispose?.(); await ctx.fiber.dispose(); throw error }
 }

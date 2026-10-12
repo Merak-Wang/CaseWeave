@@ -46,6 +46,8 @@ export class PythonOperatorBridge {
     const args = ['-m', 'caseweave_ops.server', '--stdio', '--state', this.statePath]
     const child = spawn(this.python ?? 'uv', this.python ? args : ['run', '--frozen', '--inexact', '--project', resolve(this.root, 'python/semantic-operators'), 'python', ...args],
       { cwd: this.root, windowsHide: true, stdio: 'pipe', env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8',
+        // 固定128样本的小模型拟合按进程单线程计算，避免并行算子各自占满BLAS线程池。
+        OPENBLAS_NUM_THREADS: '1', MKL_NUM_THREADS: '1', OMP_NUM_THREADS: '1',
         PYTHONPATH: resolve(this.root, 'python/semantic-operators/src') } })
     this.child = child
     child.stderr.on('data', () => { /* stdout owns the protocol; do not expose source-bearing diagnostics */ })

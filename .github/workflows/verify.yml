@@ -43,6 +43,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Build model runtime from source
+        run: docker build -f config/model-service/Dockerfile -t retrieval-agent-model-service:0.1.0-cu128 .
       - run: docker build -f config/app/Dockerfile -t retrieval-agent-app:ci .
       - run: docker run --rm retrieval-agent-app:ci node scripts/wiki-store.mjs verify
 # Database, real-model and browser acceptance are explicit opt-ins documented in

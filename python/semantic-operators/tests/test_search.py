@@ -36,14 +36,14 @@ def test_planning_routes_only_catalog_knowledge_in_the_same_call(make_runtime, r
 def test_routing_rejects_missing_invented_or_duplicate_choices(make_runtime, routes):
     context = json.dumps({"knowledge_catalog": [{"id": "broadband", "entries": [{"id": "expiry"}]}]})
     rt = make_runtime(lambda p, r: {**plan(), **({"knowledge_routes": routes} if routes is not None else {})})
-    # 缺失必填字段属于输出 schema 错误，由 Runtime 对同一请求做三次物理尝试；
+    # 规划只调用一次模型，缺失必填字段直接返回输出 schema 错误；
     # 编造或重复条目通过结构校验后仍由路由业务校验拒绝并反馈修复一次。
     expected = ModelRequestError if routes is None else ProtocolError
     with pytest.raises(expected) as failure:
         asyncio.run(plan_query(rt, "宽带到期扣费", context))
     if routes is None:
         assert failure.value.code == "OUTPUT_SCHEMA"
-        assert rt.model.calls == 3
+        assert rt.model.calls == 1
     else:
         assert rt.model.calls == 2
 

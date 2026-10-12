@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { displayFieldPart } from './workbench-content.js'
+import { TASK_WORKBENCH_HTML } from './workbench.js'
+import { ONLINE_MODEL_NAMES } from '@retrieval-agent/contracts'
+
+it('offers the complete online bank and keeps no-feedback choices available', () => {
+  const bank = TASK_WORKBENCH_HTML.split('id="online-models"')[1]!.split('</fieldset>')[0]!
+  const methods = [...bank.matchAll(/value="([^"]+)" checked/gu)].map(m => m[1])
+  expect(methods).toEqual([...ONLINE_MODEL_NAMES])
+  expect(methods).toHaveLength(13)
+  expect(TASK_WORKBENCH_HTML).toContain('标题摘要 TF-IDF 逻辑回归')
+  expect(TASK_WORKBENCH_HTML).toContain('标题摘要 TF-IDF 线性 SVM')
+  for (const method of ['dual_description_margin', 'name_gmm', 'kmeans']) {
+    expect(TASK_WORKBENCH_HTML).toContain(`value="${method}"`)
+  }
+})
 
 describe('source dialogue presentation', () => {
   it('decodes dialogue and maps real source offsets through escaped quotes and newlines', () => {

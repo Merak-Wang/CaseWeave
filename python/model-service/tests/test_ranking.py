@@ -383,7 +383,7 @@ def test_dense_threshold_union_does_not_truncate_keyword_or_vector_matches() -> 
     assert hybrid["execution"]["channels"][1]["resultCount"] == 25
 
 
-@pytest.mark.parametrize("qualifying, remaining_score, expected", [(260, .74, 260), (5, .74, 5), (0, .74, 0), (5, .75, 280)])
+@pytest.mark.parametrize("qualifying, remaining_score, expected", [(260, .6499, 260), (5, .6499, 5), (0, .6499, 0), (5, .65, 280)])
 def test_dense_inclusive_threshold_without_topk_floor(qualifying, remaining_score, expected):
     class ScoredModels(FakeModels):
         def embed(self, texts, input_type, instruction, dimensions):
@@ -392,7 +392,9 @@ def test_dense_inclusive_threshold_without_topk_floor(qualifying, remaining_scor
                     for text in texts for score in [.9 if int(text.split()[1]) < qualifying else remaining_score]]
     corpus = [{"id": str(i), "contentHash": str(i), "title": str(i), "summary": "", "body": "", "metadata": ""} for i in range(280)]
     backend = RetrievalRankingBackend(ScoredModels())
-    result = backend.rank(corpus, {"text": "query", "mode": "dense"}, {"maxScan": 300}, {**profile(), "minimumDenseScore": .75})
+    params = profile()
+    params.pop('minimumDenseScore', None)
+    result = backend.rank(corpus, {"text": "query", "mode": "dense"}, {"maxScan": 300}, params)
     assert len(result["hits"]) == expected
 
 

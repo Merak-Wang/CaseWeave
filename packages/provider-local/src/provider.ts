@@ -492,7 +492,8 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       const block = await this.#ranker.readFeatureBlock(rankingDocuments(ids.map(i=>entry.records[i]!),this.#documentProjection), options?.signal)
       this.#authorizeSnapshot(principal, request.snapshotId)
       const scores = await this.#featureScores(entry, ids, block.dense, block.dimensions, request.rankingQuery, options?.signal)
-      return { ids, row_groups: ids.map(i => ticketGroupHashes(entry.records[i]!)), dense: block.dense, dimensions: block.dimensions, available: block.available,
+      return { ids, row_groups: ids.map(i => ticketGroupHashes(entry.records[i]!)),
+        texts: ids.map(i => `${entry.records[i]!.title}\n${entry.records[i]!.summary ?? ''}`), dense: block.dense, dimensions: block.dimensions, available: block.available,
         ...(scores ? { scores } : {}),
         feature_id: request.recallScope !== undefined ? sha256(stableJson({ index: block.embedding_id, recallScope: request.recallScope })) : block.embedding_id, next_cursor }
     }
@@ -511,7 +512,8 @@ export class LocalTicketProvider implements TicketRetrievalProvider {
       vector.forEach((v, j) => dense.writeFloatLE(v, (i * dimensions + j) * 4))
     })
     const scores = await this.#featureScores(entry, ids, dense.toString('base64'), dimensions, request.rankingQuery, options?.signal)
-    return { ids, row_groups: ids.map(i => ticketGroupHashes(entry.records[i]!)), dense: dense.toString('base64'), available: available.toString('base64'), dimensions,
+    return { ids, row_groups: ids.map(i => ticketGroupHashes(entry.records[i]!)),
+      texts: ids.map(i => `${entry.records[i]!.title}\n${entry.records[i]!.summary ?? ''}`), dense: dense.toString('base64'), available: available.toString('base64'), dimensions,
       ...(scores ? { scores } : {}),
       feature_id: request.recallScope !== undefined ? sha256(stableJson({ index: entry.snapshot.indexVersion, recallScope: request.recallScope })) : entry.snapshot.indexVersion,
       next_cursor }

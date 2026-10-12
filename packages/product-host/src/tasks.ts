@@ -430,7 +430,7 @@ export async function installTaskHost(ctx: Context, config: { mysqlUrl?: string;
       if (!provider) throw new RetrievalError('PROVIDER_UNAVAILABLE', '当前工单来源不可用。')
       return provider
     },
-    reportModel: (agent, id, input, signal, trace) => callReportModel(ctx, agent, id, input, signal, trace),
+    reportModel: (agent, id, input, signal, trace) => callReportModel(ctx, agent, id, input, signal, trace, models.current(agent)),
     onError: (_job, error) => { ctx.logger.warn('retrieval background operation failed', error) },
     onRequestError: error => { ctx.logger.warn('retrieval request failed', error) },
     analyzer: new SpacyQueryAnalyzer({ baseUrl: config.queryAnalysisBaseUrl ?? process.env.RETRIEVAL_AGENT_MODEL_SERVICE_URL ?? 'http://127.0.0.1:8012' }) })

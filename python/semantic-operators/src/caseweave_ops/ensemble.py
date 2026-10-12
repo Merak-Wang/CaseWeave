@@ -17,7 +17,7 @@ from .types import digest
 GROUP_PROJECTION = "business-and-canonical-nfkc-whitespace-v1"
 DEFAULT_METHODS = ("dense_lr", "dense_svm", "dense_mlp", "dense_hgb",
                    "feedback_margin", "relation_logistic", "dense_ridge", "dense_rbf_svm",
-                   "dense_extra_trees", "dense_gaussian_nb", "dense_knn")
+                   "dense_extra_trees", "dense_gaussian_nb", "dense_knn", "text_lr", "text_svm")
 
 
 def validate_group_metadata(value):
@@ -78,8 +78,16 @@ def binary_report(y, predictions):
     tp = int(np.count_nonzero(valid & (y == 1) & (predictions == 1)))
     selected = int(np.count_nonzero(valid & (predictions == 1)))
     positive = int(np.count_nonzero(known & (y == 1)))
+    negative = int(np.count_nonzero(known & (y == 0)))
+    fp = selected - tp
+    tn = int(np.count_nonzero(valid & (y == 0) & (predictions == 0)))
+    fn = int(np.count_nonzero(valid & (y == 1) & (predictions == 0)))
     precision, recall = tp/max(1, selected), tp/max(1, positive)
+    specificity = tn/negative if negative else None
+    balanced_accuracy = (recall + specificity)/2 if positive and negative else None
     return {"precision": precision, "recall": recall,
+        "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+        "specificity": specificity, "balanced_accuracy": balanced_accuracy,
         "f1": 2*precision*recall/max(1e-12, precision+recall),
         "coverage": float(valid.sum()/max(1, known.sum())),
         "reference_coverage": float(known.sum()/max(1, len(y))),
@@ -171,7 +179,9 @@ def select_group_crossfit(views, y, groups, *, methods=None, fusion="selective",
         raise ValueError("Conflicting teacher labels inside an alias group")
     splits = model_api.group_folds(y, groups, seed=seed)
     candidates = model_api.model_bank(sparse="sparse" in views, seed=seed,
-        methods=list(methods or DEFAULT_METHODS))
+        methods=list(methods or [name for name in DEFAULT_METHODS if "text" in views or not name.startswith("text_")]))
+    if any(candidate.view not in views for candidate in candidates):
+        raise ValueError("Requested model feature view is unavailable")
     started = perf_counter()
     board, fitted, oof_votes, failures = [], {}, {}, []
     fit_count = 0
@@ -211,7 +221,7 @@ def select_group_crossfit(views, y, groups, *, methods=None, fusion="selective",
     if not board:
         raise SelectionUnavailable(failures, fit_count, perf_counter()-started)
     def rank(row):
-        return (row["feasible_on_selection"], row["f1"], row["coverage"], -row["fit_seconds"])
+        return (row["balanced_accuracy"], row["precision"], row["f1"], row["coverage"], -row["fit_seconds"])
     best = max(board, key=rank)
     chosen, thresholds = [best["name"]], [best["threshold"]]
     selected_report = best["threshold_metrics_oof"]
@@ -230,11 +240,12 @@ def select_group_crossfit(views, y, groups, *, methods=None, fusion="selective",
             pair_board.append({"members": [row['name'] for row in cohort],
                 "disagreement": disagreement, **report})
             # 分歧也产生二分类票；只有训练OOF改善才能选融合。
-            if report["f1"] > selected_report["f1"] + 1e-9 and report["precision"] >= best["precision"]:
+            if report["balanced_accuracy"] > selected_report["balanced_accuracy"] + 1e-9 and report["precision"] >= selected_report["precision"]:
                 chosen, thresholds = [row['name'] for row in cohort], [row['threshold'] for row in cohort]
                 selected_report, reason = report, "oof_diversity_gain"
     manifest = {"protocol": "online-group-crossfit-v1", "group_projection": GROUP_PROJECTION,
         "fusion": fusion, "methods": [candidate.name for candidate in candidates],
+        "selection_metric": "balanced_accuracy", "threshold_tiebreak": "precision_then_recall",
         "members": chosen, "member_thresholds": thresholds, "selection_reason": reason,
         "vote_rule": "binary_majority_oof_best_tiebreak", "confidence_basis": "winning_vote_fraction_uncalibrated",
         "single_baseline": {"name": best["name"], "threshold": best["threshold"],

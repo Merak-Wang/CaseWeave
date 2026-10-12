@@ -1,8 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { link, open, readFile, readdir, unlink } from 'node:fs/promises'
+import { link, open, readFile, readdir } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
-import { encodeMigratedSession, migrateRetrievalSession } from './migration.js'
+import { encodeMigratedSession, migrateRetrievalSession, restoreHistoricalRetrievalSession } from './migration.js'
+
+import { historicalSessionFormatCatalog, sessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog'
+import type { SessionFormatJsonObject } from '@deepseek-ai/dsh-session-format'
+import { installDshSessionCompatibility } from './session-events.js'
+import { recycleMigrationPath } from './migration-recycle.js'
 
 const hash = (bytes: Uint8Array | string): string => createHash('sha256').update(bytes).digest('hex')
 const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === 'ENOENT'
@@ -50,7 +55,10 @@ async function publish(path: string, bytes: string | Uint8Array): Promise<void> 
     await handle.writeFile(bytes, 'utf8')
     await handle.sync()
   } finally { await handle.close() }
-  try { await link(temp, path) } finally { await unlink(temp) }
+  try { await link(temp, path) }
+  finally {
+    try { recycleMigrationPath(temp) } catch (error) { console.warn(String(error)) }
+  }
 }
 
 export interface SessionMigrationResult {
@@ -63,13 +71,48 @@ export interface SessionMigrationResult {
 }
 
 /**
- * Offline startup preflight. Retains V0 bytes and publishes validated V3 beside
+ * Offline startup preflight. Retains V0 bytes and publishes validated current format beside
  * them; never runs against a live old writer. A receipt detects an old runtime
  * modifying the predecessor after migration, including an unsafe downgrade.
  * Only CaseWeave V0 logs are converted; ordinary DSH logs use DSH's own migrator.
  */
 export async function migrateSessionDirectory(root: string, write = false): Promise<SessionMigrationResult[]> {
+  installDshSessionCompatibility()
   const results: SessionMigrationResult[] = []
+  const children = new Map<string, SessionFormatJsonObject[]>()
+  // 先扫描完整目录，再迁移父会话；取每个目录最新代次，避免重复计算同一个子会话。
+  const collect = async (directory: string): Promise<void> => {
+    let entries
+    try { entries = await readdir(directory, { withFileTypes: true }) }
+    catch (error) { if (missing(error)) return; throw error }
+    if (entries.some(entry => entry.isSymbolicLink())) throw new Error(`Session migration refuses symbolic links: ${directory}`)
+    const generations = entries.filter(entry => entry.isFile() && /^session(?:\.v\d+)?\.jsonl(?:\.zstd)?$/.test(entry.name))
+      .sort((a, b) => Number(b.name.match(/\.v(\d+)/)?.[1] ?? 0) - Number(a.name.match(/\.v(\d+)/)?.[1] ?? 0))
+    if (generations[0]) {
+      const path = join(directory, generations[0].name)
+      const bytes = await readFile(path)
+      const rows = (path.endsWith('.zstd') ? decodeSessionFrames(bytes) : bytes).toString('utf8').trimEnd().split('\n').map(line => JSON.parse(line) as SessionFormatJsonObject)
+      const header = rows[0]!
+      if (typeof header.parentSession === 'string' && (header.origin === 'subagent' || header.version === 0)) {
+        let artifact
+        if (header.version === 0) artifact = restoreHistoricalRetrievalSession(rows)
+        else {
+          const catalog = Number(header.version) <= 3 ? historicalSessionFormatCatalog : sessionFormatCatalog
+          const restore = catalog.createRestore(header, { recovery: 'strict', validation: 'current' })
+          for (const row of rows.slice(1)) restore.decodeRow(Number(header.version) <= 3 && String(row.type).startsWith('retrieval/')
+            ? { ...row, type: 'feedback/record', data: { text: 'CaseWeave historical child extension' } } : row)
+          artifact = restore.finish()
+        }
+        const descriptors = artifact.events.filter(event => event.type === 'subagent/descriptor' && event.seq >= artifact.inheritedEventCount)
+        const facts = children.get(header.parentSession) ?? []
+        facts.push({ childId: artifact.header.id, childCreatedAt: artifact.header.createdAt,
+          descriptorCount: descriptors.length, descriptor: descriptors[0]?.data ?? null })
+        children.set(header.parentSession, facts)
+      }
+    }
+    for (const entry of entries) if (entry.isDirectory()) await collect(join(directory, entry.name))
+  }
+  await collect(resolve(root))
   const visit = async (directory: string): Promise<void> => {
     let entries
     try { entries = await readdir(directory, { withFileTypes: true }) }
@@ -83,7 +126,7 @@ export async function migrateSessionDirectory(root: string, write = false): Prom
       const text = (source.endsWith('.zstd') ? decodeSessionFrames(original) : original).toString('utf8')
       const rows: unknown[] = text.trimEnd().split('\n').map(line => JSON.parse(line) as unknown)
       if (!rows.some(row => row && typeof row === 'object' && 'type' in row && String(row.type).startsWith('retrieval/'))) continue
-      const destination = join(directory, `session.v3.jsonl${source.endsWith('.zstd') ? '.zstd' : ''}`)
+      const destination = join(directory, `session.v${sessionFormatCatalog.currentVersion}.jsonl${source.endsWith('.zstd') ? '.zstd' : ''}`)
       const receiptPath = join(directory, 'caseweave-v0-migration.json')
       const sourceHash = hash(original)
       const receiptBytes = await optionalFile(receiptPath)
@@ -95,7 +138,7 @@ export async function migrateSessionDirectory(root: string, write = false): Prom
         continue
       }
       let artifact
-      try { artifact = migrateRetrievalSession(rows) }
+      try { artifact = migrateRetrievalSession(rows, children.get(String((rows[0] as { id: string }).id)) ?? []) }
       catch (error) {
         results.push({ sessionId: basename(directory), source, destination, eventCount: 0, action: 'refused',
           error: error instanceof Error ? error.message : String(error) })
@@ -106,7 +149,7 @@ export async function migrateSessionDirectory(root: string, write = false): Prom
       const compress = (text: string) => zstdCompressSync(text, { params: { [constants.ZSTD_c_checksumFlag]: 1 } })
       // DSH requires the first compressed frame to contain exactly the header.
       const encoded = source.endsWith('.zstd') ? Buffer.concat([compress(plaintext.slice(0, headerEnd)), compress(plaintext.slice(headerEnd))]) : plaintext
-      if (existing && hash(existing) !== hash(encoded)) throw new Error(`Unrecognized V3 successor requires explicit verification: ${destination}`)
+      if (existing && hash(existing) !== hash(encoded)) throw new Error(`Unrecognized current successor requires explicit verification: ${destination}`)
       const result = { sessionId: artifact.header.id, source, destination, eventCount: artifact.events.length }
       if (write) {
         // Refuse a concurrently appended or replaced source instead of publishing a stale successor.

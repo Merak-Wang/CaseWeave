@@ -161,6 +161,9 @@ def parse_fixed_query(value: dict[str, Any], query: str, context: dict[str, Any]
                 "inputs": ["$source"], "instruction": instruction,
                 "params": {"require_source": False, "required_fields": []}}])
     normalized = validate_plan(plan)
+    # 同一 OR 中被复合短语覆盖的短词会扩大噪声；只归并模型已提交的词，不生成新条件。
+    terms = normalized["keywords"]
+    normalized["keywords"] = [term for term in terms if not any(term != phrase and term in phrase for phrase in terms)]
     if unsupported:
         normalized["unsupported_constraints"] = deepcopy(unsupported)
     return normalized
@@ -170,10 +173,12 @@ async def plan_fixed_query(runtime: Runtime, query: str, confirmed_context: str,
     if canonical_fixed_context(context) is None:
         return await _plan_fixed_legacy_query(runtime, query, confirmed_context, context)
     schema = fixed_custom_query_schema(context)
-    instruction = ("一次生成工单检索计划：keywords用于跨字段字面匹配的OR宽召回，至少覆盖用户问题中核心领域或实体的独立短词；"
-        "事件或动作另列有辨识度的短词或短语，可以保留少量组合词，但不能只列组合句。"
+    instruction = ("一次生成工单检索计划：keywords用于跨字段字面匹配的OR召回，优先选择承载完整业务意图的中文复合短语和针对性同义称谓。"
+        "复合意图已明确时，不再把其对象、状态拆成泛化单词分别OR；例如账号权限异常可用账号权限、权限异常，"
+        "按实际意图选择工号权限、权限不足、账号冻结等表达，不另列账号、权限、异常；宽带欠费停机可用宽带欠费、欠费停机，不另列宽带、欠费、停机。"
+        "独立且有辨识度的产品、编号或术语可保留，如5G；同义表达用于发现候选，不能改写或限制用户业务判据。"
         "不要把问题、异常、失败、相关、工单等无辨识度泛词独立作为OR关键词。"
-        "关键词负责宽召回，是否满足完整业务要求由instruction判断。retrieval_expressions是1到3条语义检索改写。"
+        "是否满足完整业务要求由instruction判断。retrieval_expressions是1到3条简洁主题或故障表达，去掉帮我找、相关工单等请求套话，保留完整业务含义；宿主另保留原句向量检索。"
         "instruction完整保留用户业务对象、状态、纳入与排除条件，不新增硬条件。"
         "工单判断只读取title和summary。structured_conditions仅用于用户明确要求的结构化字段过滤，"
         "必须选search_fields中给出的字段及支持运算，source_text逐字引用query；语义要求放instruction，不能把title/summary当结构化字段，无则[]。"

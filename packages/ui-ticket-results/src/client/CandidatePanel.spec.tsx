@@ -11,8 +11,8 @@ import {
 
 vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   Button: ({ children }: { readonly children?: ReactNode }) => <button>{children}</button>,
-  IconChevronDownOutline14: () => null,
-  IconChevronUpOutline14: () => null,
+  IconChevronDownOutlineMedium: () => null,
+  IconChevronUpOutlineMedium: () => null,
 }))
 
 import { CandidatePanel, AuthorizedCandidatePanel, PresentationFailure, type CandidatePanelProps } from './CandidatePanel.js'

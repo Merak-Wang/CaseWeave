@@ -13,6 +13,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, ExtraTreesClassifie
 from sklearn.linear_model import LogisticRegression, RidgeClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.svm import LinearSVC, SVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
@@ -47,6 +48,21 @@ class Fitted:
         return self.estimator.predict_proba(Z)[:, 1]
 
 
+class TextLinearEstimator:
+    """每次 fit 只从本训练折学习词表和 IDF，留出文档只 transform。"""
+    def __init__(self, svm=False, seed=0):
+        self.vectorizer = TfidfVectorizer(analyzer="char", ngram_range=(2, 4),
+            sublinear_tf=True, max_features=20000)
+        self.model = LinearSVC(C=1., dual="auto", max_iter=3000, random_state=seed) if svm else LogisticRegression(C=1., max_iter=400)
+
+    def fit(self, texts, y, sample_weight=None):
+        self.model.fit(self.vectorizer.fit_transform(texts), y, sample_weight=sample_weight)
+        return self
+
+    def decision_function(self, texts):
+        return self.model.decision_function(self.vectorizer.transform(texts))
+
+
 def model_bank(*, sparse=False, seed=0, methods=None):
     """互补候选共享同一S2伪标签；固定参数，不做在线网格搜索。"""
     bank = [
@@ -69,6 +85,8 @@ def model_bank(*, sparse=False, seed=0, methods=None):
         Candidate("dense_extra_trees", "dense", ExtraTreesClassifier(n_estimators=64, max_depth=8, min_samples_leaf=2, n_jobs=1, random_state=seed)),
         Candidate("dense_gaussian_nb", "dense", GaussianNB(var_smoothing=1e-7)),
         Candidate("dense_knn", "dense", KNeighborsClassifier(n_neighbors=5, metric="cosine", weights="distance", algorithm="brute")),
+        Candidate("text_lr", "text", TextLinearEstimator(seed=seed)),
+        Candidate("text_svm", "text", TextLinearEstimator(svm=True, seed=seed)),
     ])
     if methods is None:
         return bank
@@ -213,6 +231,7 @@ def operating_point(y, scores, *, precision_target=.95, recall_target=.95, weigh
     if not valid.any() or set(np.unique(y[valid])) != {0, 1}:
         raise ValueError("Selection needs finite scores for both determinate classes")
     positive_weight = float(weights[known & (y == 1)].sum())
+    negative_weight = float(weights[known & (y == 0)].sum())
     ys, ss, ws = y[valid], scores[valid], weights[valid]
     order = np.argsort(-ss, kind="stable")
     ys, ss, ws = ys[order], ss[order], ws[order]
@@ -220,12 +239,17 @@ def operating_point(y, scores, *, precision_target=.95, recall_target=.95, weigh
     tp = np.cumsum(ws*ys)[ends]
     selected = np.cumsum(ws)[ends]
     p, r = tp/selected, tp/positive_weight
+    fp = selected - tp
+    tn = float(ws[ys == 0].sum()) - fp
+    specificity = tn / negative_weight
+    balanced_accuracy = (r + specificity) / 2
     f1 = np.divide(2*p*r, p+r, out=np.zeros_like(p), where=p+r > 0)
     coverage = float(valid.sum()/max(1, known.sum()))
     feasible = (p >= precision_target) & (r >= recall_target) & (coverage == 1.)
-    pool = np.flatnonzero(feasible)
-    idx = pool[np.argmax(r[pool])] if len(pool) else int(np.argmax(f1))
+    # 每个有限分数形成阈值；先兼顾正负类，再用查准率和召回率打破平局。
+    idx = int(np.lexsort((r, p, balanced_accuracy))[-1])
     return {"threshold": float(ss[ends[idx]]), "precision": float(p[idx]),
             "recall": float(r[idx]), "f1": float(f1[idx]), "feasible_on_selection": bool(feasible[idx]),
+            "specificity": float(specificity[idx]), "balanced_accuracy": float(balanced_accuracy[idx]),
             "selection_unknown": int(np.count_nonzero(~valid)), "coverage": coverage,
             "nonfinite_scores": int(np.count_nonzero(known & ~np.isfinite(scores)))}

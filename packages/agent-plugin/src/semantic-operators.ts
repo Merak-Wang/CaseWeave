@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { DEFAULT_DENSE_RECALL_THRESHOLD } from '@retrieval-agent/model-service-client/ranking'
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -654,7 +655,7 @@ export class SemanticOperators {
     for (const search of searches) {
       const key = hash([state.retrievalId, state.inputGeneration ?? 0, state.snapshot?.snapshotId,
         state.principalBindingHash, state.snapshot?.authorizationVersion, state.query.confirmedConstraints, search.mode, search.text,
-        ...(search.mode === 'dense' ? ['top15-union-score-gt075'] : [])])
+        ...(search.mode === 'dense' ? ['cosine-gte-threshold', DEFAULT_DENSE_RECALL_THRESHOLD] : [])])
       if (this.application.current(agent).semanticSearchKeys?.includes(key)) continue
       await this.search(agent, search.mode === 'keyword' ? { keywords: search.terms } : { expression: search.text }, signal)
       if ((this.application.current(agent).inputGeneration ?? 0) !== (state.inputGeneration ?? 0)) throw new RetrievalError('INVALID_TRANSITION', '新输入已取代本轮检索计划。')

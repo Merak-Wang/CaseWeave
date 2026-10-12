@@ -127,6 +127,14 @@ export class MySqlTaskStore {
     await c.query('INSERT IGNORE INTO ra_task_job(id,task_id,kind,input_revision,status) VALUES (?,?,?,?,?)',
       [randomUUID(), task.id, kind, task.input_revision, 'queued'])
   }
+  private async stopFailedExecution(c: PoolConnection, task: TaskRecord, explanation: string): Promise<void> {
+    if (!task.state_json || task.state_json.phase === 'stopped') return
+    const journal = new TaskJournal([], await this.domainEventCount(task.id, c))
+    const controller = new RetrievalController({} as ConstructorParameters<typeof RetrievalController>[0], journal)
+    // 执行失败只冻结已确认证据；恢复仍沿同一查询、快照和判断额度继续。
+    task.state_json = controller.stopIncomplete(task.state_json, explanation)
+    for (const event of journal.pending) await this.append(c, task, event.type, event)
+  }
   async create(id: string, sessionId: string, principal: TrustedPrincipalContext, text: string, operationId = id, execution?: import('@retrieval-agent/contracts').SemanticExecutionOptions, datasetId?: string): Promise<CommandReceipt> {
     return this.transaction(async c => {
       await c.query('INSERT IGNORE INTO ra_task(id,session_id,owner_hash,original_query) VALUES (?,?,?,?)', [id, sessionId, taskOwner(principal), text])
@@ -157,6 +165,10 @@ export class MySqlTaskStore {
     }
     if (command.kind === 'feedback' && !task.state_json?.candidates.some(candidate => candidate.ref === command.candidateRef)) {
       throw new RetrievalError('INVALID_REQUEST', '反馈候选不属于当前任务集合。')
+    }
+    if (command.kind === 'resume' && task.failure && task.state_json?.phase !== 'stopped') {
+      const failed = await this.rows<{ id: string }>("SELECT id FROM ra_task_job WHERE task_id=? AND input_revision=? AND status='failed' AND kind IN ('search','agent','fixed') LIMIT 1", [task.id, task.input_revision], c)
+      if (failed.length) await this.stopFailedExecution(c, task, task.failure)
     }
     if (command.kind === 'resume' && (!task.state_json || task.state_json.phase !== 'stopped'
       || !['cancelled', 'partial', 'backend_error', 'budget_exhausted', 'capacity_exceeded'].includes(task.state_json.termination))) {
@@ -304,7 +316,10 @@ export class MySqlTaskStore {
         : ['agent', 'fixed'].includes(job.kind) && task.state_json?.phase === 'awaiting_clarification' ? 'waiting' : 'completed'
       await c.query('UPDATE ra_task_job SET status=?,error=?,lease_until=NULL,available_at=TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(3)) WHERE id=?', [status, error ?? null, job.kind === 'source_check' ? 60 : job.attempts, job.id])
       await this.append(c, task, `job/${status}`, { id: job.id, kind: job.kind, attempts: job.attempts, ...(error ? { error } : {}) })
-      if (status === 'failed' && !['learn', 'unlearn', 'source_check'].includes(job.kind)) task.failure = error ?? '后台任务失败。'
+      if (status === 'failed' && !['learn', 'unlearn', 'source_check'].includes(job.kind)) {
+        task.failure = error ?? '后台任务失败。'
+        await this.stopFailedExecution(c, task, task.failure)
+      }
       if (status === 'completed' && job.kind === 'search' && task.state_json?.phase !== 'stopped') await this.enqueue(c, task, task.state_json?.query.contract?.semanticExecution?.orchestration === 'fixed' ? 'fixed' : 'agent')
       if (status === 'waiting' && task.state_json?.lastPage?.nextCursor) await this.enqueue(c, task, 'page')
       await this.save(c, task)

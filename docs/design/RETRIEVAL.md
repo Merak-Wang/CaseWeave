@@ -6,7 +6,7 @@
 
 当前字段映射 `normalized-fields-v2` 遍历完整原始字段值，不沿用旧 searchText 的 256 值上限；NULL 保持未知，生成字段能力显式引用生成策略。MySQL 导入时将规范化字段拆为唯一 bigram，写入 `ra_gram`。查询以 NFKC 小写文本编译精确二进制 LOCATE；bigram 仅缩小候选，原字面谓词仍负责最终匹配。AND 可使用任一正向必要 gram，OR 仅使用所有分支共同需要的 gram，NOT 不作正向剪枝；选择最窄 posting，覆盖超过语料 10% 时改走精确扫描，避免宽 posting 强制 join。默认规划检索将完整关键词命中集通过 SQL `INSERT … SELECT` 写入候选表，数据集仅存 ID 与命中信息，不把全库正文搬入 Host；候选视窗和排序页宽不限制向量阈值命中数量。
 
-索引使用 `field-codepoints-v3`：ESFT 摘要与完整 raw_dialogue，360 Unicode 字符分片、保留全部尾部；problem_description 是客户轮次的派生副本，避免重复索引。模型身份包含 revision/维度/归一化/距离、切片版本；每个命中复核 ticket/contentHash/sourceVersion/片段位置及哈希。SQL 生成授权且满足硬条件的工单集合，按 ID 游标分片，每片最多 1,000 个 ID、最多四片并发。Milvus 按工单聚合最佳片段，每页取 100 条，持续读取直到分片穷尽或分数低于 0.75；合并后保留余弦相似度大于等于 0.75 的全部工单，不以 Top-K 补入低分工单，100 不构成总量上限。分片避免超过 Milvus 的深分页范围，Python 搜索算子继续读取全部 Provider 结果页。本地 JSONL 的精确余弦路径采用同一阈值规则。任一批失败不把剩余批次冒充完整向量结果。更新和删除生成新的不可变来源/集合，复用相同内容 embedding；完全就绪后单一发布指针切换，滞后索引不能混入当前 SQL 版本。
+索引使用 `field-codepoints-v3`：ESFT 摘要与完整 raw_dialogue，360 Unicode 字符分片、保留全部尾部；problem_description 是客户轮次的派生副本，避免重复索引。模型身份包含 revision/维度/归一化/距离、切片版本；每个命中复核 ticket/contentHash/sourceVersion/片段位置及哈希。SQL 生成授权且满足硬条件的工单集合，按 ID 游标分片，每片最多 1,000 个 ID、最多四片并发。Milvus 按工单聚合最佳片段，每页取 100 条，持续读取直到分片穷尽或分数低于 0.65；合并后保留余弦相似度大于等于 0.65 的全部工单，不以 Top-K 补入低分工单，100 不构成总量上限。分片避免超过 Milvus 的深分页范围，Python 搜索算子继续读取全部 Provider 结果页。本地 JSONL 的精确余弦路径采用同一阈值规则。任一批失败不把剩余批次冒充完整向量结果。更新和删除生成新的不可变来源/集合，复用相同内容 embedding；完全就绪后单一发布指针切换，滞后索引不能混入当前 SQL 版本。
 
 ## 模型服务部署边界
 

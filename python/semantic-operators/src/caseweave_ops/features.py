@@ -13,10 +13,12 @@ class FeatureBlock:
     sparse: csr_matrix | None = None
     scores: np.ndarray | None = None
     row_groups: tuple[dict, ...] | None = None
+    texts: np.ndarray | None = None
 
     @property
     def views(self):
-        return {"dense": self.dense, **({"sparse": self.sparse} if self.sparse is not None else {})}
+        return {"dense": self.dense, **({"sparse": self.sparse} if self.sparse is not None else {}),
+            **({"text": self.texts} if self.texts is not None else {})}
 
 
 def decode_array(value, dtype):
@@ -37,7 +39,8 @@ def decode_block(page):
             raise ValueError("Numeric row_groups must align with IDs")
         row_groups = tuple(validate_group_metadata(item) for item in row_groups)
     return FeatureBlock(ids, dense, decode_array(page["available"], "u1").astype(bool), matrix,
-        np.asarray(page["scores"], dtype=np.float64) if "scores" in page else None, row_groups)
+        np.asarray(page["scores"], dtype=np.float64) if "scores" in page else None, row_groups,
+        np.asarray(page["texts"], dtype=object) if "texts" in page else None)
 
 
 def memmap_blocks(ids_path, dense_path, shape, *, block_size=16384, available_path=None):

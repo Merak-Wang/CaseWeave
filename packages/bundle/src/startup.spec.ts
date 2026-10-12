@@ -139,5 +139,5 @@ describe('installLocalProductAssets', () => {
     await expect(access(removed.presetPath)).rejects.toBeDefined()
     await expect(access(removed.productRoot)).rejects.toBeDefined()
     await expect(readFile(unrelated, 'utf8')).resolves.toBe('keep')
-  })
+  }, 20_000) // 两个产品目录实际移入回收站，Windows PowerShell 启动需留足时间。
 })

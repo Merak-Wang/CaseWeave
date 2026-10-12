@@ -171,6 +171,8 @@ class Bridge:
 
 
 def main():
+    # 先载入小模型的原生数值依赖，再启动stdio读取线程，避免首轮学习卡在BLAS初始化。
+    from . import online_group_filter, unlabeled_filter
     parser = argparse.ArgumentParser(description="CaseWeave stdio operator service")
     parser.add_argument("--stdio", action="store_true", help="Use the Host NDJSON pipe")
     parser.add_argument("--state", default=".cache/semantic-operators/artifacts.sqlite")

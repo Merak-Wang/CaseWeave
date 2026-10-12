@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, appendFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, writeFile, appendFile } from 'node:fs/promises'
+import { recycleMigrationPath } from './migration-recycle.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
@@ -33,7 +34,7 @@ it('decodes all append frames and refuses torn/corrupt tails', () => {
   expect(() => decodeSessionFrames(Buffer.concat([source, Buffer.from('bad')]))).toThrow()
 })
 
-it('preserves V0 bytes, restores through the actual V3 backend and appends after reopening', async () => {
+it('preserves V0 bytes, restores through the actual current backend and appends after reopening', async () => {
   const root = await mkdtemp(join(tmpdir(), 'caseweave-migration-'))
   const directory = join(root, '_no-cwd', id)
   const contexts: Context[] = []
@@ -70,5 +71,33 @@ it('preserves V0 bytes, restores through the actual V3 backend and appends after
     expect(await readFile(original)).toEqual(source)
     await appendFile(original, zstdCompressSync('\n'))
     await expect(migrateSessionDirectory(root, true)).rejects.toThrow(/changed after migration/)
-  } finally { for (const ctx of contexts) await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
-})
+  } finally { for (const ctx of contexts) await ctx.fiber.dispose(); try { recycleMigrationPath(root) } catch (error) { console.warn(String(error)) } }
+}, 20_000) // Windows 实际回收站会启动 PowerShell，给迁移与清理保留工程耗时。
+
+
+it('collects the real child descriptor before publishing the parent current catalog', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'caseweave-migration-children-'))
+  try {
+    const parentDir = join(root, '_no-cwd', 'parent')
+    const childDir = join(root, '_no-cwd', 'child')
+    await mkdir(parentDir, { recursive: true }); await mkdir(childDir, { recursive: true })
+    const parent = [{ type: 'session', version: 0, id: 'parent', createdAt: 1, delegationDepth: 0 },
+      { type: product.type, seq: 0, time: 2, data: { event: product } }]
+    const child = [{ type: 'session', version: 0, id: 'child', createdAt: 3, delegationDepth: 1,
+      origin: 'subagent', parentSession: 'parent' },
+      { type: 'subagent/descriptor', seq: 0, time: 4,
+        data: { version: 3, mode: 'continuable', provider: 'fixture', label: '真实子会话' } }]
+    const serialize = (rows: unknown[]) => rows.map(row => JSON.stringify(row)).join('\n') + '\n'
+    await writeFile(join(parentDir, 'session.jsonl'), serialize(parent))
+    await writeFile(join(childDir, 'session.jsonl'), serialize(child))
+    const results = await migrateSessionDirectory(root, true)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.action).toBe('migrated')
+    const migrated = (await readFile(results[0]!.destination, 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line))
+    expect(migrated[0].version).toBe(4)
+    expect(migrated.find(row => row.type === 'subagent/catalog')?.data).toMatchObject({
+      childId: 'child', childCreatedAt: 3, mode: 'continuable', label: '真实子会话' })
+    expect(migrated.find(row => row.type === product.type)?.data.event).toEqual(product)
+    expect(await readFile(join(childDir, 'session.jsonl'), 'utf8')).toBe(serialize(child))
+  } finally { try { recycleMigrationPath(root) } catch (error) { console.warn(String(error)) } }
+}, 20_000)

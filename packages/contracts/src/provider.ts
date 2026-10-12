@@ -130,6 +130,8 @@ export interface NumericFeatureRowGroup {
   readonly business_hash?: string; readonly canonical_hash?: string
 }
 export interface NumericFeatureBlock {
+  /** 同 ids 对齐的快照标准标题与摘要，供折内文本分类特征使用。 */
+  readonly texts?: readonly string[];
   /** Exactly aligned with ids. Both true-source hashes are required for strict group validation. */
   readonly row_groups?: readonly NumericFeatureRowGroup[];
   readonly ids: readonly number[]; readonly dense: string; readonly dimensions: number;

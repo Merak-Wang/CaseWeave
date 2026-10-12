@@ -22,7 +22,7 @@ GPU部署需要NVIDIA容器支持；CPU设备、精度或模型变化须相应�
 
 `pnpm operators:test` 运行 Python 验收。uv 的 `--inexact` 保留已有模型依赖，不删除环境内其他包。算子不重新下载模型权重，embedding/rerank 继续复用既有模型服务。模型供应商和凭据仍配置在 DSH；共享服务令牌用 `CASEWEAVE_OPERATORS_TOKEN` 同时配置服务和 Node，避免放进 URL。算子设计与计量定义见 [Python 算子](design/OPERATORS.md)。
 
-默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 的学习与预测范围是关键词 OR 宽召回全部命中和语义召回结果按工单身份去重后的并集，不包含未进入该召回并集的授权工单。Provider 为并集内对齐 ID 提供连续数值块；固定排序前128条由S2生成yes/no＋confidence伪标签，拟合LR/SVM/MLP/HGB/反馈原型/关系LR，以训练内交叉验证择优并二分类投票预测其余候选。关闭学习时无反馈算法直接判断候选并集。最终是集合直接进入结果和XLSX，不等待人工确认，不做二次教师复核、不扩标至1024，也不设置60%发布门槛。关键词命中仍需完整枚举，语义分支按检索配置召回。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。教师与投票只输出yes/no，低confidence不弃权；传输/解析/缺特征是技术失败，不参与拟合或补成no。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验方法与运行说明见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
+默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 的学习与预测范围是关键词 OR 宽召回全部命中和语义召回结果按工单身份去重后的并集，不包含未进入该召回并集的授权工单。Provider 为并集内对齐 ID 提供连续数值块；固定排序前128条由S2生成yes/no＋confidence伪标签，拟合逻辑回归、线性SVM、浅层MLP、HGB、反馈原型、关系逻辑回归、岭分类器、RBF-SVM、极端随机树、高斯朴素贝叶斯、余弦近邻，以及基于标题摘要字符TF-IDF的逻辑回归和线性SVM共13种候选，以训练内交叉验证的 Balanced Accuracy（正负类召回率等权）择优并二分类投票预测其余候选。文本模型每折仅用训练部分拟合字符2–4-gram TF-IDF，选定后用全部有效128条标签重新拟合。关闭学习时无反馈算法直接判断候选并集。最终是集合直接进入结果和XLSX，不等待人工确认，不做二次教师复核、不扩标至1024，也不设置60%发布门槛。关键词命中仍需完整枚举，语义分支按检索配置召回。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。教师与投票只输出yes/no，低confidence不弃权；传输/解析/缺特征是技术失败，不参与拟合或补成no。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验方法与运行说明见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
 
 从旧版算法升级 Docker 部署时，运行 `start.cmd` 或 `bash setup.sh start`，自动构建并更新应用、算子和排名服务。旧算子镜像不认识新筛选参数时可能返回 `ProtocolError`。若旧数据库尚无数值特征，另执行 `docker compose exec app node scripts/database.mjs index --dataset=esft-development`，复用已有向量和索引检查点补齐；自定义数据集替换名称。已有安装的日常启动不自动重新导入数据或重建索引。
 
@@ -273,11 +273,11 @@ node scripts/migrate-dsh-sessions.mjs --home=.cache/retrieval-agent-local/dsh-ho
 
 完整容器部署使用同一工具：先 `docker compose stop app`、备份 app-state 卷，再 `docker compose build app`；在应用保持停止时运行 `docker compose run --rm --no-deps app node scripts/migrate-dsh-sessions.mjs --home=/app/.cache/local/dsh-home --check`，核对拒绝项后将 `--check` 换为 `--write`。完成后通过正常 `start` 入口启动。使用部署配置中的原卷，不能另建空状态卷代替迁移。
 
-自定义目录替换 `--home`。检查不写文件；写入逐会话发布 `session.v3.jsonl` 或 `.zstd`，保留原始 `session.jsonl`/`.zstd` 和校验回执。已迁移会话可重复执行。历史上先写用户消息、后开始步骤的会话，转换会在同一已开启轮次内前移已有的首个 `step/start`，同时重映射 DSH 引用；原消息顺序、时间戳、业务事件身份及内容保留。原始字节不修改。
+自定义目录替换 `--home`。检查不写文件；写入逐会话发布 `session.v4.jsonl` 或 `.zstd`，保留原始 `session.jsonl`/`.zstd` 和校验回执。已迁移会话可重复执行。历史上先写用户消息、后开始步骤的会话，转换会在同一已开启轮次内前移已有的首个 `step/start`，同时重映射 DSH 引用；原消息顺序、时间戳、业务事件身份及内容保留。原始字节不修改。
 
 工具对未支持的业务 schema、未知扩展、缺少可对应步骤等返回 `refused`，退出码为 1；其他可迁移会话仍可独立完成。拒绝项保留原文件，不生成猜测的步骤、结果或证据。升级后这些拒绝项不能作为已完成的新格式恢复结果。普通 DSH 会话交由上游原生迁移器处理。本操作只升级 DSH 日志，不导入或替换 MySQL 权威任务。
 
-回退必须使用升级前的完整备份：新版继续运行后，新增事件只写 V3，旧程序读取保留的 V0 文件会得到过时状态。若旧文件在迁移后又被写入，校验回执会阻止继续迁移，需先恢复一致备份。
+回退必须使用升级前的完整备份：新版继续运行后，新增事件只写 V4，旧程序读取保留的 V0 文件会得到过时状态。若旧文件在迁移后又被写入，校验回执会阻止继续迁移，需先恢复一致备份。
 
 ## 模型镜像与app内API
 

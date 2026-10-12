@@ -89,7 +89,7 @@ async function runtime(
       provider: 'mock', model: 'model', contextWindow: options.contextWindow,
     })
   }
-  ctx.agents.register(agent)
+  ctx.agents.enter(agent, undefined)
   const admitModelRequest = vi.fn(async (
     _agent: Agent,
     _input: Parameters<RetrievalRuntimeBudgetApplication['admitModelRequest']>[1],

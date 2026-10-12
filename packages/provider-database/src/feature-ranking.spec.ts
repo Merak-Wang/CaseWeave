@@ -55,6 +55,37 @@ describe.skipIf(process.env.RETRIEVAL_AGENT_DATABASE_TEST !== '1')('query-ranked
     try { await admin.query(`DROP DATABASE ${name}`) } finally { await admin.end() }
   })
 
+  it('executes original and every unique planned rewrite in initial recall, retaining zero at the same cosine threshold', async () => {
+    const milvus = new MilvusClient()
+    const search = vi.spyOn(milvus, 'searchBatches').mockImplementation(async (_collection, _vector, batches) => {
+      const eligible: string[] = []
+      for await (const batch of batches) eligible.push(...batch)
+      expect(eligible).toHaveLength(5)
+      return []
+    })
+    const p = new DatabaseTicketProvider(db, milvus, model, 'ranking')
+    const snapshot = await p.openSnapshot(principal)
+    const spec = { ...p.resolve({ target: 'ranked_cases', query, mode: 'hybrid',
+      fastQuery: { schemaVersion: 2, source: 'direct_user', rewriteApplied: false,
+        keyword: { terms: [query], operator: 'or' }, vector: { text: query } } }),
+      semanticHints: ['跨域副卡办理失败', query, '副卡跨地区解绑', '副卡异地业务受阻'] }
+    const page = await p.search(principal, snapshot.snapshotId, spec, { stage: 'initial_hybrid', topK: 100, maxScan: 100 })
+    expect(embed.mock.calls.map(([input]) => input.texts)).toEqual([[query], ['跨域副卡办理失败'], ['副卡跨地区解绑'], ['副卡异地业务受阻']])
+    expect(search).toHaveBeenCalledTimes(4)
+    expect(search.mock.calls.every(call => call[5] === .65)).toBe(true)
+    expect(page.trace.channels.find(channel => channel.channel === 'vector')?.resultCount).toBe(0)
+    expect(page.trace.channels.find(channel => channel.channel === 'keyword')?.resultCount).toBe(2)
+    expect(page.boundary.rankedHits).toBe(2)
+    expect(snapshot.vectorRecallThreshold).toBe(.65)
+    // 旧任务缺少阈值字段时仍使用原 .75；相同查询不会复用新的 .65 召回范围。
+    await db.pool.query("UPDATE ra_provider_snapshot SET snapshot_json=JSON_REMOVE(snapshot_json,'$.vectorRecallThreshold') WHERE id=?", [snapshot.snapshotId])
+    search.mockClear()
+    const restored = await p.search(principal, snapshot.snapshotId, spec, { stage: 'initial_hybrid', topK: 100, maxScan: 100 })
+    expect(search).toHaveBeenCalledTimes(4)
+    expect(search.mock.calls.every(call => call[5] === .75)).toBe(true)
+    expect(restored.boundary.rankedHits).toBe(2)
+  })
+
   it('scores original-query coverage and cosine before annotation, independently of chunk width and ID order', async () => {
     await db.buildGrams(generation)
     const p = provider(), snapshot = await p.openSnapshot(principal)
@@ -62,6 +93,7 @@ describe.skipIf(process.env.RETRIEVAL_AGENT_DATABASE_TEST !== '1')('query-ranked
     const calls = vi.spyOn(db.pool, 'query')
     const full = await p.featureBlock(principal, request)
     expect(full.ids).toEqual([0, 1, 2, 3, 4])
+    expect(full.texts).toEqual(records.slice(0, 5).map(([, text]) => `${text}\n${text}`))
     expect(full.scores).toEqual([0, .5, 1 / 6, 1, .5])
     expect(full.ids.toSorted((a, b) => full.scores![b]! - full.scores![a]! || a - b)).toEqual([3, 1, 4, 2, 0])
     const batches: NumericFeatureBlock[] = []
@@ -72,6 +104,7 @@ describe.skipIf(process.env.RETRIEVAL_AGENT_DATABASE_TEST !== '1')('query-ranked
     } while (cursor)
     expect(batches.flatMap(block => block.scores!)).toEqual(full.scores)
     expect((await p.featureBlock(principal, { ...request, ids: [4, 3, 2] })).scores).toEqual([.5, 1, 1 / 6])
+    expect((await p.featureBlock(principal, { ...request, ids: [4, 3, 2] })).texts).toEqual([4, 3, 2].map(i => `${records[i]![1]}\n${records[i]![1]}`))
     expect(embed).toHaveBeenCalledTimes(1)
     expect(embed.mock.calls[0]![0]).toMatchObject({ texts: [query], inputType: 'query', requireCompleteInput: true })
     expect(calls.mock.calls.some(([sql]) => /SELECT .*record_json AS record/u.test(String(sql)))).toBe(false)

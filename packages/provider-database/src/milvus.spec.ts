@@ -15,9 +15,17 @@ it('bounds concurrent filtered searches, merges ticket scores and honours cancel
   expect(calls).toBe(6)
   expect(peak).toBeGreaterThan(1)
   expect(peak).toBeLessThanOrEqual(4)
-  expect(hits.map(h => h.ticket_id)).toEqual(['5000', '4000'])
+  expect(hits.map(h => h.ticket_id)).toEqual(['5000', '4000', '3000', '2000', '1000'])
   const abort = new AbortController(); abort.abort()
   await expect(client.search('test', [1], ['1'], 2, abort.signal)).rejects.toThrow()
+})
+
+it('includes .65 and excludes .6499 under the shared default without a Top-K floor', async () => {
+  const client = new MilvusClient()
+  client.call = async <T>() => [{ ticket_id: 'above', distance: .8 },
+    { ticket_id: 'boundary', distance: .65 }, { ticket_id: 'below', distance: .6499 }] as T
+  async function* batches() { yield ['above', 'boundary', 'below'] }
+  expect((await client.searchBatches('test', [1], batches(), 1)).map(hit => hit.ticket_id)).toEqual(['above', 'boundary'])
 })
 
 it('includes every score at least .75 without a Top-K floor, paging in hundreds', async () => {

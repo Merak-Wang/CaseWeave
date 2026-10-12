@@ -19,7 +19,7 @@ import Skills from '@deepseek-ai/dsh-skill'
 import { createPool } from 'mysql2/promise'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LocalTicketProvider, normalizeFixtureTicket } from '@retrieval-agent/provider-local'
-import type { TicketRetrievalProvider, TrustedPrincipalContext } from '@retrieval-agent/contracts'
+import { RetrievalError, type RetrievalState, type TicketRetrievalProvider, type TrustedPrincipalContext } from '@retrieval-agent/contracts'
 import { foldRetrievalEvents } from '@retrieval-agent/domain'
 import type { RetrievalRanker } from '@retrieval-agent/model-service-client/ranking'
 import type { TicketQueryAnalyzer } from '@retrieval-agent/query-understanding'
@@ -1502,6 +1502,50 @@ describe.skipIf(!enabled)('A5/A7/A8/A13 real MySQL task authority, HTTP and inst
       expect((f.adapter as any).operatorCalls).toBe(4) // 查询规划一次，筛选请求按3次上限耗尽
       expect(f.errors).toHaveLength(1)
     } finally { await f.close() }
+  }, 90000)
+
+  it.each([false, true])('resumes a failed operator execution through HTTP, including legacy active state %s', async legacyActive => {
+    const f = await fixture(false, false, false, false, false, undefined, 0, undefined, 8, true)
+    const operators = f.application.operators!
+    const run = operators.searchAndFilter.bind(operators)
+    let failedState: RetrievalState | undefined
+    let retries = 0
+    const stopFailedExecution = (store as any).stopFailedExecution
+    // 复用旧版“作业失败但状态不冻结”的行为，保留真实事件链而不手写 SQL 状态。
+    if (legacyActive) (store as any).stopFailedExecution = async () => {}
+    operators.searchAndFilter = async agent => {
+      failedState = f.application.current(agent)
+      throw new RetrievalError('PROVIDER_UNAVAILABLE', 'Python 算子未完成：ProtocolError。')
+    }
+    f.host.start()
+    try {
+      const id = randomUUID()
+      expect((await f.post('', { operationId: id, kind: 'query', text: '查找副卡解绑案例' })).status).toBe(202)
+      const failed = await until(() => store.read(id), task => Boolean(task?.failure))
+      expect(failed?.state_json?.phase).toBe(legacyActive ? failedState?.phase : 'stopped')
+      expect(failed?.state_json?.termination).toBe(legacyActive ? 'active' : 'partial')
+      expect(failedState?.phase).not.toBe('stopped')
+      ;(store as any).stopFailedExecution = stopFailedExecution
+      operators.searchAndFilter = async agent => {
+        retries++
+        // 此回归只验证失败作业重新进入算子，不编造模型相关性判断或成功标签。
+        await f.application.stopIncomplete(agent, '受控执行已恢复；本例未执行业务模型判断。')
+        return f.application.current(agent)
+      }
+      const command = { operationId: 'retry-failed-operator', kind: 'resume' }
+      const receipt = await f.post('/' + id, command)
+      expect(receipt.status, JSON.stringify(receipt.body)).toBe(202)
+      expect((await f.post('/' + id, command)).body).toEqual(receipt.body)
+      await until(() => store.rows<TaskJob>("SELECT * FROM ra_task_job WHERE task_id=? AND input_revision=? AND status='completed'", [id, failed!.input_revision + 1]), jobs => jobs.length === 1)
+      const done = await store.read(id)
+      expect(retries).toBe(1)
+      expect(done?.state_json?.snapshot?.snapshotId).toBe(failedState?.snapshot?.snapshotId)
+      expect(done?.state_json?.inputGeneration).toBe(failedState?.inputGeneration)
+      expect(done?.query_revision).toBe(failed?.query_revision)
+      expect(done?.input_revision).toBe(failed!.input_revision + 1)
+      expect(done?.failure).toBeNull()
+      expect(foldRetrievalEvents(await store.domainEvents(id))?.selectedCandidateRefs).toEqual(done?.state_json?.selectedCandidateRefs)
+    } finally { (store as any).stopFailedExecution = stopFailedExecution; operators.searchAndFilter = run; await f.close() }
   }, 90000)
 
   it('resumes a stopped model-failure task in the same generation and deduplicates the resume command', async () => {

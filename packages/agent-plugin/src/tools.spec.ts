@@ -43,18 +43,18 @@ async function mounted(operatorMode = false) {
 const base = { state_id: 'state-1', judgments: [], semantic_gaps: [] }
 
 describe('public decision tool', () => {
-  it('describes a record window and retains controls without a cumulative request cap', async () => {
+  it('describes a record window and retains controls with a fixed 128-request judgment allowance', async () => {
     const { ctx } = await mounted(true)
     try {
       const filter = ctx.tools.schemas().find(tool => tool.name === 'sem_filter')!
       expect(filter.description).toContain('128 条工单')
-      expect(filter.description).toContain('累计判断请求不封顶')
+      expect(filter.description).toContain('累计最多128次独立判断请求')
       const policy = renderPrompt(await ctx.systemPrompt.assemble())
-      expect(policy).toContain('累计判断请求不封顶')
+      expect(policy).toContain('累计最多 128 次独立判断请求')
       expect(policy).toContain('QPM、TPM')
       expect(policy).toContain('取消、超时')
-      expect(policy).not.toContain('最多 128 次')
-      expect(policy).not.toContain('共用额度')
+      expect(policy).toContain('自动重试不重复占额度')
+      expect(policy).toContain('初判与复核共用')
     } finally { await ctx.fiber.dispose() }
   })
   it('keeps operator uncertainty authoritative instead of accepting an ordinary main-agent override', async () => {
@@ -93,7 +93,7 @@ describe('public decision tool', () => {
       expect(system).toContain('标题、摘要和字段足够时')
       expect(system).toContain('已有回答持续有效')
       expect(system).toContain('保留“或/且”关系')
-      expect(system).toContain('任一排除项成立则 exclude')
+      expect(system).toContain('任一排除项成立或未记载满足条件的事实则 exclude')
       expect(system.length).toBeLessThan(1800)
     } finally { await ctx.fiber.dispose() }
   })
