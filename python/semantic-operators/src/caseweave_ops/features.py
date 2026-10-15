@@ -69,3 +69,25 @@ class PrioritySample:
         # 同分固定按 ID 排序，分页宽度不会改变有界候选池。
         keep = np.lexsort((ids, -keys))[:self.size]
         self.ids, self.keys = ids[keep], keys[keep]
+
+
+def stratified_diverse_sample(ids, dense, scores, size=128, *, seed=0):
+    """排名分八层；每层用向量远点覆盖不同表达，不读取标签。"""
+    ids, dense, scores = np.asarray(ids), np.asarray(dense), np.asarray(scores)
+    order = np.lexsort((ids, -scores))
+    if len(ids) <= size:
+        return ids[order]
+    vectors = dense / np.maximum(np.linalg.norm(dense, axis=1, keepdims=True), 1e-12)
+    rng, chosen = np.random.default_rng(seed), []
+    layers = np.array_split(order, min(8, size))
+    quotas = np.diff(np.linspace(0, size, len(layers)+1, dtype=int))
+    for layer, count in zip(layers, quotas):
+        selected = [int(rng.choice(layer))]
+        distance = 1-vectors[layer] @ vectors[selected[0]]
+        for _ in range(1, count):
+            distance[np.isin(layer, selected)] = -np.inf
+            nxt = int(layer[np.argmax(distance)])
+            selected.append(nxt)
+            distance = np.minimum(distance, 1-vectors[layer] @ vectors[nxt])
+        chosen.extend(selected)
+    return ids[chosen]

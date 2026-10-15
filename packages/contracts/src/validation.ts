@@ -6,15 +6,16 @@ import type { TicketFilter, TicketRetrievalRequest, TrustedPrincipalContext } fr
 export function assertSemanticExecutionOptions(value: unknown): asserts value is import('./types.js').SemanticExecutionOptions {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RetrievalError('INVALID_REQUEST', '语义执行设置必须是对象。')
   const v = value as Record<string, unknown>
-  if (Object.keys(v).some(key => !['onlineLearning', 'semanticMethod', 'orchestration', 'onlineFusion', 'onlineModels'].includes(key))
+  if (Object.keys(v).some(key => !['onlineLearning', 'semanticMethod', 'orchestration', 'onlineFusion', 'onlineModels', 'onlineSampling'].includes(key))
     || typeof v.onlineLearning !== 'boolean' || !['auto', 'dual_description_margin', 'name_gmm', 'kmeans'].includes(String(v.semanticMethod))
     || v.orchestration !== undefined && !['fixed', 'agent'].includes(String(v.orchestration))
     || v.onlineLearning === true && ['dual_description_margin', 'name_gmm', 'kmeans'].includes(String(v.semanticMethod))
     || v.onlineFusion !== undefined && !['single', 'selective'].includes(String(v.onlineFusion))
+    || v.onlineSampling !== undefined && !['ranked_top128', 'stratified_diverse'].includes(String(v.onlineSampling))
     || v.onlineModels !== undefined && (!Array.isArray(v.onlineModels) || v.onlineModels.length < 1 || v.onlineModels.length > ONLINE_MODEL_NAMES.length
       || new Set(v.onlineModels).size !== v.onlineModels.length
       || v.onlineModels.some(name => !(ONLINE_MODEL_NAMES as readonly unknown[]).includes(name)))
-    || (v.onlineFusion !== undefined || v.onlineModels !== undefined) && (v.onlineLearning !== true || v.semanticMethod !== 'auto')) {
+    || (v.onlineFusion !== undefined || v.onlineModels !== undefined || v.onlineSampling !== undefined) && (v.onlineLearning !== true || v.semanticMethod !== 'auto')) {
     throw new RetrievalError('INVALID_REQUEST', '语义执行模式无效。')
   }
 }

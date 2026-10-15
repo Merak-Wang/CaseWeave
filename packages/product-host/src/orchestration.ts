@@ -91,6 +91,7 @@ export function projectOrchestration(state: RetrievalState, runtime?: TaskRuntim
       ...(execution ? { execution: { onlineLearning, semanticMethod, onlineFeedbackTraining, regime,
         orchestration: execution.orchestration ?? 'agent',
         ...(execution.onlineFusion ? { onlineFusion: execution.onlineFusion } : {}),
+        ...(execution.onlineSampling ? { onlineSampling: execution.onlineSampling } : {}),
         ...(execution.onlineModels ? { onlineModels: execution.onlineModels } : {}) } } : {}),
       filterActivity: activity?.operation === 'sem_filter' ? activity.status : undefined,
       plan: plan?.inputGeneration === generation ? { instruction: plan.instruction, keywords: plan.keywords,

@@ -29,6 +29,12 @@ def test_compact_binary_keeps_actual_evidence_without_second_review(make_runtime
         assert schema['required'] == ['ref', 'label', 'confidence']
         assert schema['additionalProperties'] is False
         assert '真实来源引文' not in request['messages'][0]['content']
+        prompt = request['messages'][0]['content']
+        for rule in ('逐条独立判断', '正常申请或操作咨询', '假设情形和处置建议',
+                     '已经解决不抹去', '最终结论', '降低confidence', '不能自行缩窄',
+                     '业务对象和实际事件', '异常原因和处置条件', '用户未限定根因',
+                     '用户明确要求某原因', '不能替代查询要求的问题事实'):
+            assert rule in prompt
         return decisions(payload, request)
     rt = make_runtime(handler)
     row = replace(record('canonical'), passages=(

@@ -476,17 +476,19 @@ function updateExecutionControls() {
   $('semantic-method').disabled = online || $('start').disabled
   $('online-model-controls').hidden = !online
   $('online-fusion').disabled = !online || $('start').disabled
+  $('online-sampling').disabled = !online || $('start').disabled
   for (const checkbox of $('online-models').querySelectorAll('input')) checkbox.disabled = !online || $('start').disabled
   const modelCount = $('online-models').querySelectorAll('input:checked').length
   $('online-model-count').textContent = '候选模型（' + modelCount + ' 种）'
   $('online-fusion-note').textContent = $('online-fusion').value === 'single'
     ? '兼顾相关与不相关样本的识别，训练对照后选择最佳单模型。'
-    : '兼顾相关与不相关样本的识别，训练对照后择优投票。'
+    : '训练对照后择优，至多融合三个模型；没有融合增益时使用最佳单模型。'
   $('semantic-method-note').textContent = '该方式不调用教师学习，直接输出模型判断为相关的工单，可下载 XLSX；质量未人工评测。'
 }
 $('online-learning').onchange = updateExecutionControls
 $('semantic-method').onchange = updateExecutionControls
 $('online-fusion').onchange = updateExecutionControls
+$('online-sampling').onchange = updateExecutionControls
 $('online-models').onchange = updateExecutionControls
 updateExecutionControls()
 $('query-form').onsubmit = async event => {
@@ -495,7 +497,7 @@ $('query-form').onsubmit = async event => {
   const online = $('online-learning').checked, models = [...$('online-models').querySelectorAll('input:checked')].map(input => input.value)
   if (online && models.length === 0) { error(new Error('请至少选择一种在线候选模型。')); return }
   const execution = { onlineLearning: online, semanticMethod: online ? 'auto' : $('semantic-method').value, orchestration: 'fixed',
-    ...(online ? { onlineFusion: $('online-fusion').value, onlineModels: models } : {}) }
+    ...(online ? { onlineFusion: $('online-fusion').value, onlineModels: models, onlineSampling: $('online-sampling').value } : {}) }
   $('start').disabled = true; $('online-learning').disabled = true; updateExecutionControls()
   try { const r = await command(endpoint, { kind: 'query', text: $('query').value.trim(), execution, datasetId: datasetUI.selectedId() }); await enterTask(r.taskId) }
   catch (e) { error(e) } finally { $('start').disabled = false; $('online-learning').disabled = false; updateExecutionControls() }

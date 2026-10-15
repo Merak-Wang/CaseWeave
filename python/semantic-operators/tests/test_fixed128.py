@@ -10,12 +10,36 @@ def test_default_online_options_use_fixed128_without_legacy_gate(make_runtime):
     from conftest import collect
     rt = make_runtime()
     updates, predicted, samples, begin, _, _ = port(rt)
+    original = rt.resources
+    async def resources(method, payload):
+        response = await original(method, payload)
+        if method == 'features.scan':
+            # 让高 ID 分数更高，验证默认选样跟随真实分数而非扫描顺序。
+            response['scores'] = response['ids']
+        return response
+    rt.resources = resources
     asyncio.run(collect(learned_filter(rt, 'synthetic predicate', require_source=False)))
     assert updates[-1]['teacher_unique_records'] == 128
     assert updates[-1]['training_records'] == 128
     assert updates[-1]['sampling_method'] == 'ranked_top128'
+    assert updates[-1]['training_ids'] == list(range(511, 383, -1))
+    assert set(samples) == set(range(384, 512))
     from caseweave_ops.ensemble import DEFAULT_METHODS
-    assert updates[-1]['candidate_models'] == list(DEFAULT_METHODS)
+    assert updates[-1]['candidate_models'] == [name for name in DEFAULT_METHODS
+        if not (name.startswith('text_') or name == 'joint_lr')]  # 此数值Provider没有文本。
+    assert updates[-1]['fusion'] == 'selective'
+    assert len(predicted) == 512 and rt.model.calls == 16
+
+
+def test_explicit_stratified_option_still_covers_all_rank_layers(make_runtime):
+    rt = make_runtime()
+    updates, predicted, samples, _, _, _ = port(rt)
+    run(rt, sampling_strategy='stratified_diverse')
+    chosen = updates[-1]['training_ids']
+    assert updates[-1]['sampling_method'] == 'stratified_diverse'
+    assert len(set(chosen)) == 128
+    assert all(sum(start <= i < start + 64 for i in chosen) == 16 for start in range(0, 512, 64))
+    assert set(samples) == set(chosen)
     assert len(predicted) == 512 and rt.model.calls == 16
 
 
@@ -28,7 +52,7 @@ def test_fixed_top128_all_teacher_labels_refit_and_full_scope_prediction(make_ru
         sizes.append(len(labels))
         return original(candidate, views, labels, **kwargs)
     monkeypatch.setattr(models, '_fit', fit)
-    run(rt)
+    run(rt, sampling_strategy='ranked_top128')
     assert updates[-1]['training_ids'] == list(range(128))
     assert updates[-1]['teacher_unique_records'] == 128
     assert updates[-1]['exploration_records'] == 0
@@ -49,7 +73,9 @@ def test_single_class_teacher_uses_constant_without_extra_labels(make_runtime):
     assert updates[-1]['training_records'] == 128
     assert updates[-1]['selected_model'] == 'teacher_constant'
     assert updates[-1]['quality']['basis'] == 'teacher_single_class'
-    assert len(predicted) == 512 and set(predicted.values()) == {0}
+    assert not predicted and not begin
+    assert updates[-1]['stop_reason'] == 'model_unknown'
+    assert updates[-1]['quality']['acceptance'] == 'unknown'
     assert rt.model.calls == 16
 
 

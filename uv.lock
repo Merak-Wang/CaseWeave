@@ -1691,11 +1691,6 @@ source = { editable = "python/evals" }
 dependencies = [
     { name = "httpx" },
     { name = "inspect-ai" },
-    { name = "numpy" },
-    { name = "pymongo" },
-    { name = "scikit-learn" },
-    { name = "scipy" },
-    { name = "transformers" },
 ]
 
 [package.dev-dependencies]
@@ -1707,11 +1702,6 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
     { name = "inspect-ai", specifier = "==0.3.263" },
-    { name = "numpy", specifier = ">=2.2,<3" },
-    { name = "pymongo", specifier = ">=4.10,<5" },
-    { name = "scikit-learn", specifier = ">=1.7,<2" },
-    { name = "scipy", specifier = ">=1.15,<2" },
-    { name = "transformers", specifier = "==4.57.6" },
 ]
 
 [package.metadata.requires-dev]

@@ -477,6 +477,7 @@ export class SemanticOperators {
     const metrics = await this.run(agent, this.runInput(agent, state, knowledge, 'sem_filter', predicate,
       { algorithm, scope_mode: 'full', ...(recallScope ? { recall_scope_key: recallScope } : {}), options: { ...this.filterConfig.options,
         ...(execution?.onlineFusion ? { fusion: execution.onlineFusion } : {}),
+        ...(execution?.onlineSampling ? { sampling_strategy: execution.onlineSampling } : {}),
         ...(execution?.onlineModels ? { methods: execution.onlineModels } : {}) },
         batch_size: batchSize, require_source: !unlabeled && plan.steps.some(s => s.op === 'sem_filter' && s.params.require_source === true),
         required_fields: requiredFields, replay_saved: true,

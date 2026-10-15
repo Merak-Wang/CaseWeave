@@ -22,15 +22,15 @@ GPU部署需要NVIDIA容器支持；CPU设备、精度或模型变化须相应�
 
 `pnpm operators:test` 运行 Python 验收。uv 的 `--inexact` 保留已有模型依赖，不删除环境内其他包。算子不重新下载模型权重，embedding/rerank 继续复用既有模型服务。模型供应商和凭据仍配置在 DSH；共享服务令牌用 `CASEWEAVE_OPERATORS_TOKEN` 同时配置服务和 Node，避免放进 URL。算子设计与计量定义见 [Python 算子](design/OPERATORS.md)。
 
-默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 的学习与预测范围是关键词 OR 宽召回全部命中和语义召回结果按工单身份去重后的并集，不包含未进入该召回并集的授权工单。Provider 为并集内对齐 ID 提供连续数值块；固定排序前128条由S2生成yes/no＋confidence伪标签，拟合逻辑回归、线性SVM、浅层MLP、HGB、反馈原型、关系逻辑回归、岭分类器、RBF-SVM、极端随机树、高斯朴素贝叶斯、余弦近邻，以及基于标题摘要字符TF-IDF的逻辑回归和线性SVM共13种候选，以训练内交叉验证的 Balanced Accuracy（正负类召回率等权）择优并二分类投票预测其余候选。文本模型每折仅用训练部分拟合字符2–4-gram TF-IDF，选定后用全部有效128条标签重新拟合。关闭学习时无反馈算法直接判断候选并集。最终是集合直接进入结果和XLSX，不等待人工确认，不做二次教师复核、不扩标至1024，也不设置60%发布门槛。关键词命中仍需完整枚举，语义分支按检索配置召回。索引准备时一次完成分片聚合和归一化；已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。本地模型服务提供 `/v1/ranking/feature-block`。教师与投票只输出yes/no，低confidence不弃权；传输/解析/缺特征是技术失败，不参与拟合或补成no。确认集合在 MySQL 批量保存，任务状态只持有集合与质量描述。数值实验方法与运行说明见 [算子 README](../python/semantic-operators/README.md)，不作为真实业务质量验收。
+默认过滤需要锁文件内的 NumPy、scikit-learn、SciPy。`auto/learned` 的学习与预测范围是关键词 OR 全部命中和语义召回结果按工单身份去重后的并集。默认使用 `ranked_top128`，按实际 n-gram 与 cosine 综合排序取前 128 条；并集不足 128 条时全部判断。`stratified_diverse` 分层多样选样保留为可选方式：按排序分为八层，在各层按向量距离选取多样样本，使用固定种子和工单 ID 打破平局，合计最多 128 条。默认比较原有 13 种模型加 `joint_lr` 共 14 种候选，使用 `selective` 在最佳单模型与最多三模型的择优融合之间选择，所有候选共享同一批最多 128 条教师标签，不进行全部 14 模型投票。字符词表、IDF 和联合模型的向量缩放只在训练折拟合；选定后用全部有效教师标签重拟合。`single`、`dense_lr/text_svm/joint_lr` 三模型子集仍可显式配置。选择先满足原查准率与召回率目标；不可达时，在选择集查准率至少 60% 的候选中按标准 F0.5（β=0.5）选择阈值与模型，偏重查准率并兼顾召回率，再用 Balanced Accuracy 等指标打破平局。低于 60%、单类标签或交叉验证依据不足时显示“不知道”，以未完成结束，仅交付已有确认工单，不发布整并集预测。OOF 指标只表示训练教师标签一致性，不是独立业务准确率。数值块来自既有 Provider；索引准备一次完成分片聚合与归一化，不在查询时重建向量。已有数据库执行 `node scripts/database.mjs index` 补齐 `ra_numeric_feature`，新数据使用 `pnpm db:prepare`。算子配置与入口见 [算子 README](../python/semantic-operators/README.md)。
 
-从旧版算法升级 Docker 部署时，运行 `start.cmd` 或 `bash setup.sh start`，自动构建并更新应用、算子和排名服务。旧算子镜像不认识新筛选参数时可能返回 `ProtocolError`。若旧数据库尚无数值特征，另执行 `docker compose exec app node scripts/database.mjs index --dataset=esft-development`，复用已有向量和索引检查点补齐；自定义数据集替换名称。已有安装的日常启动不自动重新导入数据或重建索引。
+从旧版算法升级 Docker 部署时，运行 `start.cmd` 或 `bash setup.sh start`，自动构建并更新应用镜像，其中包含 Python 算子与模型 API。若旧数据库尚无数值特征，另执行 `docker compose exec app node scripts/database.mjs index --dataset=esft-development`，复用已有向量和索引检查点补齐；自定义数据集替换名称。已有安装的日常启动不自动重新导入数据或重建索引。
 
 学习启动前必须完成两路召回并取得 `recallScope`。召回中的进度可以先显示，正文分页游标不决定学习范围，也不需要逐页读完正文才训练；数值特征读取直接限定在 Provider 保存的完整并集。任一通道失败时保持未完成，不用部分召回或全库数据继续训练。空并集也不会回退到全部授权工单。
 
-语言模型标注的并发与每次样本数由 `RETRIEVAL_AGENT_FILTER_CONFIG` 配置，例如 `{"batchSize":8,"options":{"concurrency":4}}` 表示每请求最多8条工单、最多4个并发请求。标注范围固定为召回并集排序前128条，批大小和并发不改变工单数，不追加命中复核或补充选择标签。原precision_target/recall_target可用于研究记录，不作为阻止结果发布的门槛。实际请求、失败、重试和用量如实计量。
+语言模型标注并发与批大小由 `RETRIEVAL_AGENT_FILTER_CONFIG` 配置，例如 `{"batchSize":8,"options":{"concurrency":4}}`。每个查询条件代次的初判与命中复核累计最多 128 次独立判断；当前流程将额度用于一轮选样，不另做独立抽验。批量请求、技术重试和 token 用量分别计量；重试复用同一工单判断身份，不重复占用独立判断额度。恢复沿用已取得标签。工作台执行设置 `onlineSampling` 支持 `ranked_top128`（默认）与 `stratified_diverse`（可选），`onlineModels` 默认原有13种模型加 `joint_lr` 共14种，`onlineFusion` 默认 `selective`（在最佳单模型与最多三模型融合之间择优），所有模型共享最多128条教师标签；`single` 和三模型子集可显式选择。
 
-恢复筛选复用相同查询、来源与特征配置下已经完成的固定128工单伪标签，只继续尚未完成的工作，不主动扩标、不更换低置信样本。单类标签使用真实常量回退并说明不能学习正负边界，不造标签。技术失败保留具体原因，不填第三类。批量判断减少重复提示，预测范围仍是完整召回并集。
+恢复筛选复用相同查询、来源、特征与选样配置下已经完成的标签，只继续未完成工作。单类样本不能证明正负边界，最终显示“不知道”并保留已确认结果。技术失败保留原因，不补负例或伪造标签。
 
 完整容器部署适合单机试用；源码入口供开发、集成与排障使用。产品概览见 [README](../README.md)，测试范围见 [评测与验收](EVALUATION_STRATEGY.md)。
 
@@ -46,7 +46,7 @@ GPU部署需要NVIDIA容器支持；CPU设备、精度或模型变化须相应�
 
 Windows 的 [Docker 依赖准备](../scripts/docker-windows.ps1) 在 Docker 未就绪时先检查 WSL：缺失时提权执行 `wsl --install --no-distribution`，低于 2.1.5 时执行 `wsl --update`，无需安装 Ubuntu。随后在 Docker 命令缺失时下载官方安装器，使用当前用户模式安装并添加当前进程所需的 CLI 路径；引擎通过官方 `docker desktop start --timeout 120` 启动。已有可用 Linux 引擎直接复用。只读检查及 stop/status/logs 不安装软件、不自动启动 Docker。下载、安装或启动失败时停止后续准备；若要求系统重启则提示重新运行同一入口，不强制重启。首次许可与系统授权由用户在系统界面完成。安装选项见 [Docker 官方 Windows 安装说明](https://docs.docker.com/desktop/setup/install/windows-install/) 和 [Microsoft WSL 命令说明](https://learn.microsoft.com/en-us/windows/wsl/basic-commands)。
 
-运行依赖分层安装：应用镜像安装 Node.js、pnpm、固定 DSH 及 workspace 依赖；算子和模型镜像安装 Python、uv 及锁文件中的 Python 依赖。均由 Dockerfile 自动下载和安装，宿主不需要 Node、pnpm、Python 或 uv。模型权重和示例数据只在首次准备或显式 install 时下载校验。
+运行依赖分层安装：模型依赖镜像安装 Python、uv 和模型运行依赖；应用镜像复用模型依赖，并安装 Node.js、pnpm、固定 DSH、workspace 与 Python 算子依赖。均由 Dockerfile 自动下载和安装，宿主不需要 Node、pnpm、Python 或 uv。模型权重和示例数据只在首次准备或显式 install 时下载校验。
 
 没有 `.env` 时从 [.env.example](../.env.example) 创建；首次选择 CPU/GPU，再填写 Provider、模型、API 地址和密钥。只补充缺失项，已有值继续复用。主模型的密钥环境变量名自动设为 `RETRIEVAL_AGENT_MAIN_MODEL_API_KEY`，与应用 Compose 的实际转发字段一致。密钥隐藏输入，配置不作为 shell 脚本执行；特殊字符按 [Docker dotenv 规则](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax) 保存，由 Compose 解析。宿主环境变量仍按 Compose 规则优先于 `.env`，修改配置文件后需注意已有环境变量的覆盖。
 
@@ -119,7 +119,7 @@ MySQL 数据文件位于 mysql-data 卷，Milvus/etcd 位于 milvus-data 卷。�
 
 `.env.example` 的 `COMPOSE_FILE` 合并数据库、模型和应用配置，固定 `;` 分隔符，跨 Windows/Linux 使用同一文件；NVIDIA GPU 追加 `config/app/compose.gpu.yml`。`app-prepare` 与 `app` 共用具名 data/state/wiki/output 卷，默认模型仅 embedding；可选 reranker 先以 `RETRIEVAL_AGENT_RERANKER_ENABLED=true` 运行 model-prepare 下载，再启动同配置的app内模型API。CPU 双模型比单 embedding 消耗更多内存，部署时应按所选模型测量常驻内存。
 
-镜像升级前给现有 app/model 镜像添加明确备份标签，记录 `docker image inspect` 的 ID；对 MySQL 做一致性备份，并保存 Milvus、etcd、app-state、app-data、app-wiki 和模型/缓存卷。包含凭据的备份只保留在私有目录。更新源码后运行 `start.cmd` 或 `bash setup.sh start`，自动构建应用、算子和模型服务，保留原 Compose 项目名和卷。回退时在 `.env` 指定 `RETRIEVAL_AGENT_APP_IMAGE` / `RETRIEVAL_AGENT_MODEL_IMAGE` 为已保存标签，再通过 `start --no-build` 启动。镜像回退仅适用于 schema 仍兼容的版本；数据库不兼容升级必须使用匹配的一致性备份恢复。
+镜像升级前给现有 app/model 镜像添加明确备份标签，记录 `docker image inspect` 的 ID；对 MySQL 做一致性备份，并保存 Milvus、etcd、app-state、app-data、app-wiki 和模型/缓存卷。包含凭据的备份只保留在私有目录。更新源码后运行 `start.cmd` 或 `bash setup.sh start`，自动构建模型依赖与应用镜像，保留原 Compose 项目名和卷。回退时在 `.env` 指定 `RETRIEVAL_AGENT_APP_IMAGE` / `RETRIEVAL_AGENT_MODEL_IMAGE` 为已保存标签，再通过 `start --no-build` 启动。镜像回退仅适用于 schema 仍兼容的版本；数据库不兼容升级必须使用匹配的一致性备份恢复。
 
 首次完整安装需要完成数据和索引准备。`No published dataset` 表示尚无可服务的数据发布，应先运行 `database.mjs prepare`。准备脚本默认保留已有业务卷。
 
@@ -129,9 +129,7 @@ MySQL 数据文件位于 mysql-data 卷，Milvus/etcd 位于 milvus-data 卷。�
 
 Wiki 文件修改使用 `node scripts/wiki-store.mjs checkout --id 条目ID --out 已存在目录/修改.json`，编辑正文后执行 `publish --delta 文件`；完整参数见 [调用契约](../wiki/INTEGRATION.md)。数据库 profile 默认启用学习，使用当前 DSH 主模型分别提炼与独立核验；确认下载不等待学习完成。`RETRIEVAL_AGENT_WIKI_LEARNING=0` 冻结学习，适合独立对照；JSONL Session profile 不运行持久学习。学习记录在 MySQL `ra_wiki_learning`，完整请求和发布来源映射保存在私有边界，不出现在专家条目。重新构建后重启 Host 才会加载这些入口。
 
-需要运行中的 Docker Desktop、已安装的 workspace 依赖和本地模型。容器配置见 [compose.yml](../config/database/compose.yml)：MySQL 8.0.46、Milvus 2.6.14、etcd 3.5.23，镜像已按实际拉取的 digest 固定。仅绑定回环地址：MySQL `13306`、Milvus `19530`、健康检查 `9091`；etcd 不发布宿主端口。MySQL 和 Milvus 使用原命名卷，etcd 继续读取 `milvus-data` 内原 `/var/lib/milvus/etcd`，配置路径保留为 `embedEtcd.yaml`。Milvus 关闭内嵌 etcd，依赖独立 etcd 健康后启动，避免恢复旧成员时选主未稳导致 panic。
-
-从旧内嵌配置升级时，先执行 `docker compose -f config/database/compose.yml stop milvus`，再 `pnpm db:up`；保持原卷和成员数据，不使用 `down -v` 或重新导入索引。`model:container up --with-database` 检测到旧内嵌容器会明确拒绝并提示此升级步骤，避免两个 etcd 进程同时打开同一数据目录。已经升级的服务继续沿原 `--no-recreate` 行为启动。
+需要运行中的 Docker Desktop、已安装的 workspace 依赖和本地模型。容器配置见 [compose.yml](../config/database/compose.yml)：MySQL 8.0 与 Milvus 2.6.14 的镜像固定到 digest。数据库端口仅绑定回环地址：MySQL `13306`、Milvus `19530`、健康检查 `9091`。Milvus 使用内嵌 etcd，成员数据位于同一 `milvus-data` 卷的 `/var/lib/milvus/etcd`，配置来自 `embedEtcd.yaml`；启动复用既有命名卷。
 
 在仓库根执行以下步骤。已有数据和模型时无需重新下载：
 
@@ -216,15 +214,7 @@ Wiki 定向检查：`pnpm exec vitest run packages/agent-plugin/src/wiki-publish
 
 ## 工作台、报告与持久下载验收
 
-仅调整工作台时，可通过本地预览使用同一构建的 HTML/脚本，并转发到已经运行的任务 Host。先在项目根目录执行：
-
-```powershell
-pnpm --filter @retrieval-agent/product-host build
-$env:WORKBENCH_UPSTREAM='http://127.0.0.1:3086'
-node scripts/preview-workbench.mjs
-```
-
-打开 `http://127.0.0.1:3088/retrieval`。端口可通过 `WORKBENCH_PREVIEW_PORT` 设置。预览仅监听回环地址、仅转发 `/api/retrieval-agent/`，保留浏览器的 Host/Origin 供正式服务核验；任务、证据和下载仍来自原 Host。源样式修改后重新构建并重启预览进程，再刷新浏览器。此入口不替代正式服务的构建/部署，也不包含业务模拟数据。
+工作台修改后运行 `start.cmd` 或 `bash setup.sh start` 更新应用，再通过当前部署的 `/retrieval` 检查页面、任务与下载。源码开发也可使用上方数据库工作台入口，运行相同 Host 与 API。
 
 专家与知识界面专项：`pnpm exec vitest run packages/product-host/src/orchestration.spec.ts packages/agent-plugin/src/knowledge-view.spec.ts packages/product-host/src/workbench-content.spec.ts`。设置 `RETRIEVAL_AGENT_DATABASE_TEST=1` 后运行 `pnpm exec vitest run packages/agent-plugin/src/durable-service.spec.ts -t 'A9 UI|resumes an independent expert' --maxWorkers=1`，经过真实 MySQL、公开 HTTP 与安装版 DSH 验证并行分支、实际请求知识引用、固定版本正文、撤权和恢复；使用脚本模型，不证明业务质量。
 
@@ -312,7 +302,7 @@ CPU/GPU由本地设备配置及app GPU Compose覆盖选择；GPU覆盖路径为 
 | `pnpm exec vitest run packages/agent-plugin/src/service.spec.ts` | 运行指定相邻测试；路径可换成受影响的现有 spec |
 | `pnpm test` | 运行默认行为/边界回归；不加载全量语料做假排名，实库专项需显式启用 |
 | `pnpm model:test` | 通过 uv 运行 Python model-service 测试；环境未就绪时可能同步依赖 |
-| `pnpm operators:test` | 三个核心算子、11候选模型/召回并集二分类预测、排序前128工单固定S2伪标签、实际请求/重试计量、自动是集合交付、技术失败不fit/缺特征、数值等价；CI 使用同一入口 |
+| `pnpm operators:test` | 三个核心算子、默认14候选/最多三模型择优融合与召回并集二分类预测、排序前128及可选分层多样选样与128独立判断、实际请求/重试计量、自动是集合交付、技术失败不fit/缺特征、数值等价；CI 使用同一入口 |
 | `pnpm eval:self-test` | Python 评测数据与 scorer 自检，不执行真实 Agent 任务 |
 
 跨包导入可能通过 package exports 读取 `lib/`。跨包源码变更后先显式 `pnpm build` 一次，再运行 `pnpm typecheck:code` 和所选行为检查；也可直接用 `pnpm typecheck` 完成构建与类型检查。单独 `--noEmit` 不能证明已有构建产物与源码一致。依赖开发语料的测试和运行入口要求事先显式准备数据，纯代码检查无需此步骤。

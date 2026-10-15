@@ -18,6 +18,7 @@ from sklearn.svm import LinearSVC, SVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.utils.class_weight import compute_sample_weight
+from scipy.sparse import csr_matrix, hstack
 from threadpoolctl import threadpool_limits
 
 
@@ -40,6 +41,8 @@ class Fitted:
     bias: float = 0.
 
     def score(self, X):
+        if self.view == 'joint' and isinstance(X, dict):
+            X = joint_view(X)
         if self.weight is not None:
             return np.asarray(X @ self.weight + self.bias).ravel()
         Z = self.scaler.transform(X) if self.scaler is not None else X
@@ -61,6 +64,30 @@ class TextLinearEstimator:
 
     def decision_function(self, texts):
         return self.model.decision_function(self.vectorizer.transform(texts))
+
+
+def joint_view(views):
+    result = np.empty(len(views['dense']), dtype=object)
+    result[:] = list(zip(views['dense'], views['text']))
+    return result
+
+
+class JointLinearEstimator:
+    """训练折内拟合缩放和词表；拼接同量级向量与字符特征。"""
+    def fit(self, rows, y, sample_weight=None):
+        dense, texts = zip(*rows)
+        self.scaler = StandardScaler().fit(dense)
+        self.vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(2,4), sublinear_tf=True, max_features=20000)
+        matrix = hstack([csr_matrix(self.scaler.transform(dense)/np.sqrt(len(dense[0]))),
+                         self.vectorizer.fit_transform(texts)]).tocsr()
+        self.model = LogisticRegression(C=1., max_iter=400).fit(matrix, y, sample_weight=sample_weight)
+        return self
+
+    def decision_function(self, rows):
+        dense, texts = zip(*rows)
+        matrix = hstack([csr_matrix(self.scaler.transform(dense)/np.sqrt(len(dense[0]))),
+                         self.vectorizer.transform(texts)]).tocsr()
+        return self.model.decision_function(matrix)
 
 
 def model_bank(*, sparse=False, seed=0, methods=None):
@@ -87,6 +114,7 @@ def model_bank(*, sparse=False, seed=0, methods=None):
         Candidate("dense_knn", "dense", KNeighborsClassifier(n_neighbors=5, metric="cosine", weights="distance", algorithm="brute")),
         Candidate("text_lr", "text", TextLinearEstimator(seed=seed)),
         Candidate("text_svm", "text", TextLinearEstimator(svm=True, seed=seed)),
+        Candidate("joint_lr", "joint", JointLinearEstimator()),
     ])
     if methods is None:
         return bank
@@ -194,7 +222,8 @@ def _fit(candidate, views, y, *, groups=None):
     if isinstance(candidate.estimator, RelationLogistic) and groups is None:
         raise ValueError("Relation logistic requires trusted group identities")
     valid = y >= 0  # Undetermined is never relabeled as negative.
-    X, labels = views[candidate.view][valid], y[valid]
+    X = joint_view(views) if candidate.view == 'joint' and 'joint' not in views else views[candidate.view]
+    X, labels = X[valid], y[valid]
     if np.unique(labels).size != 2:
         raise ValueError("Need determinate positive AND negative training examples")
     started = perf_counter()
@@ -244,12 +273,26 @@ def operating_point(y, scores, *, precision_target=.95, recall_target=.95, weigh
     specificity = tn / negative_weight
     balanced_accuracy = (r + specificity) / 2
     f1 = np.divide(2*p*r, p+r, out=np.zeros_like(p), where=p+r > 0)
+    f0_5 = np.divide(1.25*p*r, .25*p+r, out=np.zeros_like(p), where=.25*p+r > 0)
     coverage = float(valid.sum()/max(1, known.sum()))
     feasible = (p >= precision_target) & (r >= recall_target) & (coverage == 1.)
     # 每个有限分数形成阈值；先兼顾正负类，再用查准率和召回率打破平局。
-    idx = int(np.lexsort((r, p, balanced_accuracy))[-1])
+    eligible = np.flatnonzero(feasible)
+    if len(eligible):
+        idx = int(eligible[np.lexsort((r[eligible], p[eligible], balanced_accuracy[eligible]))[-1]])
+        reason = 'precision_recall_target'
+    else:
+        eligible = np.flatnonzero(p >= .60)
+        if len(eligible):
+            # 查准率达到最低依据后，用 F0.5 兼顾召回；同分先保查准。
+            idx = int(eligible[np.lexsort((balanced_accuracy[eligible], r[eligible], p[eligible], f0_5[eligible]))[-1]])
+            reason = 'precision_floor_max_f0_5'
+        else:
+            idx = int(np.lexsort((r, p, balanced_accuracy))[-1])
+            reason = 'insufficient_precision'
     return {"threshold": float(ss[ends[idx]]), "precision": float(p[idx]),
-            "recall": float(r[idx]), "f1": float(f1[idx]), "feasible_on_selection": bool(feasible[idx]),
+            "threshold_selection": reason,
+            "recall": float(r[idx]), "f1": float(f1[idx]), "f0_5": float(f0_5[idx]), "feasible_on_selection": bool(feasible[idx]),
             "specificity": float(specificity[idx]), "balanced_accuracy": float(balanced_accuracy[idx]),
             "selection_unknown": int(np.count_nonzero(~valid)), "coverage": coverage,
             "nonfinite_scores": int(np.count_nonzero(known & ~np.isfinite(scores)))}

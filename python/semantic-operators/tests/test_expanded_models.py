@@ -6,7 +6,7 @@ from caseweave_ops.models import model_bank
 
 
 @pytest.mark.parametrize("positives", [64, 6])
-def test_thirteen_candidates_crossfit_with_dense_and_text_small_samples(positives):
+def test_fourteen_default_candidates_crossfit_with_dense_and_text_small_samples(positives):
     rng = np.random.default_rng(19)
     x = rng.normal(size=(128, 1024)).astype(np.float32)
     y = np.zeros(128, dtype=np.int8); y[:positives] = 1
@@ -14,17 +14,18 @@ def test_thirteen_candidates_crossfit_with_dense_and_text_small_samples(positive
     groups = np.array([str(i) for i in range(128)], dtype=object)
     views = {'dense': x, 'text': np.array(['权限异常处理' if label else '普通业务办理' for label in y], dtype=object)}
     selected, manifest = select_group_crossfit(views, y, groups,
-        methods=list(DEFAULT_METHODS), fusion='selective', budget_seconds=60)
-    assert len(manifest['models']) == 13
+        fusion='selective', budget_seconds=60)
+    assert len(manifest['models']) == 14
+    assert manifest['methods'] == list(DEFAULT_METHODS)
     assert not manifest['candidate_failures']
-    assert manifest['fit_count'] == 52
+    assert manifest['fit_count'] == 56
     assert 1 <= len(manifest['members']) <= 3
     assert np.isfinite(selected.score_views(views)).all()
 
 
 def test_no_probability_calibration_wrapper_or_svm_probability_fit():
     bank = model_bank(methods=list(DEFAULT_METHODS))
-    assert len(bank) == 13
+    assert len(bank) == 14
     for candidate in bank:
         assert type(candidate.estimator).__name__ != 'CalibratedClassifierCV'
         if candidate.name == 'dense_rbf_svm':

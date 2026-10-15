@@ -161,9 +161,7 @@ def parse_fixed_query(value: dict[str, Any], query: str, context: dict[str, Any]
                 "inputs": ["$source"], "instruction": instruction,
                 "params": {"require_source": False, "required_fields": []}}])
     normalized = validate_plan(plan)
-    # 同一 OR 中被复合短语覆盖的短词会扩大噪声；只归并模型已提交的词，不生成新条件。
-    terms = normalized["keywords"]
-    normalized["keywords"] = [term for term in terms if not any(term != phrase and term in phrase for phrase in terms)]
+    # 短词可命中复合短语未覆盖的字段表达；保留规划结果，只沿用前面的去重与空白清理。
     if unsupported:
         normalized["unsupported_constraints"] = deepcopy(unsupported)
     return normalized
@@ -173,13 +171,16 @@ async def plan_fixed_query(runtime: Runtime, query: str, confirmed_context: str,
     if canonical_fixed_context(context) is None:
         return await _plan_fixed_legacy_query(runtime, query, confirmed_context, context)
     schema = fixed_custom_query_schema(context)
-    instruction = ("一次生成工单检索计划：keywords用于跨字段字面匹配的OR召回，优先选择承载完整业务意图的中文复合短语和针对性同义称谓。"
-        "复合意图已明确时，不再把其对象、状态拆成泛化单词分别OR；例如账号权限异常可用账号权限、权限异常，"
-        "按实际意图选择工号权限、权限不足、账号冻结等表达，不另列账号、权限、异常；宽带欠费停机可用宽带欠费、欠费停机，不另列宽带、欠费、停机。"
-        "独立且有辨识度的产品、编号或术语可保留，如5G；同义表达用于发现候选，不能改写或限制用户业务判据。"
+    instruction = ("一次生成工单检索计划：keywords用于跨字段字面匹配的OR宽召回。"
+        "覆盖业务对象的常用别名、身份称谓、业务术语及实际操作受阻的具体症状，选择有独立发现价值的短词与复合短语；"
+        "不能仅因短词包含在复合短语中就删除，也不要只反复重述原句而遗漏实际工单称谓。"
+        "对象、产品、编号或术语可独立保留；症状用具体表达，避免泛化状态词扩大无关候选。"
+        "同义表达只用于发现候选，不能改写或限制用户业务判据。"
         "不要把问题、异常、失败、相关、工单等无辨识度泛词独立作为OR关键词。"
-        "是否满足完整业务要求由instruction判断。retrieval_expressions是1到3条简洁主题或故障表达，去掉帮我找、相关工单等请求套话，保留完整业务含义；宿主另保留原句向量检索。"
-        "instruction完整保留用户业务对象、状态、纳入与排除条件，不新增硬条件。"
+        "是否满足完整业务要求由instruction判断。retrieval_expressions是1到3条互补的简洁主题或故障表达，"
+        "让对象或身份称谓与实际操作、具体症状互补，分别发现不同表述的工单，不用多条近义句重复同一表达；"
+        "去掉帮我找、相关工单等请求套话，保留完整业务含义；宿主另保留原句向量检索。"
+        "instruction完整保留用户业务对象、状态、纳入与排除条件，不新增硬条件；用户未限定异常根因时，不额外要求确诊某个单一根因。"
         "工单判断只读取title和summary。structured_conditions仅用于用户明确要求的结构化字段过滤，"
         "必须选search_fields中给出的字段及支持运算，source_text逐字引用query；语义要求放instruction，不能把title/summary当结构化字段，无则[]。"
         "knowledge_routes用[]。只调用submit_result一次。")

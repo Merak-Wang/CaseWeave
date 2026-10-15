@@ -15,7 +15,7 @@ export function workflowSteps(snapshot, reportStatus = 'pending') {
     return [
       { key: 'plan', label: '意图理解', view: 'process', target: 'plan-heading', state: planned ? 'done' : unavailable ? 'failed' : 'active', note: '一次模型调用产生检索计划' },
       { key: 'recall', label: '检索与排序', view: 'process', target: 'recall-channels', state: recalled ? 'done' : unavailable ? 'failed' : planned ? 'active' : 'upcoming', note: '关键词 OR 与向量并集排序' },
-      { key: 'judge', label: frozen ? '无反馈判断' : '在线学习', view: 'process', target: 'learning-progress', state: unavailable ? 'failed' : filtered ? 'done' : recalled ? 'active' : 'upcoming', note: frozen ? '所选算法直接判断' : '排序前 128 条伪标签训练与投票' },
+      { key: 'judge', label: frozen ? '无反馈判断' : '在线学习', view: 'process', target: 'learning-progress', state: unavailable ? 'failed' : filtered ? 'done' : recalled ? 'active' : 'upcoming', note: frozen ? '所选算法直接判断' : '并集内最多 128 次判断与模型选择' },
       { key: 'result', label: '返回结果', view: 'results', state: unavailable ? 'failed' : filtered ? 'done' : 'upcoming', note: '模型是集合与 XLSX' },
     ]
   }

@@ -136,7 +136,8 @@ export type TicketFastQueryPlan =
  * before Provider access so a retrieval can explain exactly which task,
  * language, domain, entities, constraints, and result-set policy it used.
  */
-export const ONLINE_MODEL_NAMES = ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic', 'dense_ridge', 'dense_rbf_svm', 'dense_extra_trees', 'dense_gaussian_nb', 'dense_knn', 'text_lr', 'text_svm'] as const
+export const ONLINE_MODEL_NAMES = ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic', 'dense_ridge', 'dense_rbf_svm', 'dense_extra_trees', 'dense_gaussian_nb', 'dense_knn', 'text_lr', 'text_svm', 'joint_lr'] as const
+export const DEFAULT_ONLINE_MODELS = ONLINE_MODEL_NAMES
 export type OnlineModelName = typeof ONLINE_MODEL_NAMES[number]
 
 export interface SemanticExecutionOptions {
@@ -146,6 +147,7 @@ export interface SemanticExecutionOptions {
   /** Select a single model or voting from the chosen candidate bank. */
   readonly onlineFusion?: 'single' | 'selective'
   readonly onlineModels?: readonly OnlineModelName[]
+  readonly onlineSampling?: 'ranked_top128' | 'stratified_diverse'
   readonly semanticMethod: 'auto' | 'dual_description_margin' | 'name_gmm' | 'kmeans'
 }
 export interface TicketQueryContract {

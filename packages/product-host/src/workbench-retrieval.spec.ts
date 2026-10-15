@@ -37,7 +37,7 @@ describe('retrieval workbench presentation', () => {
     expect(retrievalSummary({ orchestration: { retrieval: { learning: { status: 'quality_fallback' } } } }).status).toBe('模型选择完成')
     const unknown = retrievalSummary({ orchestration: { retrieval: { learning: { status: 'model_unknown' } } } })
     expect(unknown.accepted).toBe(false)
-    expect(unknown.status).toBe('未完成：质量未达标')
+    expect(unknown.status).toBe('不知道：选择依据不足或查准率未达60%')
   })
   it('shows selection metrics without population bounds or a pending audit stage', () => {
     const quality = { basis: 'selection', precision: .903, recall: .915 }
@@ -106,6 +106,8 @@ describe('retrieval workbench presentation', () => {
     expect(executionDescription({ onlineLearning: true, semanticMethod: 'auto' })).toBe('本任务：在线学习（模型伪标签）。')
     expect(executionDescription({ onlineLearning: true, semanticMethod: 'auto', onlineFusion: 'selective', onlineModels: ['dense_lr', 'feedback_margin'] })).toBe('本任务：在线学习（模型伪标签） · 二分类多数投票 · 2 个候选模型。')
     expect(executionDescription({ onlineLearning: true, semanticMethod: 'auto', onlineFusion: 'single' })).toBe('本任务：在线学习（模型伪标签） · 最佳单模型。')
+    expect(executionDescription({ onlineLearning: true, semanticMethod: 'auto', onlineFusion: 'single', onlineSampling: 'stratified_diverse', onlineModels: ['dense_lr', 'text_svm', 'joint_lr'] })).toBe('本任务：在线学习（模型伪标签） · 最佳单模型 · 分层多样性 · 3 个候选模型。')
+    expect(executionDescription({ onlineLearning: true, semanticMethod: 'auto', onlineSampling: 'ranked_top128' })).toBe('本任务：在线学习（模型伪标签） · 优先高排名。')
   })
   it.each([undefined, null, NaN, Infinity, -Infinity, -.1, 1.1])('never presents invalid quality %s as a percentage', value => {
     expect(qualityValue(value)).toBe('未测量')

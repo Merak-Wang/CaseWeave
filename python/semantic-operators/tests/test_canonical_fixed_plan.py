@@ -41,6 +41,10 @@ def test_original_generic_intent_one_real_runtime_model_invocation_and_cache(mak
     def answer(payload, request):
         requests.append(request)
         assert payload == {'query': query, 'search_fields': []}
+        prompt = request['messages'][0]['content'] + request['messages'][1]['content']
+        for rule in ('身份称谓', '实际操作受阻的具体症状', '实际操作、具体症状互补',
+                     '不额外要求确诊某个单一根因'):
+            assert rule in prompt
         return interpretation()
     rt = make_runtime(answer)
     serialized = json.dumps(context(query), ensure_ascii=False)
@@ -48,7 +52,7 @@ def test_original_generic_intent_one_real_runtime_model_invocation_and_cache(mak
     second = asyncio.run(plan_query(rt, query, serialized))
     assert rt.model.calls == 1 and len(requests) == 1
     assert first['manifest_id'] == second['manifest_id']
-    assert len(first['keywords']) == 15 and '告警' not in first['keywords']
+    assert first['keywords'] == interpretation()['keywords']
     assert first['steps'][0]['params'] == {'require_source': False, 'required_fields': []}
     assert 'unsupported_constraints' not in first
     schema = requests[0]['schema']
@@ -69,11 +73,11 @@ def test_parser_preserves_specific_keywords_and_does_not_mutate_response():
     value = interpretation()
     original = copy.deepcopy(value)
     plan = parse_fixed_query(value, '设备故障', context())
-    assert plan['keywords'] == [term for term in original['keywords'] if term != '告警']
+    assert plan['keywords'] == original['keywords']
     assert value == original
 
 
-def test_compound_intent_removes_only_submitted_components_and_preserves_specific_product(make_runtime):
+def test_compound_intent_keeps_submitted_discovery_terms_and_specific_product(make_runtime):
     query = '帮我找宽带欠费停机和5G业务相关工单'
     value = {'keywords': ['宽带', '欠费', '停机', '宽带欠费', '欠费停机', '5G'],
              'instruction': '查找宽带欠费停机和5G业务相关工单。',
@@ -81,13 +85,14 @@ def test_compound_intent_removes_only_submitted_components_and_preserves_specifi
     def answer(payload, request):
         assert payload['query'] == query
         prompt = json.dumps(request['messages'], ensure_ascii=False)
-        assert '优先选择承载完整业务意图' in prompt
+        assert '业务对象的常用别名' in prompt
+        assert '不能仅因短词包含在复合短语中就删除' in prompt
         assert '去掉帮我找、相关工单' in prompt
         return value
     runtime = make_runtime(answer)
     result = asyncio.run(plan_query(runtime, query, json.dumps(context(query), ensure_ascii=False)))
     assert runtime.model.calls == 1
-    assert result['keywords'] == ['宽带欠费', '欠费停机', '5G']
+    assert result['keywords'] == value['keywords']
     assert result['instruction'] == value['instruction']
     assert result['retrieval_expressions'] == value['retrieval_expressions']
     assert value['keywords'] == ['宽带', '欠费', '停机', '宽带欠费', '欠费停机', '5G']

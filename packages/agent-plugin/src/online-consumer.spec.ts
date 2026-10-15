@@ -124,7 +124,7 @@ class TraceBridge extends PythonOperatorBridge {
     return Number(BigInt('0x' + createHash('sha256').update('0:' + identity).digest('hex').slice(0, 16))) / 2 ** 64 < .3
   }
 }
-async function fixture(execution: SemanticExecutionOptions, flipFinalTeacher = false, complementary = false) {
+async function fixture(execution: SemanticExecutionOptions, flipFinalTeacher = false, complementary = false, singleClass = false) {
   const ctx = new Context(), root = process.cwd(), calls = { intent: 0, teacher: 0, main: 0, rank: 0 }
   const bridge = new TraceBridge(root, resolve(tmpdir(), 'caseweave-online-' + randomUUID() + '.sqlite'), resolve(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python'))
   const teacherLabels = new Map<number, number>(), vectors = complementary ? complementaryVectors(poolCount + outsideCount) : undefined
@@ -189,7 +189,7 @@ async function fixture(execution: SemanticExecutionOptions, flipFinalTeacher = f
             expect(row.ref).toMatch(/^@r\d+$/)
             const id = bridge.refs.get(row.record_ref ?? row.ref)!
             expect(id).toBeDefined(); expect(id).toBeLessThan(poolCount)
-            const label = id % 2 ^ Number(flipFinalTeacher && bridge.finalRole(id))
+            const label = singleClass ? 1 : id % 2 ^ Number(flipFinalTeacher && bridge.finalRole(id))
             teacherLabels.set(id, label)
             // Fixed canonical retrieval cites the visible summary; the generic query does not demand a missing raw source field.
             const passage = row.passages.find(p => p.field === 'summary')!
@@ -235,7 +235,8 @@ it('routes the complete selective model bank through real Python fits, keeps the
     expect(learning.exploration_records).toBe(0)
     expect(new Set(learning.training_ids as number[]).size).toBe(128)
     expect(run.bridge.groups.size).toBe(poolCount); expect(run.bridge.featureSeedRows).toBe(0)
-    expect([...run.teacherLabels.keys()].sort((a,b)=>a-b)).toEqual(run.bridge.rankedScanIds.slice(0,128).sort((a,b)=>a-b))
+    expect(new Set(run.teacherLabels.keys())).toEqual(new Set(learning.training_ids as number[]))
+    expect(learning.sampling_method).toBe('ranked_top128')
     expect(run.bridge.sourceRows).toBe(128); expect(run.bridge.featureScanRows).toBe(poolCount * 2)
     expect(run.bridge.predictions.size).toBe(poolCount)
     const learned = learnedResult(state)!
@@ -268,18 +269,41 @@ it('publishes binary predictions with teacher OOF metrics and no holdout gate', 
   } finally { await run.close() }
 }, 90000)
 
-it('actually fits LR/prototype members and retains the OOF best binary model when two voters provide no majority gain', async () => {
+it('ends incomplete with teacher confirmations only when all 128 judgments have one class', async () => {
+  const run = await fixture({ onlineLearning: true, semanticMethod: 'auto', orchestration: 'fixed' }, false, false, true)
+  try {
+    await run.operators.searchAndFilter(run.agent)
+    const state = run.app.current(run.agent), learning = state.budget.operatorUsage!.learning as Record<string, unknown>
+    expect(learning).toMatchObject({ stop_reason: 'model_unknown', teacher_unique_records: 128,
+      quality: { basis: 'teacher_single_class', acceptance: 'unknown' } })
+    expect(state.phase).toBe('stopped')
+    expect(state.termination).toBe('partial')
+    expect(confirmedCount(state)).toBe(128)
+    expect(learnedResult(state)).toBeUndefined()
+    expect(run.bridge.predictions.size).toBe(0)
+    expect(run.bridge.begins).toHaveLength(0)
+    expect(run.bridge.finishes).toHaveLength(0)
+    // 再读同一任务不触发新的教师判断，也不把未判定候选补进确认结果。
+    const requests = run.calls.teacher
+    await run.operators.searchAndFilter(run.agent)
+    expect(run.calls.teacher).toBe(requests)
+    expect(confirmedCount(run.app.current(run.agent))).toBe(128)
+  } finally { await run.close() }
+}, 90000)
+
+it('actually fits both members and retains the measured best single model when two voters provide no majority gain', async () => {
   const methods = ['dense_lr', 'feedback_margin'] as const
   const run = await fixture({ onlineLearning: true, semanticMethod: 'auto', orchestration: 'fixed', onlineFusion: 'selective', onlineModels: methods }, false, true)
   try {
     await run.operators.searchAndFilter(run.agent)
     const state = run.app.current(run.agent), learning = state.budget.operatorUsage!.learning as Record<string, unknown>
     expect(run.bridge.operations[1]!.params).toMatchObject({ scope_mode: 'full', require_source: false, required_fields: [], options: { methods, fusion: 'selective' } })
-    expect(learning).toMatchObject({ candidate_models: methods, selected_ensemble: false, selected_members: ['dense_lr'], selection_reason: 'no_oof_diversity_gain',
+    expect(learning).toMatchObject({ candidate_models: methods, selected_ensemble: false, selection_reason: 'no_oof_diversity_gain',
       complete_scope_coverage: true, scope_records: poolCount, predicted_records: poolCount, stop_reason: 'quality_fallback' })
     const baseline = learning.single_baseline as { name: string; precision: number; f1: number }
     const quality = learning.quality as { f1: number; precision: number; coverage: number }
-    expect(baseline.name).toBe('dense_lr')
+    expect(methods).toContain(baseline.name)
+    expect(learning.selected_members).toEqual([baseline.name])
     expect(quality).toMatchObject({ basis: 'training_group_crossfit', reference_basis: 'teacher', business_accuracy: 'not_measured' })
     expect(quality.f1).toBe(baseline.f1); expect(quality.precision).toBe(baseline.precision)
     expect(quality.coverage).toBe(1)

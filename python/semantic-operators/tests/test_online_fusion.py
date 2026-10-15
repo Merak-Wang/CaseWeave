@@ -33,16 +33,17 @@ def test_nonfinite_operating_point_is_unknown_and_not_certified():
             models.operating_point([1, 0], [2., 1.], weights=weights)
 
 
-def test_imbalanced_teacher_threshold_avoids_high_f1_all_yes():
+def test_fallback_balances_precision_and_recall_without_claiming_target():
     from caseweave_ops.ensemble import binary_report
     y = np.r_[np.ones(98), np.zeros(30)].astype(int)
     scores = np.r_[np.full(75, .9), np.full(23, .1), np.full(4, .9), np.full(26, .1)]
     all_yes = binary_report(y, np.ones(128))
     point = models.operating_point(y, scores)
-    assert all_yes['f1'] > point['f1']
+    assert point['recall'] == pytest.approx(75/98) and point['precision'] == pytest.approx(75/79)
     assert all_yes['balanced_accuracy'] == .5
-    assert point['balanced_accuracy'] == pytest.approx((75/98 + 26/30)/2)
-    assert point['threshold'] == .9 and point['specificity'] == pytest.approx(26/30)
+    assert point['balanced_accuracy'] > .5
+    assert point['f0_5'] > 1.25*all_yes['precision']/(.25*all_yes['precision']+1)
+    assert point['threshold_selection'] == 'precision_floor_max_f0_5'
     assert not point['feasible_on_selection']
     assert binary_report([1, 1], [1, 1])['balanced_accuracy'] is None
 
@@ -64,8 +65,31 @@ def test_same_bias_voters_cannot_replace_more_balanced_single(monkeypatch):
     selected, manifest = select_group_crossfit({'dense': x}, y, np.arange(128).astype(str),
         methods=['dense_lr', 'feedback_margin', 'dense_svm'], fusion='selective')
     assert selected.name == 'dense_lr' and not manifest['selected_ensemble']
-    assert manifest['threshold_metrics_oof']['balanced_accuracy'] > .8
-    assert manifest['selection_metric'] == 'balanced_accuracy'
+    assert manifest['threshold_metrics_oof']['precision'] >= .6
+    assert manifest['selection_metric'] == 'precision_recall_target_then_precision_floor_f0_5'
+    assert manifest['f_beta'] == .5
+
+
+def test_target_met_models_keep_balanced_accuracy_priority(monkeypatch):
+    from caseweave_ops.models import Fitted
+    y = np.r_[np.ones(200), np.zeros(1000)].astype(int)
+    x = np.arange(len(y))[:, None].astype(float)
+    class FakeScore:
+        def __init__(self, name): self.name = name
+        def decision_function(self, values):
+            ids = values[:, 0].astype(int)
+            # A 查准更高；B 满足双95目标且兼顾负类后整体更好。
+            positive = ids < 190 if self.name == 'dense_lr' else ids < 208
+            return np.where(positive, .9, .1)
+    def fit(candidate, *args, **kwargs):
+        return Fitted(candidate.name, 'dense', FakeScore(candidate.name), None, .001)
+    monkeypatch.setattr(models, '_fit', fit)
+    selected, manifest = select_group_crossfit({'dense': x}, y, np.arange(len(y)).astype(str),
+        methods=['dense_lr', 'dense_svm'], fusion='single')
+    left, right = manifest['models']
+    assert left['feasible_on_selection'] and right['feasible_on_selection']
+    assert left['f0_5'] > right['f0_5']
+    assert selected.name == 'dense_svm'
 
 
 def test_group_closure_is_transitive_and_roles_do_not_depend_on_page_order():

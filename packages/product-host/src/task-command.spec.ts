@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest'
+import { DEFAULT_ONLINE_MODELS } from '@retrieval-agent/contracts'
 import { parseTaskCommand } from './tasks.js'
 
 it('admits explicit no-feedback execution only on the query command', () => {
@@ -13,18 +14,25 @@ it('admits explicit no-feedback execution only on the query command', () => {
   expect(() => parseTaskCommand({ operationId: 'bad-2', kind: 'resume', execution })).toThrow()
   expect(parseTaskCommand({ operationId: 'legacy-1', kind: 'query', text: '副卡' }).command)
     .toMatchObject({ kind: 'query', text: '副卡', execution: { onlineLearning: true, onlineFusion: 'selective',
-      onlineModels: ['dense_lr', 'dense_svm', 'dense_mlp', 'dense_hgb', 'feedback_margin', 'relation_logistic', 'dense_ridge', 'dense_rbf_svm', 'dense_extra_trees', 'dense_gaussian_nb', 'dense_knn', 'text_lr', 'text_svm'] } })
+      onlineModels: [...DEFAULT_ONLINE_MODELS], onlineSampling: 'ranked_top128' } })
 })
 
 
 it('persists explicit online bank and rejects unknown, duplicated, empty or offline model settings', () => {
   const execution = { onlineLearning: true, semanticMethod: 'auto', onlineFusion: 'selective',
-    onlineModels: ['dense_lr', 'relation_logistic'] }
+    onlineModels: ['dense_lr', 'joint_lr'], onlineSampling: 'ranked_top128' }
   expect(parseTaskCommand({ operationId: 'online-bank', kind: 'query', text: '合成查询', execution }).command)
     .toEqual({ kind: 'query', text: '合成查询', execution })
+  const diverse = { ...execution, onlineSampling: 'stratified_diverse' }
+  expect(parseTaskCommand({ operationId: 'existing-diverse', kind: 'query', text: '合成查询', execution: diverse }).command)
+    .toEqual({ kind: 'query', text: '合成查询', execution: diverse })
+  const single = { ...execution, onlineFusion: 'single', onlineModels: ['joint_lr'] }
+  expect(parseTaskCommand({ operationId: 'existing-single', kind: 'query', text: '合成查询', execution: single }).command)
+    .toEqual({ kind: 'query', text: '合成查询', execution: single })
   for (const bad of [
     { ...execution, onlineModels: [] }, { ...execution, onlineModels: ['dense_lr', 'dense_lr'] },
     { ...execution, onlineModels: ['unregistered'] }, { ...execution, onlineFusion: 'average_all' },
+    { ...execution, onlineSampling: 'whole_corpus' },
     { ...execution, onlineLearning: false }, { ...execution, semanticMethod: 'direct_teacher' },
   ]) expect(() => parseTaskCommand({ operationId: 'bad-bank', kind: 'query', text: '合成查询', execution: bad })).toThrow()
 })

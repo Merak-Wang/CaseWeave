@@ -17,7 +17,8 @@ from .types import digest
 GROUP_PROJECTION = "business-and-canonical-nfkc-whitespace-v1"
 DEFAULT_METHODS = ("dense_lr", "dense_svm", "dense_mlp", "dense_hgb",
                    "feedback_margin", "relation_logistic", "dense_ridge", "dense_rbf_svm",
-                   "dense_extra_trees", "dense_gaussian_nb", "dense_knn", "text_lr", "text_svm")
+                   "dense_extra_trees", "dense_gaussian_nb", "dense_knn", "text_lr", "text_svm", "joint_lr")
+LINEAR_METHODS = ('dense_lr', 'text_svm', 'joint_lr')
 
 
 def validate_group_metadata(value):
@@ -89,6 +90,7 @@ def binary_report(y, predictions):
         "tp": tp, "fp": fp, "fn": fn, "tn": tn,
         "specificity": specificity, "balanced_accuracy": balanced_accuracy,
         "f1": 2*precision*recall/max(1e-12, precision+recall),
+        "f0_5": 1.25*precision*recall/max(1e-12, .25*precision+recall),
         "coverage": float(valid.sum()/max(1, known.sum())),
         "reference_coverage": float(known.sum()/max(1, len(y))),
         "agreement": float(np.count_nonzero(valid & (y == predictions))/max(1, valid.sum())),
@@ -132,6 +134,8 @@ class FrozenSelection:
         return "+".join(model.name for model in self.members)
 
     def score_views(self, views):
+        if any(model.view == 'joint' for model in self.members) and 'joint' not in views:
+            views = {**views, 'joint': model_api.joint_view(views)}
         if len(self.members) == 1:
             return self.members[0].score(views[self.members[0].view])
         votes = [_votes(model.score(views[model.view]), threshold)
@@ -169,6 +173,8 @@ def select_group_crossfit(views, y, groups, *, methods=None, fusion="selective",
     """
     if fusion not in {"single", "selective"}:
         raise ValueError("Unknown online fusion mode")
+    if 'text' in views and 'joint' not in views:
+        views = {**views, 'joint': model_api.joint_view(views)}
     y, groups = np.asarray(y), np.asarray(groups, dtype=object)
     if not np.isin(y, [0, 1]).all():
         raise ValueError("Group cross-fit labels must be determinate binary")
@@ -179,7 +185,7 @@ def select_group_crossfit(views, y, groups, *, methods=None, fusion="selective",
         raise ValueError("Conflicting teacher labels inside an alias group")
     splits = model_api.group_folds(y, groups, seed=seed)
     candidates = model_api.model_bank(sparse="sparse" in views, seed=seed,
-        methods=list(methods or [name for name in DEFAULT_METHODS if "text" in views or not name.startswith("text_")]))
+        methods=list(methods or [name for name in DEFAULT_METHODS if "text" in views or not (name.startswith("text_") or name == 'joint_lr')]))
     if any(candidate.view not in views for candidate in candidates):
         raise ValueError("Requested model feature view is unavailable")
     started = perf_counter()
@@ -221,7 +227,12 @@ def select_group_crossfit(views, y, groups, *, methods=None, fusion="selective",
     if not board:
         raise SelectionUnavailable(failures, fit_count, perf_counter()-started)
     def rank(row):
-        return (row["balanced_accuracy"], row["precision"], row["f1"], row["coverage"], -row["fit_seconds"])
+        target = row['precision'] >= precision_target and row['recall'] >= recall_target
+        floor = row['precision'] >= .60
+        if target or not floor:
+            return (target, floor, row['balanced_accuracy'], row['precision'], row['recall'], -row['fit_seconds'])
+        # 与阈值选择共用 F0.5 排序，避免模型层再次退回最大召回。
+        return (target, floor, row['f0_5'], row['precision'], row['recall'], row['balanced_accuracy'], -row['fit_seconds'])
     best = max(board, key=rank)
     chosen, thresholds = [best["name"]], [best["threshold"]]
     selected_report = best["threshold_metrics_oof"]
@@ -240,12 +251,13 @@ def select_group_crossfit(views, y, groups, *, methods=None, fusion="selective",
             pair_board.append({"members": [row['name'] for row in cohort],
                 "disagreement": disagreement, **report})
             # 分歧也产生二分类票；只有训练OOF改善才能选融合。
-            if report["balanced_accuracy"] > selected_report["balanced_accuracy"] + 1e-9 and report["precision"] >= selected_report["precision"]:
+            if report['precision'] >= .60 and rank({**report, 'fit_seconds': 0}) > rank({**selected_report, 'fit_seconds': 0}):
                 chosen, thresholds = [row['name'] for row in cohort], [row['threshold'] for row in cohort]
                 selected_report, reason = report, "oof_diversity_gain"
     manifest = {"protocol": "online-group-crossfit-v1", "group_projection": GROUP_PROJECTION,
         "fusion": fusion, "methods": [candidate.name for candidate in candidates],
-        "selection_metric": "balanced_accuracy", "threshold_tiebreak": "precision_then_recall",
+        "selection_metric": "precision_recall_target_then_precision_floor_f0_5", "f_beta": .5,
+        "threshold_tiebreak": "target_balanced_accuracy_then_precision;fallback_precision_then_recall", "precision_floor": .60,
         "members": chosen, "member_thresholds": thresholds, "selection_reason": reason,
         "vote_rule": "binary_majority_oof_best_tiebreak", "confidence_basis": "winning_vote_fraction_uncalibrated",
         "single_baseline": {"name": best["name"], "threshold": best["threshold"],

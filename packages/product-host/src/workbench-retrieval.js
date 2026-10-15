@@ -21,6 +21,7 @@ export const frozenMethodLabel = execution => ({ dual_description_margin: '双�
 export const hasUnmeasuredCandidates = execution => candidateMethods.includes(execution?.semanticMethod)
 export const executionDescription = execution => !execution ? '' : usesFeedbackLearning(execution)
   ? '本任务：在线学习（模型伪标签）' + (['single', 'selective'].includes(execution.onlineFusion) ? ' · ' + (execution.onlineFusion === 'selective' ? '二分类多数投票' : '最佳单模型') : '')
+    + ({stratified_diverse: ' · 分层多样性', ranked_top128: ' · 优先高排名'}[execution.onlineSampling] ?? '')
     + (execution.onlineModels?.length ? ' · ' + execution.onlineModels.length + ' 个候选模型' : '') + '。'
   : `本任务：${frozenMethodLabel(execution)}。`
 export const hasFinalTeacherReference = q => q?.reference_basis === 'teacher' && q.used_for_selection === false && q.raw_before_label_override === true
@@ -39,7 +40,7 @@ const learningStates = {
   scanning: '正在读取召回并集特征', ranked_sampling: '正在为召回并集排序样本', diversity_sampling: '正在进行 K-means++ 多样性采样', training: '正在训练候选模型',
   selecting: '正在比较模型', predicting: '正在预测', auditing: '正在抽样判断',
   sampling: '正在抽样判断', quality_passed: '模型选择完成', quality_not_met: '未完成：质量未达标',
-  quality_fallback: '模型选择完成', model_unknown: '未完成：质量未达标',
+  quality_fallback: '模型选择完成', model_unknown: '不知道：选择依据不足或查准率未达60%',
   needs_coverage: '等待补充样本', needs_information: '等待工单证据', needs_selection_coverage: '等待选择样本',
 }
 export function retrievalSummary(snapshot) {
@@ -51,7 +52,7 @@ export function retrievalSummary(snapshot) {
   return { plan: process?.plan, execution: process?.execution, learning, accepted, quality, unmeasured,
     filterActivity: process?.filterActivity,
     status: process?.filterActivity === 'failed' ? '语义筛选失败'
-      : learning?.status === 'model_unknown' ? unmeasured ? '算法判定已保存' : '未完成：质量未达标'
+      : learning?.status === 'model_unknown' ? unmeasured ? '算法判定已保存' : '不知道：选择依据不足或查准率未达60%'
         : accepted ? '语义筛选已完成'
           : learningStates[learning?.status] ?? '准备语义筛选',
     method: !usesFeedbackLearning(process?.execution) ? frozenMethodLabel(process?.execution) : accepted ? '语义筛选结果' : '语义筛选',
@@ -75,7 +76,7 @@ function renderLearningDetails(learning, failed, execution) {
     return [el('p', `${frozenMethodLabel(execution)}；不使用教师伪标签训练分类器。`, 'muted'),
       ...(unmeasured ? [el('p', '直接交付该算法判定为相关的工单和 XLSX；质量未人工评测。', 'notice')] : []),
       ...(typeof l.fitCount === 'number' ? [el('p', `本任务拟合次数 ${l.fitCount}`, 'muted')] : []),
-      el('p', `判断请求 ${l.samplingRequests ?? 0} 次；教师样本 ${l.sampledCount ?? 0} 条（最多排序前 128 条，自动重试另计）`, 'muted'), ...(failed ? [el('p', '执行中断', 'notice')] : [])]
+      el('p', `模型请求 ${l.samplingRequests ?? 0} 次；教师样本 ${l.sampledCount ?? 0} 条（最多128次独立判断，自动重试另计）`, 'muted'), ...(failed ? [el('p', '执行中断', 'notice')] : [])]
   }
   const l = learning ?? {}, pipeline = el('ol', '', 'learning-stages')
   pipeline.setAttribute('aria-label', '学习式筛选阶段')
@@ -95,7 +96,7 @@ function renderLearningDetails(learning, failed, execution) {
     }
     table.append(body); nodes.push(table)
   }
-  nodes.push(el('p', `判断请求 ${l.samplingRequests ?? 0} 次；教师样本 ${l.sampledCount ?? 0} 条（最多排序前 128 条，自动重试另计）`, 'muted'))
+  nodes.push(el('p', `模型请求 ${l.samplingRequests ?? 0} 次；教师样本 ${l.sampledCount ?? 0} 条（最多128次独立判断，自动重试另计）`, 'muted'))
   if (failed) nodes.push(el('p', l.status ? '执行中断' : '筛选算子失败', 'notice'))
   if (l.precisionTarget && l.recallTarget) nodes.push(el('p', `${l.quality?.basis === 'training_group_crossfit' ? '训练组交叉拟合教师一致率目标' : '模型选择集目标'}：查准率 ≥ ${qualityValue(l.precisionTarget)}，召回率 ≥ ${qualityValue(l.recallTarget)}。`, 'muted'))
   if (l.quality?.basis === 'training_group_crossfit') nodes.push(el('p', trainingCrossfitNote, 'muted'))

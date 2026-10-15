@@ -1,12 +1,12 @@
-"""固定排名前128教师伪标签，训练内OOF择优后全量拟合并预测召回并集。"""
+"""并集内128条覆盖选样，训练内OOF选模后仅发布依据充分的预测。"""
 from __future__ import annotations
 import asyncio
 from dataclasses import asdict
 from time import perf_counter
 import numpy as np
 from scipy.sparse import vstack
-from .features import FeatureBlock, PrioritySample, decode_block
-from .ensemble import (DEFAULT_METHODS, GROUP_PROJECTION, group_closure,
+from .features import FeatureBlock, PrioritySample, decode_block, stratified_diverse_sample
+from .ensemble import (DEFAULT_METHODS, LINEAR_METHODS, GROUP_PROJECTION, group_closure,
                        validate_group_metadata, select_group_crossfit, binary_report)
 from .types import Record, ProtocolError, digest
 
@@ -28,7 +28,8 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
     batch_size = 8
     cfg = {"block_size": 1024, "pool_size": 4096, "sample_size": 128, "selection_size": 128,
         "workers": 1, "precision_target": .95, "recall_target": .95, "seed": 0, "concurrency": 4,
-        "methods": list(DEFAULT_METHODS), "fusion": "single", "exploration_fraction": 0.,
+        "methods": list(DEFAULT_METHODS), "fusion": "selective", "exploration_fraction": 0.,
+        "sampling_strategy": "ranked_top128",
         "fit_budget_seconds": 30.}
     supplied = dict(options or {})
     for obsolete in ("proposal", "clusters", "accept_error", "reject_error", "validation_size", "delta"):
@@ -53,8 +54,10 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
         raise ValueError("Invalid online fit budget")
     # Validate names before any feature, teacher or training operation.
     if not isinstance(cfg["methods"], list) or not cfg["methods"] or len(set(cfg["methods"])) != len(cfg["methods"]) or any(
-            name not in {*DEFAULT_METHODS, "sparse_svm"} for name in cfg["methods"]):
+            name not in {*DEFAULT_METHODS, "sparse_svm", "joint_lr"} for name in cfg["methods"]):
         raise ValueError("Invalid online methods")
+    if cfg['sampling_strategy'] not in {'ranked_top128', 'stratified_diverse'}:
+        raise ValueError('Invalid sampling strategy')
     cfg["block_size"] = min(1024, cfg["block_size"])
     call, key = runtime.resources, runtime.predicate_key(instruction)
     scoped_key = digest(["recall-scope-v1", recall_scope_key, key]) if recall_scope_key else key
@@ -73,7 +76,7 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
         "corpus_records": 0, "scope_records": 0, "feature_records": 0, "missing_features": 0,
         "scan_passes": 0, "fit_count": 0, "training_records": 0, "selection_records": 0,
         "final_holdout_records": 0, "scan_seconds": 0., "fit_seconds": 0., "predict_seconds": 0.,
-        "sampling_method": "ranked_top128", "exploration_fraction": cfg["exploration_fraction"],
+        "sampling_method": cfg['sampling_strategy'], "exploration_fraction": cfg["exploration_fraction"],
         "global_semantic_recall": "not_established",
         "task_semantics": "recall_candidate_scope" if recall_scope_key else "full_authorized_scope",
         **({"recall_scope_key": recall_scope_key} if recall_scope_key else {})}
@@ -196,9 +199,10 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
                     else:
                         unresolved_evidence.pop(ident, None)
                     yield {"type": "decision", "value": asdict(decision)}
-            await update("sampling", sampling_phase="ranked_top128")
+            await update("sampling", sampling_phase=cfg['sampling_strategy'])
     try:
         ranked = PrioritySample(cfg["pool_size"])
+        sampling_blocks = []
         await update("scanning")
         async for block in scan(discovery=True):
             group_items = block.row_groups or tuple({} for _ in block.ids)
@@ -207,6 +211,8 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
                 raise ProtocolError("Ranked sampling requires cosine/ngram scores")
             scores = block.scores
             ranked.add(block.ids, np.where(np.isfinite(scores), scores, -np.inf))
+            if cfg['sampling_strategy'] == 'stratified_diverse':
+                sampling_blocks.append((block.ids.copy(), block.dense.copy(), scores.copy()))
             stats["feature_records"] += int(block.available.sum())
         ids = sorted(seen_ids)
         stats.update(corpus_records=len(ids), scope_records=len(ids), missing_features=len(ids)-stats["feature_records"])
@@ -237,11 +243,17 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
             await update("resuming_discovery", reused_label_records=len(labels))
         if not ids:
             raise ProtocolError("Empty authorized recall scope")
-        # 排序前128工单只标一次；监督目标仅来自教师二分类伪标签。
+        # 排名分层覆盖并集；每条只标一次，训练目标仅来自教师标签。
         target_ids = pool_order[:128]
+        if sampling_blocks:
+            target_ids = stratified_diverse_sample(
+                np.concatenate([p[0] for p in sampling_blocks]),
+                np.concatenate([p[1] for p in sampling_blocks]),
+                np.concatenate([p[2] for p in sampling_blocks]), 128, seed=cfg['seed']).tolist()
+            sampling_blocks.clear()
         window = [i for i in target_ids if labels.get(i, -1) < 0]
         stats["exploration_records"] = 0
-        await update("ranked_sampling", sampling_phase="ranked_top128")
+        await update("ranked_sampling", sampling_phase=cfg['sampling_strategy'])
         async for event in ask(window):
             yield event
         train_ids = [i for i in target_ids if labels.get(i, -1) >= 0]
@@ -260,7 +272,8 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
         views = {name: x[train.available] for name, x in train.views.items()}
         methods = cfg["methods"]
         if "methods" not in supplied and "text" not in views:
-            methods = [name for name in methods if not name.startswith("text_")]
+            methods = [name for name in methods if not name.startswith("text_") and name != 'joint_lr']
+        stats['candidate_models'] = list(methods)
         stats.update(training_sampled_records=len(train_ids), training_records=len(y),
             training_ids=available_ids.tolist())
         cohort = digest([groups.tolist(), y.tolist()])
@@ -293,7 +306,12 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
                 fit_count=getattr(exc, "fit_count", 0))
             if selected is None or selection_manifest.get("training_cohort") != cohort or selection_manifest.get("feature_cohort") != feature_cohort:
                 selected, selection_manifest = None, {}
-                raise ProtocolError("No candidate completed teacher-label model fitting") from exc
+                quality = {'basis': 'training_group_crossfit', 'reference_basis': 'teacher',
+                    'business_accuracy': 'not_measured', 'acceptance': 'unknown',
+                    'reason': 'insufficient_selection_evidence', 'precision_floor': .60}
+                stats['quality'] = quality
+                await update('model_unknown', next_action='return_confirmed_results', complete_scope_coverage=False)
+                return
             stats["selection_reason"] = "validated_same_cohort_snapshot_fallback"
         stats.update(fit_seconds=perf_counter()-started, fit_count=selection_manifest["fit_count"],
             selected_model=selected.name, selected_members=list(selection_manifest["members"]), threshold=selected.threshold,
@@ -305,14 +323,21 @@ async def online_group_filter(runtime, instruction, *, options=None, batch_size=
         point = selection_manifest["threshold_metrics_oof"]
         feasible = point["precision"] >= cfg["precision_target"] and point["recall"] >= cfg["recall_target"]
         quality = {"basis": "teacher_single_class" if len(set(y)) == 1 else "training_group_crossfit", "reference_basis": "teacher", "business_accuracy": "not_measured",
-            **{name: point[name] for name in ("precision", "recall", "f1", "coverage", "specificity", "balanced_accuracy", "tp", "fp", "fn", "tn")},
-            "selection_metric": "balanced_accuracy",
+            'precision_target': cfg['precision_target'], 'recall_target': cfg['recall_target'],
+            **{name: point[name] for name in ("precision", "recall", "f1", "f0_5", "coverage", "specificity", "balanced_accuracy", "tp", "fp", "fn", "tn")},
+            "selection_metric": "precision_recall_target_then_precision_floor_f0_5", "f_beta": .5,
             "selection_records": point["reference_records"], "threshold_metrics_oof": point}
         if len(set(y)) == 1:
             quality["training_fit_metrics"] = quality.pop("threshold_metrics_oof")
             quality["limitations"] = "Single teacher class cannot teach a decision boundary; constant label baseline"
             stats.update(quality_basis="teacher_single_class", training_fit_metrics=stats.pop("threshold_metrics_oof"))
         stats.update(quality=quality)
+        accepted = len(set(y)) == 2 and point['precision'] >= .60 and point['coverage'] == 1.
+        quality['acceptance'] = ('target' if feasible else 'fallback') if accepted else 'unknown'
+        quality['precision_floor'] = .60
+        if not accepted:
+            await update('model_unknown', next_action='return_confirmed_results', complete_scope_coverage=False)
+            return
         await update("predicting", predicted_records=0)
         model_id = digest([checkpoint_key, cohort, feature_cohort, selection_manifest["members"], selection_manifest["member_thresholds"]])
         await call("predictions.begin", {"model_id": model_id, "predicate_key": key, "feature_id": stats["feature_id"],

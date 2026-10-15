@@ -13,15 +13,15 @@ The keyword branch enumerates all literal hits. `learned` is the same implementa
 `active` is a thin configuration alias for existing callers. Missing numerical resources
 fail explicitly. They never select all-row LLM fallback.
 
-Aligned IDs carry float32/optional CSR blocks and optional snapshot-bound canonical title/summary texts. Index preparation normalizes document vectors once. Rank the complete keyword-OR and cosine>=0.75 recall union by original-query n-gram coverage and cosine, then label exactly the first128 tickets (or the entire union if smaller). Do not replace them with random exploration, extend the sample or request a second positive review.
+Aligned IDs carry numerical blocks and optional snapshot-bound canonical title/summary texts. The recall union contains every keyword-OR hit and cosine>=0.65 semantic hit. Default `ranked_top128` selects the first 128 tickets by the actual combined n-gram and cosine ranking, or all tickets when the union is smaller. Optional `stratified_diverse` samples up to 128 tickets across eight rank strata, choosing vector-diverse records within each stratum with a fixed seed and stable ID ties. The diverse sampler currently collects union vectors in memory; capacity beyond tested datasets remains unverified.
 
-S2 always submits batches of eight with only ref, yes/no and self-reported confidence. No token logprobs, label rotations, priors or confidence calibration run. The valid teacher pseudo-label is y; document embeddings and canonical texts are X. Ranking similarity is neither the label nor a classification feature. Fit eleven vector candidates plus text LR and text LinearSVC on the same labels with balanced training weights. Text candidates use character 2–4gram TF-IDF with sublinear TF and at most 20000 features; each fold learns vocabulary and IDF only from its training texts. Missing optional texts disable text candidates for default callers; explicitly requested text candidates require that view.
+S2 uses compact batches of up to eight binary decisions with self-reported confidence. The default bank contains the original 13 models plus `joint_lr` (14 candidates), with `fusion=selective`: it chooses between the best single model and a selected ensemble of at most three models, rather than voting across all 14. All candidates reuse the same at most 128 teacher labels. Explicit options retain `fusion=single`, the `dense_lr`/`text_svm`/`joint_lr` subset, and stratified sampling. Character TF-IDF (2–4 grams, max 20000 features) and joint-vector scaling are fitted only within each training fold. Ranking similarity is neither the label nor a classification feature.
 
-Choose finite OOF thresholds by Balanced Accuracy, breaking ties by precision then recall. Rank models by Balanced Accuracy, precision, F1, coverage and fit time. A fusion of up to three binary voters must improve OOF Balanced Accuracy without reducing the current selection's precision. Refit selected models on all valid128 labels; even vote ties use the best OOF member. Precision/recall targets report feasibility only. Report confusion counts and specificity; Balanced Accuracy is null for a single teacher class. No fixed final-reference or precision gate blocks publication. One-class samples use a real-label constant fallback, without fabricating another class.
+Select OOF thresholds and models by the original precision/recall targets first. If infeasible, maximize recall among candidates with precision >=0.60, then break ties using Balanced Accuracy and the recorded secondary metrics. Refit selected models on valid training labels. Below the precision floor, with one teacher class, or with insufficient cross-fit evidence, publish no learned full-union prediction: return unknown/incomplete and retain confirmed teacher results. OOF metrics are teacher agreement, not independent business accuracy.
 
 With learning disabled, the chosen no-feedback operator directly classifies the full recall union without training labels. Teacher yes labels and final model yes labels form the ordinary result/XLSX collection, without human confirmation. Preserve teacher/model origin; do not fabricate a per-row teacher receipt. Confidence and empirical OOF metrics are not calibrated business accuracy.
 
-Transport, parsing and feature failures are execution errors, never no labels or a third semantic class. Resumes reuse completed fixed-sample labels; all physical requests and retries count toward usage, QPM, TPM and time. Technical retries do not expand the128-ticket sample.
+Transport, parsing and feature failures remain execution errors, never negative labels. Initial and review decisions share at most 128 independent judgments per query generation; the current implementation uses one sample round and no additional audit. Resume reuses completed judgments. Actual requests and retries are metered separately; retries do not consume another independent judgment.
 
 The production MySQL result store saves accepted IDs in batches; state carries one
 model/quality descriptor. Paging, reports and downloads use that descriptor, not the
@@ -61,13 +61,9 @@ From the repository root:
 ```sh
 pnpm operators:test
 pnpm operators:serve --stdio
-uv run --frozen --inexact --project python/semantic-operators python python/semantic-operators/examples/benchmark_learning.py --size 100000
 ```
 
-The benchmark exercises the actual default numerical route using memmap and an
-explicit scripted teacher. It does not measure actual LLM quality, Chinese business labels, MySQL I/O or 40M capacity.
-Unknown measurements remain null. Full learning runs through the existing Host's
-numerical Provider.
+Full learning runs through the existing Host's numerical Provider.
 
 The Host runs `python -m caseweave_ops.server --stdio --state <path>` as its persistent
 NDJSON worker. There is no standalone WebSocket operators service.
